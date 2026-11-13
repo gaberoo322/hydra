@@ -35,7 +35,6 @@ reap_ghrefs.py precedent for a shared leaf.
 
 from __future__ import annotations
 
-import json
 import re
 import sys
 import time
@@ -54,24 +53,23 @@ if _SCRIPT_DIR not in sys.path:
 from reap_ghrefs import (
     REPO,
     TARGET_REPO,
-    NOPR_CAP_COMMENT_MARKER,
     _anchor_issue_is_closed,
-    _count_prior_nopr_stall_comments,
     _dev_orch_pr_closes_anchor,
     _dev_orch_pr_exists_for_anchor,
     _gh_run,
+    _lifecycle_advance,
+    _pr_refs_closing_pr_number,
 )
 import reap_state
 import run_ledger
 from reap_state import _append_log
 
-# Issue #4808 INV-8: the DURABLE cap on no-PR resumes per issue — enforced
-# here at stall time (where the cycle restarts), not in decide.py, so it
-# survives restarts and state rebuilds by construction (the count is the
-# issue's own comment history, not a state key). 2 means: two no-PR stalls
-# already recorded → the third hands the anchor to the operator
-# (`ready-for-human`) instead of queueing another resume.
-DEV_NOPR_RESUME_CAP = 2
+# Issue #5318 INV-3: the durable no-PR resume cap (#4808) is NOT enforced here
+# any more. `dev-nopr-resume` is a Live Cap in the lifecycle seam: it counts the
+# `claim-closed outcome=no-pr` journal entries reap's claim release writes
+# (reap.py releases BEFORE this handler runs, INV-4) and parks the issue at the
+# NEXT resume claim, in shadow and enforce alike. This handler therefore keeps no
+# comment-marker counter, writes no `ready-for-human` and no `parked` of its own.
 
 # The `needs-dev-resume` label already exists on gaberoo322/hydra (created
 # for this issue) — reap never attempts to create it, only to apply it.
@@ -86,6 +84,7 @@ def _handle_dev_orch_stall(
     task_id: str,
     worktree_branch: str | None,
     pr_list_json: str | None,
+    dispatch_id: str | None = None,
 ) -> None:
     """Detect + relabel a dev_orch completion that opened no PR (issue #3866).
 
@@ -169,80 +168,29 @@ def _handle_dev_orch_stall(
         _append_log(line)
         return
 
-    # Issue #4808 INV-8/9: the durable no-PR resume cap. Count this issue's
-    # prior no-PR stall comments (ONE `gh issue view --json comments` read,
-    # only on this already-narrow confirmed-stall branch). An UNREADABLE
-    # count (None — the helper already WARNed naming #4808) falls back to
-    # today's behaviour below: never escalate to ready-for-human on unknown
-    # data. At/over the cap this is the third no-PR stall — hand the anchor
-    # to the operator instead of queueing another resume.
-    prior_stalls = _count_prior_nopr_stall_comments(issue_num)
-    if prior_stalls is not None and prior_stalls >= DEV_NOPR_RESUME_CAP:
-        cap_edit = _gh_run(
-            "issue", "edit", issue_num, "--repo", REPO,
-            "--remove-label", "ready-for-agent",
-            "--remove-label", "in-progress",
-            "--remove-label", DEV_RESUME_LABEL,
-            "--add-label", "ready-for-human",
-            context=f"#{issue_num} #4808 no-PR resume cap relabel",
-        )
-        cap_relabelled = cap_edit is not None and cap_edit.returncode == 0
-        if cap_relabelled:
-            branch_note = f"\n**Branch:** `{worktree_branch}`" if worktree_branch else ""
-            _gh_run(
-                "issue", "comment", issue_num, "--repo", REPO, "--body",
-                f"> *{NOPR_CAP_COMMENT_MARKER} (issue #4808)*\n\n"
-                f"This anchor has now stalled {prior_stalls + 1} times with no PR "
-                f"({prior_stalls} prior no-PR stall(s) are recorded in this "
-                f"issue's comments).{branch_note}\n\n"
-                f"Relabelled `ready-for-human` — the autopilot will no longer "
-                f"queue a resume for it; an operator should decide whether the "
-                f"work continues, is re-scoped, or is abandoned.",
-                context=f"#{issue_num} #4808 no-PR resume cap comment",
-            )
-            # Drop any queued resume record so the #3866 drain cannot
-            # dispatch an anchor that was just handed to the operator.
-            pend = s.get("dev_resume_pending")
-            if isinstance(pend, list):
-                s["dev_resume_pending"] = [
-                    e for e in pend
-                    if not (isinstance(e, dict) and e.get("anchor") == anchor_ref)
-                ]
-                reap_state.persist_state(s)
-            line = (
-                f"dev_stall_no_pr_capped anchor={anchor_ref} task_id={task_id} "
-                f"branch={worktree_branch or ''} prior_stalls={prior_stalls} "
-                f"relabelled=True"
-            )
-            print(f"[autopilot] {line}")
-            _append_log(line)
-            return
-        # Relabel failed (or gh unreachable): do NOT post the cap comment —
-        # it is the count terminator, so posting it would reset the count on
-        # a still-needs-dev-resume issue. Warn and fall through to the
-        # ordinary stall path.
-        print(
-            f"[autopilot] reap: WARN failed to relabel issue #{issue_num} "
-            f"to ready-for-human at the no-PR resume cap (non-fatal); "
-            f"falling through to the ordinary stall path (#4808): "
-            f"{cap_edit.stderr.strip() if cap_edit is not None else 'gh unreachable'}",
-            file=sys.stderr,
-        )
-
-    edit = _gh_run(
-        "issue", "edit", issue_num, "--repo", REPO,
-        "--remove-label", "ready-for-agent",
-        "--remove-label", "in-progress",
-        "--add-label", DEV_RESUME_LABEL,
-        context=f"#{issue_num} needs-dev-resume relabel",
+    # Issue #5318: the move goes through the lifecycle seam with a compare-and-set
+    # premise (`--from in-progress`), so a stale reap never overwrites a state the
+    # issue has since moved to. A refusal (any code, `parked:*` included) is logged
+    # by `_lifecycle_advance` and the issue is left alone: no direct-write fallback.
+    evidence = {"dispatch": dispatch_id} if dispatch_id else None
+    relabelled = _lifecycle_advance(
+        issue_num, DEV_RESUME_LABEL, "in-progress",
+        context=f"#{issue_num} needs-dev-resume advance",
+        evidence=evidence,
     )
-    relabelled = edit is not None and edit.returncode == 0
-    if edit is not None and not relabelled:
-        print(
-            f"[autopilot] reap: WARN failed to relabel issue #{issue_num} "
-            f"to {DEV_RESUME_LABEL} (non-fatal): {edit.stderr.strip()}",
-            file=sys.stderr,
+
+    if not relabelled:
+        # Refused advance (from-mismatch, an already `parked:*` issue,
+        # write-failed; the dev-nopr-resume Live Cap parks at the NEXT resume
+        # claim, not on this edge): the issue did NOT move, so posting
+        # "Relabelled" or queueing a resume would be false (QA #5433 round 1).
+        line = (
+            f"dev_stall_no_pr_advance_refused anchor={anchor_ref} "
+            f"task_id={task_id} branch={worktree_branch or ''}"
         )
+        print(f"[autopilot] {line}")
+        _append_log(line)
+        return
 
     branch_note = f"\n**Branch:** `{worktree_branch}`" if worktree_branch else ""
     _gh_run(
@@ -344,59 +292,22 @@ def _handle_dev_orch_needs_qa_promotion(
     if issue_num is None:
         return
 
-    view = _gh_run(
-        "issue", "view", issue_num, "--repo", REPO, "--json", "labels",
-        context=f"#{issue_num} needs-qa promotion labels view",
+    # Issue #5318 INV-5/INV-10: one seam advance replaces the pre-edit label read
+    # and the three-source relabel. `--from in-progress` is the compare-and-set
+    # (the dispatcher claims `ready-for-agent`/`needs-dev-resume` into
+    # `in-progress` before any worker runs, so those are legacy sources the seam
+    # now refuses `from-mismatch`); a repeated reap on an anchor that already
+    # moved on is refused the same way, which keeps the step idempotent.
+    evidence = None
+    if pr_list_json is not None:
+        pr_number = _pr_refs_closing_pr_number(pr_list_json, int(issue_num))
+        if pr_number is not None:
+            evidence = {"pr": str(pr_number)}
+    relabelled = _lifecycle_advance(
+        issue_num, "needs-qa", "in-progress",
+        context=f"#{issue_num} needs-qa promotion advance",
+        evidence=evidence,
     )
-    if view is None:
-        return
-    if view.returncode != 0:
-        print(
-            f"[autopilot] reap: WARN gh issue view exited {view.returncode} "
-            f"for #{issue_num} needs-qa promotion; no relabel this reap",
-            file=sys.stderr,
-        )
-        return
-    try:
-        current_labels = {
-            entry.get("name")
-            for entry in json.loads(view.stdout).get("labels", [])
-            if isinstance(entry, dict)
-        }
-    except Exception as exc:  # noqa: BLE001 — best-effort, never abort the reap
-        print(
-            f"[autopilot] reap: WARN labels parse failed for #{issue_num} "
-            f"needs-qa promotion (non-fatal): {exc}",
-            file=sys.stderr,
-        )
-        return
-    if (
-        "ready-for-agent" not in current_labels
-        and "in-progress" not in current_labels
-        and DEV_RESUME_LABEL not in current_labels
-    ):
-        # Already advanced (by this same check on a prior reap, by a human,
-        # or never was ready-for-agent/in-progress/needs-dev-resume to begin
-        # with) — idempotent no-op.
-        return
-
-    edit = _gh_run(
-        "issue", "edit", issue_num, "--repo", REPO,
-        "--remove-label", "ready-for-agent",
-        "--remove-label", "in-progress",
-        "--remove-label", DEV_RESUME_LABEL,
-        "--add-label", "needs-qa",
-        context=f"#{issue_num} needs-qa promotion relabel",
-    )
-    if edit is None:
-        return
-    relabelled = edit.returncode == 0
-    if not relabelled:
-        print(
-            f"[autopilot] reap: WARN failed to relabel issue #{issue_num} "
-            f"to needs-qa (non-fatal): {edit.stderr.strip()}",
-            file=sys.stderr,
-        )
 
     line = f"dev_pr_closes_anchor anchor={anchor_ref} relabelled={relabelled}"
     print(f"[autopilot] {line}")

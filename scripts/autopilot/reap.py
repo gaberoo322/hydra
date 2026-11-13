@@ -142,6 +142,7 @@ from reap_ghrefs import (
     _fetch_dev_orch_pr_list_json,
     _fetch_pr_list_json,
     _gh_run,
+    _lifecycle_argv,
 )
 
 # Issue #4398: the three dev_orch/dev_target stall-recovery handlers moved to
@@ -1572,10 +1573,9 @@ def _release_dispatch_claim(cls: str, dispatch_id: str | None, outcome: str) -> 
     seam's idempotent `{ok:true, prior:null}` and is logged, not retried."""
     if not dispatch_id or cls.endswith("_target"):
         return
-    argv = [
-        "npx", "tsx", "scripts/lifecycle.ts", "release",
-        "--dispatch", str(dispatch_id), "--outcome", outcome, "--actor", "reap",
-    ]
+    argv = _lifecycle_argv(
+        "release", "--dispatch", str(dispatch_id), "--outcome", outcome, "--actor", "reap",
+    )
     try:
         r = subprocess.run(
             argv, capture_output=True, text=True, check=False, timeout=60,
@@ -1598,11 +1598,40 @@ def _release_dispatch_claim(cls: str, dispatch_id: str | None, outcome: str) -> 
     _append_log(f"claim_release cls={cls} dispatch_id={dispatch_id} outcome={outcome} result={result}")
 
 
-def _claim_release_outcome(cls: str, pr_exists: bool | None) -> str:
+def _qa_anchor_still_needs_qa(anchor_ref: str | None) -> bool | None:
+    """Does the qa_orch anchor issue still carry `needs-qa` right now? (#5318 INV-8)
+
+    ONE `gh issue view --json labels` read through the shared `_gh_run` seam.
+    True = still awaiting review (the QA dispatch posted no verdict that moved
+    it), False = it moved on, None = unreadable / not an `issue-<N>` anchor.
+    Never raises."""
+    m = re.match(r"^issue-(\d+)$", (anchor_ref or "").strip())
+    if not m:
+        return None
+    proc = _gh_run(
+        "issue", "view", m.group(1), "--repo", REPO, "--json", "labels",
+        context=f"#{m.group(1)} qa_orch claim-outcome labels view",
+    )
+    if proc is None or proc.returncode != 0:
+        return None
+    try:
+        labels = {
+            e.get("name") for e in (json.loads(proc.stdout).get("labels") or []) if isinstance(e, dict)
+        }
+    except (ValueError, AttributeError, TypeError):  # intentional: unparseable labels payload reads as unknown (None), caller treats it as not-confirmed
+        return None
+    return "needs-qa" in labels
+
+
+def _claim_release_outcome(cls: str, pr_exists: bool | None, anchor_ref: str | None = None) -> str:
     if cls == "dev_orch":
         return "pr-opened" if pr_exists is True else ("no-pr" if pr_exists is False else "released")
     if cls == "qa_orch":
-        return "verdict-posted"
+        # #5318 INV-8: a QA dispatch that ended with the anchor STILL `needs-qa`
+        # posted no verdict that moved it: a `stall`, which the seam's qa-stall
+        # Live Cap counts. Moved on = verdict landed; unreadable = plain release.
+        still = _qa_anchor_still_needs_qa(anchor_ref)
+        return "released" if still is None else ("stall" if still else "verdict-posted")
     return "released"
 
 
@@ -2144,8 +2173,10 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
 
     # ADR-0047 D4 (#5418): release the dispatcher claim by dispatch id, after
     # the accounting writes and the hoisted PR-list fetch. Non-fatal, order-neutral.
-    if snap.slot_occupied:
-        _release_dispatch_claim(cls, snap.dispatch_id, _claim_release_outcome(cls, pr_exists))
+    # The outcome (which may read one issue's labels, qa_orch, #5318 INV-8) is
+    # only computed when there is a claim to release.
+    if snap.slot_occupied and snap.dispatch_id and not cls.endswith("_target"):
+        _release_dispatch_claim(cls, snap.dispatch_id, _claim_release_outcome(cls, pr_exists, snap.anchor_ref))
 
     # Issue #1820: the reflection-record WRITE producer wired in #1119 Slice 1
     # (self_heal.append_failure → _fire_reflection_record) was dead on the live
@@ -2168,7 +2199,7 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # pinned resume dispatch. Fully best-effort/non-fatal.
     _handle_dev_orch_stall(
         s, cls, skill, snap.anchor_ref, task_id, snap.worktree_branch,
-        dev_orch_pr_list_json
+        dev_orch_pr_list_json, snap.dispatch_id,
     )
 
     # Issue #4045: the flip side of the stall check above — a dev_orch

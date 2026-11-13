@@ -238,27 +238,21 @@ describe("decide.py — pipeline dispatch (issue #426 AC: 6-slot pipeline)", () 
     assert.equal(dispatch.skill, "hydra-qa");
   });
 
-  // Issue #3829 (design-concept issue-3829): qa_orch has no attempt cap or
-  // backoff, so an issue that repeatably cannot reach a QA verdict busy-loops
-  // the class forever. The fix is a per-issue STALL CAP guard tracking only
-  // the HEAD of the needs-qa set (full coverage in the dedicated
-  // test/decide-qa-stall-cap.test.mts, mirroring the #3729 sweep_target
-  // per-item guard's own dedicated file); this single integration check pins
-  // that the guard is wired into the SAME pipeline dispatch path this
-  // describe block exercises, and that it fails open when the Turn Snapshot
-  // hasn't been updated to emit the per-item signal yet.
-  test("qa_orch per-issue stall cap (#3829): a head issue that exhausted its cap suppresses dispatch even though needs_qa_orch stays true", () => {
+  // Issue #3829 / #5318: an issue that repeatably cannot reach a QA verdict
+  // used to be capped by a per-run counter in state.json. The cap is now the
+  // lifecycle seam's qa-stall Live Cap, which PARKS the issue; the selector
+  // just drops parked numbers from the lane (dedicated coverage in
+  // test/decide-guards.test.mts).
+  test("qa_orch (#5318): a PARKED head drops out of the lane even though needs_qa_orch stays true", () => {
     const state = baseState({
-      signals: { needs_qa_orch: true, needs_qa_numbers: "3841" },
-      // qa_orch_item_attempts is not part of StateOverrides — merge directly.
+      signals: { needs_qa_orch: true, needs_qa_numbers: "3841", orch_parked_issues: [3841] },
     });
-    (state as any).qa_orch_item_attempts = { "3841": 3 };
     const plan = runDecide(state, null);
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "qa_orch");
     assert.equal(
       dispatch,
       undefined,
-      "a head issue that exhausted its attempt cap must not be re-dispatched, even though the coarse needs_qa_orch boolean is still true",
+      "a parked head issue must not be re-dispatched, even though the coarse needs_qa_orch boolean is still true",
     );
   });
 
@@ -4519,7 +4513,6 @@ describe("decide.py — red-CI forward-fix arm of the unified resume pick (issue
     assert.equal(d[0].prompt_args, undefined, "an intent action carries no prompt_args bag");
     assert.match(d[0].reason, /red PR forward-fix/);
     assert.match(d[0].reason, /#5058/);
-    assert.match(d[0].reason, /1\/2/);
   });
 
   test("#5058: a NON-GLM red PR gets the identical capped forward-fix (no provenance gate)", () => {
@@ -4527,42 +4520,37 @@ describe("decide.py — red-CI forward-fix arm of the unified resume pick (issue
     const d = devOrchDispatches(runDecide(s, null));
     assert.equal(d.length, 1);
     assert.equal(d[0].intent.branch, "worktree-agent-a5706403c05633ec3");
-    assert.match(d[0].reason, /1\/2/);
+    assert.match(d[0].reason, /red PR forward-fix/);
   });
 
-  test("#4460 INV-8: the tracker caps at RED_FORWARD_FIX_CAP=2 — third encounter emits NO dispatch and surface-pr exhausts instead", () => {
-    // attempts=1 -> attempt 2/2 still dispatches
-    let s = glmState({ red_forward_fix_attempts: { "4433": 1 } });
-    let plan = runDecide(s, null);
-    assert.equal(devOrchDispatches(plan).length, 1);
-    assert.match(devOrchDispatches(plan)[0].reason, /2\/2/);
-
-    // attempts=2 (cap) -> no dispatch; the PR-gate rule surfaces the PR
-    s = glmState({ red_forward_fix_attempts: { "4433": 2 } });
-    plan = runDecide(s, null);
-    assert.equal(devOrchDispatches(plan).length, 0, "the pin must stop at the cap");
-    const surfaces = (plan.actions ?? []).filter((a: any) => a.type === "surface-pr");
-    assert.equal(surfaces.length, 1);
-    assert.equal(surfaces[0].pr_number, 4433);
-    assert.equal(surfaces[0].cause, "red-forward-fix-exhausted");
-    assert.match(surfaces[0].reason, /#5058/);
+  test("#5318 INV-7: no per-run tracker and no surface-pr exhaustion arm - a stale tracker value changes nothing", () => {
+    // The old cap (RED_FORWARD_FIX_CAP=2) is the seam's red-ci-forward-fix Live
+    // Cap now: it parks the issue at the third claim and the parked issue falls
+    // out of the resume pick. decide.py keeps no counter, so even a leftover
+    // `red_forward_fix_attempts` at/over the old cap still dispatches, and no
+    // `surface-pr red-forward-fix-exhausted` is ever emitted.
+    for (const attempts of [0, 1, 2, 5]) {
+      const s = glmState();
+      (s as any).red_forward_fix_attempts = { "4433": attempts };
+      const plan = runDecide(s, null);
+      assert.equal(devOrchDispatches(plan).length, 1, `attempts=${attempts}`);
+      assert.equal((plan.actions ?? []).filter((a: any) => a.type === "surface-pr").length, 0);
+    }
   });
 
-  test("#5058: the needs-dev-resume arm is UNCAPPED — a pick outside orch_prs_red_resume dispatches past the cap and never surfaces", () => {
-    const s = glmState({ red_forward_fix_attempts: { "4433": 5 }, signals: { orch_prs_red_resume: "" } });
+  test("#5058: the needs-dev-resume arm dispatches without the red-CI reason and never surfaces", () => {
+    const s = glmState({ signals: { orch_prs_red_resume: "" } });
     const plan = runDecide(s, null);
     const d = devOrchDispatches(plan);
-    assert.equal(d.length, 1, "the label arm is not subject to the red-CI cap");
+    assert.equal(d.length, 1);
     assert.match(d[0].reason, /durable dev resume/);
     assert.equal((plan.actions ?? []).filter((a: any) => a.type === "surface-pr").length, 0);
   });
 
-  test("#4460 INV-8: below the cap there is NO surface-pr (exhaustion is surfaced, never pre-empted)", () => {
-    const plan = runDecide(glmState(), null);
-    assert.equal(
-      (plan.actions ?? []).filter((a: any) => a.type === "surface-pr").length,
-      0,
-    );
+  test("#5319 belt: a red-arm pick whose issue is parked (the red-ci-forward-fix cap's outcome) never dispatches", () => {
+    const s = glmState({ signals: { orch_parked_issues: [4240] } });
+    const plan = runDecide(s, null);
+    assert.equal(devOrchDispatches(plan).length, 0);
   });
 
   test("#4460 INV-6 sequencing: a pending dev_resume_pending record outranks the red-arm pick (the #3866 drain runs first)", () => {
@@ -4614,7 +4602,7 @@ describe("decide.py — red-CI forward-fix arm of the unified resume pick (issue
     assert.equal(d[0].intent.pr, 4433);
   });
 
-  test("main() persists the attempts bump via change-detection (state file carries the tracker after the turn)", () => {
+  test("#5318 INV-7: main() persists NO red_forward_fix_attempts tracker after the turn", () => {
     const t = makeTmp();
     try {
       writeFileSync(t.state, JSON.stringify(withTurnSnapshot(glmState())));
@@ -4622,10 +4610,10 @@ describe("decide.py — red-CI forward-fix arm of the unified resume pick (issue
       writeFileSync(t.events, JSON.stringify([]));
       runDecideOnFiles(t);
       const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
-      assert.deepEqual(
+      assert.equal(
         persisted.red_forward_fix_attempts,
-        { "4433": 1 },
-        "the bump must persist to the state file for the next turn's cap check",
+        undefined,
+        "the per-run tracker is retired: the seam's Live Cap owns the count",
       );
     } finally {
       rmSync(t.dir, { recursive: true, force: true });
@@ -4759,7 +4747,7 @@ describe("decide.py — durable dev resume pick (issues #4518, #5058)", () => {
     assert.equal(devOrchDispatches(runDecide(s, null)).length, 0);
   });
 
-  test("a red-arm pick (in orch_prs_red_resume) pins attempt 1/2 and bumps its tracker", () => {
+  test("a red-arm pick (in orch_prs_red_resume) pins the forward-fix and writes no tracker", () => {
     const t = makeTmp();
     try {
       writeFileSync(t.state, JSON.stringify(withTurnSnapshot(baseState({ signals: { orch_dev_resume_pick: "issue-4240:4433:worktree-agent-glm-4240-1789", orch_prs_red_resume: "4433" } }))));
@@ -4768,9 +4756,9 @@ describe("decide.py — durable dev resume pick (issues #4518, #5058)", () => {
       const d = devOrchDispatches(runDecideOnFiles(t));
       assert.equal(d.length, 1);
       assert.equal(d[0].intent.pr, 4433);
-      assert.match(d[0].reason, /1\/2/);
+      assert.match(d[0].reason, /red PR forward-fix/);
       const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
-      assert.deepEqual(persisted.red_forward_fix_attempts, { "4433": 1 });
+      assert.equal(persisted.red_forward_fix_attempts, undefined);
     } finally {
       rmSync(t.dir, { recursive: true, force: true });
     }

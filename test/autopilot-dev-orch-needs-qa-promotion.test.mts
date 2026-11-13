@@ -71,6 +71,9 @@ interface Paths {
   log: string;
   ghStub: string;
   ghCallsLog: string;
+  /** Recorder standing in for `scripts/lifecycle.ts` (#5318): every state write goes through it. */
+  lifecycleStub: string;
+  lifecycleCallsLog: string;
 }
 
 /**
@@ -123,7 +126,17 @@ esac
 `,
   );
   chmodSync(ghStub, 0o755);
-  return { dir, state: join(dir, "state.json"), log: join(dir, "nightly.log"), ghStub, ghCallsLog };
+  const lifecycleStub = join(dir, "lifecycle-stub.sh");
+  const lifecycleCallsLog = join(dir, "lifecycle-calls.log");
+  writeFileSync(
+    lifecycleStub,
+    `#!/usr/bin/env bash
+echo "$*" >> "${lifecycleCallsLog}"
+exit "\${STUB_LIFECYCLE_EXIT:-0}"
+`,
+  );
+  chmodSync(lifecycleStub, 0o755);
+  return { dir, state: join(dir, "state.json"), log: join(dir, "nightly.log"), ghStub, ghCallsLog, lifecycleStub, lifecycleCallsLog };
 }
 
 function writeState(path: string, patch: Record<string, unknown>): void {
@@ -168,6 +181,7 @@ function runCompletion(
       HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",
       HYDRA_REAP_WORKTREE_GC: "0", // keep the worktree-GC side-effect out of the test
       HYDRA_AUTOPILOT_GH_CLI: paths.ghStub,
+      HYDRA_AUTOPILOT_LIFECYCLE_CLI: paths.lifecycleStub,
       // Issue #4503: keep the branch-recovery HGET off `docker exec` (live Redis).
       HYDRA_AUTOPILOT_REDIS_CLI: "true",
       ...ghEnv,
@@ -187,6 +201,12 @@ function ghCalls(paths: Paths): string[] {
     : [];
 }
 
+function lifecycleCalls(paths: Paths): string[] {
+  return existsSync(paths.lifecycleCallsLog)
+    ? readFileSync(paths.lifecycleCallsLog, "utf-8").trim().split("\n").filter(Boolean)
+    : [];
+}
+
 function baseSlotState(taskId: string, anchor?: string): Record<string, unknown> {
   return {
     slots: {
@@ -201,17 +221,16 @@ function baseSlotState(taskId: string, anchor?: string): Record<string, unknown>
 }
 
 describe("reap.py completion → dev_orch ready-for-agent/in-progress → needs-qa promotion (issue #4045, #4271)", () => {
-  test("PROMOTE: an open PR CLOSES the anchor and the issue is still ready-for-agent → relabel to needs-qa", () => {
+  test("PROMOTE: an open PR CLOSES the anchor → one seam advance in-progress -> needs-qa carrying pr evidence (issues #4045, #5318)", () => {
     const tmp = makeTmp();
     try {
       writeState(tmp.state, baseSlotState("t1", "issue-4001"));
 
       const prJson = JSON.stringify([
-        { headRefName: "issue-4001-fix", body: "Implements the fix.\n\nCloses #4001" },
+        { number: 4100, headRefName: "issue-4001-fix", body: "Implements the fix.\n\nCloses #4001" },
       ]);
       const r = runCompletion(["dev_orch", "t1", "50000", "hydra-dev"], tmp, {
         STUB_PR_LIST_JSON: prJson,
-        STUB_ISSUE_VIEW_JSON: JSON.stringify({ labels: [{ name: "ready-for-agent" }] }),
       });
       assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
 
@@ -219,28 +238,27 @@ describe("reap.py completion → dev_orch ready-for-agent/in-progress → needs-
       assert.match(
         log,
         /dev_pr_closes_anchor anchor=issue-4001 relabelled=True/,
-        "a confirmed closing PR against a ready-for-agent issue must log the promotion",
+        "a confirmed closing PR must log the promotion",
       );
 
       const calls = ghCalls(tmp);
       assert.ok(
-        calls.some((c) => c.startsWith("issue view 4001")),
-        `must re-check current labels before relabelling: ${JSON.stringify(calls)}`,
+        !calls.some((c) => c.startsWith("issue edit")),
+        `no direct label write: the seam owns the move (#5318): ${JSON.stringify(calls)}`,
       );
       assert.ok(
-        calls.some(
-          (c) =>
-            c.startsWith("issue edit 4001") &&
-            c.includes("--remove-label ready-for-agent") &&
-            c.includes("--add-label needs-qa"),
-        ),
-        `must relabel issue #4001 ready-for-agent -> needs-qa: ${JSON.stringify(calls)}`,
+        !calls.some((c) => c.startsWith("issue view") && c.includes("--json labels")),
+        `the pre-edit label read is gone, --from is the compare-and-set (#5318 INV-5): ${JSON.stringify(calls)}`,
       );
+      const adv = lifecycleCalls(tmp).filter((c) => c.startsWith("advance 4001 needs-qa"));
+      assert.equal(adv.length, 1, JSON.stringify(lifecycleCalls(tmp)));
+      assert.ok(adv[0].includes("--from in-progress"), adv[0]);
+      assert.ok(adv[0].includes("--evidence pr=4100"), adv[0]);
 
       // Issue #4045 INV-5 (PR #4090 design-concept reconciliation): this
       // completion qualifies for BOTH the sibling #3866 stall check
       // (_handle_dev_orch_stall, which finds the PR and no-ops) AND this
-      // needs-qa promotion — exactly the case that used to fire TWO
+      // needs-qa promotion - exactly the case that used to fire TWO
       // independent `gh pr list` subprocesses. Assert exactly one.
       const prListCalls = calls.filter((c) => c.startsWith("pr list"));
       assert.equal(
@@ -254,90 +272,23 @@ describe("reap.py completion → dev_orch ready-for-agent/in-progress → needs-
     }
   });
 
-  test("PROMOTE: an open PR CLOSES the anchor and the issue is currently in-progress (claimed) → relabel to needs-qa, removing both labels (issue #4271 INV-3)", () => {
+  test("REFUSED: the seam refuses the advance (any code, incl. from-mismatch on a legacy source label) → relabelled=False and NO gh issue edit fallback (#5318 INV-2)", () => {
     const tmp = makeTmp();
     try {
       writeState(tmp.state, baseSlotState("t11", "issue-4271"));
-
       const prJson = JSON.stringify([
-        { headRefName: "issue-4271-fix", body: "Implements the fix.\n\nCloses #4271" },
+        { number: 4272, headRefName: "issue-4271-fix", body: "Implements the fix.\n\nCloses #4271" },
       ]);
       const r = runCompletion(["dev_orch", "t11", "50000", "hydra-dev"], tmp, {
         STUB_PR_LIST_JSON: prJson,
-        // The anchor was claimed at dispatch time (ready-for-agent ->
-        // in-progress, per the child-flow contract) and never carried
-        // ready-for-agent by the time reap re-checks it.
-        STUB_ISSUE_VIEW_JSON: JSON.stringify({ labels: [{ name: "in-progress" }] }),
+        STUB_LIFECYCLE_EXIT: "1",
       });
       assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
-
-      const log = runLog(tmp);
-      assert.match(
-        log,
-        /dev_pr_closes_anchor anchor=issue-4271 relabelled=True/,
-        "a confirmed closing PR against a claimed (in-progress) issue must log the promotion",
-      );
-
-      const calls = ghCalls(tmp);
+      assert.match(runLog(tmp), /dev_pr_closes_anchor anchor=issue-4271 relabelled=False/);
+      assert.equal(lifecycleCalls(tmp).filter((c) => c.startsWith("advance 4271 needs-qa")).length, 1);
       assert.ok(
-        calls.some((c) => c.startsWith("issue view 4271")),
-        `must re-check current labels before relabelling: ${JSON.stringify(calls)}`,
-      );
-      assert.ok(
-        calls.some(
-          (c) =>
-            c.startsWith("issue edit 4271") &&
-            c.includes("--remove-label ready-for-agent") &&
-            c.includes("--remove-label in-progress") &&
-            c.includes("--add-label needs-qa"),
-        ),
-        `must relabel issue #4271 in-progress -> needs-qa, removing BOTH lifecycle labels: ${JSON.stringify(calls)}`,
-      );
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
-    }
-  });
-
-  test("PROMOTE: the issue is currently needs-dev-resume (a #4460 pinned forward-fix landed) → relabel to needs-qa, removing the resume label (issue #4460 INV-9)", () => {
-    const tmp = makeTmp();
-    try {
-      // A #4460 forward-fix completion: the anchor carries needs-dev-resume
-      // (applied by hydra-qa's GLM-PR bounce INV-7, or reap's #3866 stall
-      // backstop) and the forward-fix pushed to the EXISTING PR — whose body
-      // still closes the anchor.
-      writeState(tmp.state, baseSlotState("t19", "issue-4460"));
-      const prJson = JSON.stringify([
-        {
-          headRefName: "worktree-agent-glm-4240-1789",
-          body: "Implements the fix.\n\nCloses #4460",
-        },
-      ]);
-      const r = runCompletion(["dev_orch", "t19", "50000", "hydra-dev"], tmp, {
-        STUB_PR_LIST_JSON: prJson,
-        STUB_ISSUE_VIEW_JSON: JSON.stringify({ labels: [{ name: "needs-dev-resume" }] }),
-      });
-      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
-
-      const log = runLog(tmp);
-      assert.match(
-        log,
-        /dev_pr_closes_anchor anchor=issue-4460 relabelled=True/,
-        "a confirmed closing PR against a needs-dev-resume issue must log the promotion (#4460)",
-      );
-
-      const calls = ghCalls(tmp);
-      assert.ok(
-        calls.some((c) => c.startsWith("issue view 4460")),
-        `must re-check current labels before relabelling: ${JSON.stringify(calls)}`,
-      );
-      assert.ok(
-        calls.some(
-          (c) =>
-            c.startsWith("issue edit 4460") &&
-            c.includes("--remove-label needs-dev-resume") &&
-            c.includes("--add-label needs-qa"),
-        ),
-        `must relabel issue #4460 needs-dev-resume -> needs-qa, removing the resume label: ${JSON.stringify(calls)}`,
+        !ghCalls(tmp).some((c) => c.startsWith("issue edit")),
+        `a refusal must never fall back to a direct label write: ${JSON.stringify(ghCalls(tmp))}`,
       );
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
@@ -397,6 +348,7 @@ describe("reap.py completion → dev_orch ready-for-agent/in-progress → needs-
         `a non-closing reference must never even check current labels: ${JSON.stringify(calls)}`,
       );
       assert.ok(!calls.some((c) => c.startsWith("issue edit")), "a non-closing reference must never relabel");
+      assert.deepEqual(lifecycleCalls(tmp), [], "a non-closing reference must never reach the seam");
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
@@ -463,29 +415,21 @@ describe("reap.py completion → dev_orch ready-for-agent/in-progress → needs-
     }
   });
 
-  test("NO-OP: the closing PR exists but the issue is already needs-qa → no relabel (idempotent)", () => {
+  test("IDEMPOTENT: a repeated reap on an anchor that already moved on is refused by the seam's --from check, no fallback write", () => {
     const tmp = makeTmp();
     try {
       writeState(tmp.state, baseSlotState("t5", "issue-4005"));
 
-      const prJson = JSON.stringify([{ headRefName: "issue-4005-fix", body: "Fixes #4005" }]);
+      const prJson = JSON.stringify([{ number: 4006, headRefName: "issue-4005-fix", body: "Fixes #4005" }]);
       const r = runCompletion(["dev_orch", "t5", "45000", "hydra-dev"], tmp, {
         STUB_PR_LIST_JSON: prJson,
-        STUB_ISSUE_VIEW_JSON: JSON.stringify({ labels: [{ name: "needs-qa" }] }),
+        STUB_LIFECYCLE_EXIT: "1", // the seam answers from-mismatch: the issue is already needs-qa
       });
       assert.equal(r.status, 0);
-
-      const log = runLog(tmp);
-      assert.ok(!log.includes("dev_pr_closes_anchor"), "an already-needs-qa issue must never re-log a promotion");
-
-      const calls = ghCalls(tmp);
+      assert.match(runLog(tmp), /dev_pr_closes_anchor anchor=issue-4005 relabelled=False/);
       assert.ok(
-        calls.some((c) => c.startsWith("issue view 4005")),
-        `must still check current labels: ${JSON.stringify(calls)}`,
-      );
-      assert.ok(
-        !calls.some((c) => c.startsWith("issue edit")),
-        `an issue no longer on ready-for-agent must never be relabelled: ${JSON.stringify(calls)}`,
+        !ghCalls(tmp).some((c) => c.startsWith("issue edit")),
+        `an issue that already moved on must never be relabelled by reap: ${JSON.stringify(ghCalls(tmp))}`,
       );
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
@@ -504,25 +448,7 @@ describe("reap.py completion → dev_orch ready-for-agent/in-progress → needs-
 
       const calls = ghCalls(tmp);
       assert.ok(!calls.some((c) => c.startsWith("issue edit")), "must NOT relabel when gh pr list failed");
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
-    }
-  });
-
-  test("UNKNOWN: gh issue view fails after a closing PR is found → fail OPEN, no relabel", () => {
-    const tmp = makeTmp();
-    try {
-      writeState(tmp.state, baseSlotState("t7", "issue-4007"));
-
-      const prJson = JSON.stringify([{ headRefName: "issue-4007-fix", body: "Resolves #4007" }]);
-      const r = runCompletion(["dev_orch", "t7", "20000", "hydra-dev"], tmp, {
-        STUB_PR_LIST_JSON: prJson,
-        STUB_ISSUE_VIEW_EXIT: "1", // simulate gh auth/network failure on the label re-check
-      });
-      assert.equal(r.status, 0, "an unreachable gh must never fail the reap");
-
-      const calls = ghCalls(tmp);
-      assert.ok(!calls.some((c) => c.startsWith("issue edit")), "must NOT relabel when the label re-check failed");
+      assert.deepEqual(lifecycleCalls(tmp), [], "an unknown PR list must not reach the seam");
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
@@ -586,6 +512,7 @@ describe("reap.py reconcile-seeded → promote an uncollected dev_orch anchor (i
         HYDRA_AUTOPILOT_LOG: tmp.log,
         HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",
         HYDRA_AUTOPILOT_GH_CLI: tmp.ghStub,
+        HYDRA_AUTOPILOT_LIFECYCLE_CLI: tmp.lifecycleStub,
         HYDRA_AUTOPILOT_REFL_DIR: reflDir,
         HYDRA_AUTOPILOT_REDIS_CLI: "true",
         ...ghEnv,
@@ -596,9 +523,10 @@ describe("reap.py reconcile-seeded → promote an uncollected dev_orch anchor (i
   }
 
   const seedSlot = { skill: "hydra-dev", task_id: HASH, _source: "inflight-seed", started_epoch: 1 };
-  const closesPr = JSON.stringify([{ headRefName: "x", body: "Closes #5149" }]);
+  const closesPr = JSON.stringify([{ number: 5150, headRefName: "x", body: "Closes #5149" }]);
   const inProgress = JSON.stringify({ labels: [{ name: "in-progress" }] });
-  const editCalls = (tmp: Paths) => ghCalls(tmp).filter((c) => c.startsWith("issue edit"));
+  // #5318: the promotion is one seam advance now, not a gh issue edit.
+  const editCalls = (tmp: Paths) => lifecycleCalls(tmp).filter((c) => c.startsWith("advance "));
 
   test("PROMOTE: seeded slot, deposit names the anchor, PR closes it → needs-qa; state.json untouched", () => {
     const tmp = makeTmp();
@@ -609,8 +537,8 @@ describe("reap.py reconcile-seeded → promote an uncollected dev_orch anchor (i
       const calls = ghCalls(tmp);
       assert.equal(calls.filter((c) => c.startsWith("pr list")).length, 1);
       assert.ok(
-        calls.some((c) => c.startsWith("issue edit 5149") && c.includes("--add-label needs-qa") && c.includes("--remove-label in-progress")),
-        calls.join("\n"),
+        lifecycleCalls(tmp).some((c) => c.startsWith("advance 5149 needs-qa") && c.includes("--from in-progress") && c.includes("--evidence pr=5150")),
+        lifecycleCalls(tmp).join("\n"),
       );
       assert.equal(readFileSync(tmp.state, "utf-8"), before, "state.json bytes unchanged");
     } finally {
@@ -618,12 +546,12 @@ describe("reap.py reconcile-seeded → promote an uncollected dev_orch anchor (i
     }
   });
 
-  test("no-op: issue already needs-qa → no edit", () => {
+  test("idempotent: issue already needs-qa → the seam refuses from-mismatch, no direct edit", () => {
     const tmp = makeTmp();
     try {
       seededState(tmp, seedSlot);
-      run(tmp, { STUB_PR_LIST_JSON: closesPr, STUB_ISSUE_VIEW_JSON: JSON.stringify({ labels: [{ name: "needs-qa" }] }) }, "issue-5149");
-      assert.equal(editCalls(tmp).length, 0);
+      run(tmp, { STUB_PR_LIST_JSON: closesPr, STUB_LIFECYCLE_EXIT: "1" }, "issue-5149");
+      assert.equal(ghCalls(tmp).filter((c) => c.startsWith("issue edit")).length, 0);
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
@@ -674,7 +602,7 @@ describe("reap.py reconcile-seeded → promote an uncollected dev_orch anchor (i
     return JSON.parse(r.stdout);
   }
 
-  for (const labelName of ["needs-dev-resume", "in-progress"]) {
+  for (const labelName of ["in-progress"]) {
     test(`PROMOTE (#5350): ledger-seeded slot carries anchor, NO deposit, ${labelName} → needs-qa`, () => {
       const tmp = makeTmp();
       try {
@@ -686,8 +614,8 @@ describe("reap.py reconcile-seeded → promote an uncollected dev_orch anchor (i
         );
         assert.equal(r.status, 0);
         assert.ok(
-          editCalls(tmp).some((c) => c.startsWith("issue edit 5149") && c.includes("--add-label needs-qa")),
-          ghCalls(tmp).join("\n"),
+          editCalls(tmp).some((c) => c.startsWith("advance 5149 needs-qa")),
+          lifecycleCalls(tmp).join("\n"),
         );
       } finally {
         rmSync(tmp.dir, { recursive: true, force: true });

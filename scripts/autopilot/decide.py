@@ -141,27 +141,10 @@ state.json {
     "<target_issue_number>": unix-epoch
   }
 
-  # NEW IN #3829 — per-issue attempt counter for the qa_orch busy-loop guard
-  # (design-concept issue-3829). Keyed by the STRING orch issue number, valued
-  # by the count of qa_orch dispatches that fired while that issue was the
-  # HEAD of the needs-qa set (needs_qa_numbers[0] — the issue hydra-qa will
-  # actually self-select via its own unsorted-default `gh issue list --label
-  # needs-qa --jq '.[0]'` query). At most ONE entry exists at any time by
-  # construction: on every qa_orch fire the map is rebuilt to hold only the
-  # current head's (bumped) count, so a non-head issue merely present in the
-  # needs-qa set is NEVER incremented (design-concept invariant 4 — a
-  # multi-issue backlog must not falsely accumulate attempts against issues
-  # that were never actually reviewed), and a former head that leaves the set
-  # (verdict reached, or a new head takes over) is pruned, so a later re-open
-  # under the same number starts fresh at 0 (invariant 5). An issue whose
-  # count reaches QA_STALL_MAX_ATTEMPTS is no longer eligible for qa_orch
-  # dispatch while it remains head — the busy-loop backstop issue #3829
-  # diagnosed as missing. Persisted via the run_ledger diff seam (invariant
-  # 6, same pattern as research_force_counter / target_triage_item_stamps);
-  # an absent/empty map means the current head is fresh (0 prior attempts).
-  "qa_orch_item_attempts": {
-    "<orch_issue_number>": int
-  }
+  # RETIRED IN #5318 — `qa_orch_item_attempts` (#3829) and
+  # `red_forward_fix_attempts` (#5058) no longer exist in state.json. Both caps
+  # are Live Caps in the lifecycle seam (ADR-0047 D6), counted from the claim
+  # journal and enforced by parking the issue, so nothing per-run is kept here.
 
   # NEW IN #3867 — quota-percent budget baseline. Present ONLY on a run whose
   # `limits.quota_week_max_pts` is non-zero (the cap
@@ -210,8 +193,8 @@ state.json {
   # resumed by the currently-running builder (a fresh build's head can never
   # equal feature/<token>). Overwritten wholesale by the next resume pin,
   # NEVER cleared or pruned — a stale record is inert by construction (tokens
-  # are unique per run+turn). In-run state by design, like
-  # red_forward_fix_attempts: persisted via the run_ledger diff seam's
+  # are unique per run+turn). In-run state by design:
+  # persisted via the run_ledger diff seam's
   # snapshot/compare pair; a new run starts without it and the hold fails
   # open (the #3709 dead-arm class).
   "dev_target_resume_inflight": {
@@ -340,11 +323,8 @@ from decide_base import (
     ESCALATION_POLICY,
     INTENT_KINDS_BY_SLOT,
     _INTENT_REGISTRY,
-    RED_FORWARD_FIX_CAP,
-    QA_STALL_MAX_ATTEMPTS,
     ZERO_YIELD_BACKOFF_LADDER,
     _anchor_issue_number,
-    _dev_resume_pick_signal,
     _is_parked_anchor,
     _parked_prs,
     _parked_read_degraded,
@@ -352,8 +332,6 @@ from decide_base import (
     _needs_qa_target_pr_ref,
     _normalize_target_risk_surface,
     _orch_board_read_degraded,
-    _red_forward_fix_attempt_count,
-    _red_resume_prs,
     _signal_present,
     _target_dev_resume_pick_signal,
     _zero_yield_entry,
@@ -504,7 +482,7 @@ CLASS_SCOPE = {r["name"]: r["scope"] for r in CLASS_TAXONOMY}
 #
 # LAYERING: POLICY lives here, not as a classes.json column — classes.json is
 # the alphabet only (ADR-0012; same precedent as ESCALATION_POLICY and
-# QA_STALL_MAX_ATTEMPTS). The dict must cover EXACTLY every target/both-scope
+# the retired QA_STALL_MAX_ATTEMPTS). The dict must cover EXACTLY every target/both-scope
 # row (validated below at import — no silent default for a Target-scope
 # class). Classes absent from it (all scope=orch) are "worktree".
 ISOLATION_MODES = ("worktree", "self")
@@ -1227,9 +1205,9 @@ def make_surface_pr(
     Routes ONE PR whose Pre-merge Gate state no PR-level action can fix —
     `cause: dirty` (a merge conflict `update-branch` cannot resolve),
     `cause: unchecked` (zero check-runs past the grace window on a healthy
-    trigger arm — CI never started), or `cause: red-forward-fix-exhausted`
-    (#5058, ex-#4460: a PR of any provenance still red on a required check
-    after the pinned forward-fix dispatch cap) — to the operator: the tool binding
+    trigger arm — CI never started) — to the operator (the former
+    `cause: red-forward-fix-exhausted` arm, #5058, is retired: the lifecycle
+    seam's red-ci-forward-fix Live Cap parks that issue instead, #5318): the tool binding
     applies `ready-for-human` via `gh api repos/.../issues/N/labels` (never
     `gh pr edit`, which is broken per operator memory) and posts ONE comment
     naming the cause. The label on the PR is the idempotency key —
@@ -3115,33 +3093,12 @@ def _rule_pr_gate(state: dict, events: list[dict]) -> _RuleOutput:
             ),
             reason=f"update-branch:#{pr}",
         )
-    # ISSUE #5058 (ex-#4460 INV-8): the dev_orch selector pins at most
-    # RED_FORWARD_FIX_CAP red-CI forward-fix dispatches per PR (any
-    # provenance). When the cap is exhausted and the Turn Snapshot STILL names
-    # that PR as the resume pick AND as red-CI-only (`orch_prs_red_resume`),
-    # no dispatch fires and this rule is the only actor: surface the PR so the
-    # operator owns it. The applied `ready-for-human` label is the TERMINAL
-    # exclusion — the next Turn Snapshot pass drops the PR from the resume
-    # predicate, so this emission self-extinguishes after one turn rather than
-    # repeating forever. Exhaustion is surfaced, never silent. The
-    # `needs-dev-resume` arm is never capped, so never surfaced here.
-    resume_pick = _dev_resume_pick_signal(state, events)
-    if resume_pick is not None:
-        _pick_issue, pick_pr, _pick_branch = resume_pick
-        if (
-            pick_pr in _red_resume_prs(state, events)
-            and _red_forward_fix_attempt_count(state, pick_pr) >= RED_FORWARD_FIX_CAP
-        ):
-            out.emit(
-                make_surface_pr(
-                    pick_pr,
-                    "red-forward-fix-exhausted",
-                    "PR still red on a required check after the "
-                    f"cap of {RED_FORWARD_FIX_CAP} pinned forward-fix dispatches — "
-                    "operator review required (issue #5058)",
-                ),
-                reason=f"surface-pr:#{pick_pr}:red-forward-fix-exhausted",
-            )
+    # ISSUE #5318 INV-7: the `surface-pr cause=red-forward-fix-exhausted` arm
+    # (#5058) is retired. Exhaustion of the red-CI forward-fix cap is now the
+    # lifecycle seam's red-ci-forward-fix Live Cap: it parks the issue at the
+    # third claim (a state the operator owns, ADR-0047 D4) and the parked issue
+    # falls out of the resume pick, so a parallel `ready-for-human` surface
+    # would double-escalate it. Dirty/unchecked surfaces above are unchanged.
     return out
 
 
@@ -3348,43 +3305,12 @@ def _rule_pipeline_dispatch(
                 continue
         action = _select_for_slot(cls, state, candidates, events, best, best_score, now)
         if action is None:
-            # Issue #3829 (design-concept qaTrace: "How is the cap surfaced ...
-            # satisfying the acceptance criterion's 'a label or signal'
-            # wording?"): qa_orch's selector stamps a transient
-            # `qa_orch_stalled_issue` on `state` when it suppresses dispatch
-            # because the HEAD of the current needs-qa set exhausted its
-            # attempt cap (as opposed to "no needs-qa issue at all", the
-            # ordinary idle case). Surface the distinct reason + the stalled
-            # issue number here instead of the generic "idle" one, then
-            # consume the transient marker so it never leaks into the
-            # persisted state.
-            stalled_issue = state.pop("qa_orch_stalled_issue", None) if cls == "qa_orch" else None
-            if stalled_issue is not None:
-                # outcome stays "idle" (DISPATCH_DECISION_OUTCOMES is a closed
-                # set, deliberately not extended here — no dispatch DID
-                # happen, so "idle" is accurate) but the reason text + the
-                # plan-level debug field name the stalled issue, giving this
-                # suppression the "visible signal" the #3829 acceptance
-                # criterion requires without adding a new outcome literal or a
-                # GH-mutation side effect (design-concept invariant 1).
-                out.debug["qa_orch_stalled_issue"] = stalled_issue
-                out.events.append(
-                    make_dispatch_decision_event(
-                        state, now, cls=cls, outcome="idle",
-                        reason=(
-                            f"needs-qa issue #{stalled_issue} exhausted the "
-                            f"{QA_STALL_MAX_ATTEMPTS}-attempt cap — "
-                            "suppressed (issue #3829)"
-                        ),
-                    )
+            out.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=cls, outcome="idle",
+                    reason="selector found no eligible work",
                 )
-            else:
-                out.events.append(
-                    make_dispatch_decision_event(
-                        state, now, cls=cls, outcome="idle",
-                        reason="selector found no eligible work",
-                    )
-                )
+            )
             out.skipped += 1
             continue
         out.emit(action, reason=f"dispatch:{cls}")
