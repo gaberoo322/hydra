@@ -37,18 +37,6 @@
       }
     },
     {
-      "name": "hydra-auto-merge-window",
-      "path": "docs/operator-playbooks/hydra-auto-merge-window.md",
-      "stage": "operator-interactive",
-      "description": "Dormant time-bounded auto-merger for a labeled issue batch — when a window is open it classifies the batch's open PRs, applies operator-approved to Tier-0, and enables auto-merge on Tier 1/2/3; audit-only outside the window and idle with no live campaign.",
-      "dispatchedBy": [],
-      "composedFrom": [],
-      "route": "/docs/skill/hydra-auto-merge-window",
-      "source": {
-        "path": "docs/operator-playbooks/hydra-auto-merge-window.md"
-      }
-    },
-    {
       "name": "hydra-autopilot",
       "path": "docs/operator-playbooks/hydra-autopilot.md",
       "stage": "brain",
@@ -237,18 +225,6 @@
       "route": "/docs/skill/hydra-hitl-grill",
       "source": {
         "path": "docs/operator-playbooks/hydra-hitl-grill.md"
-      }
-    },
-    {
-      "name": "hydra-incident",
-      "path": "docs/operator-playbooks/hydra-incident.md",
-      "stage": "operator-interactive",
-      "description": "Automated incident response for regressions, service crashes, and deployment failures. Investigates root cause, attempts fix or revert, creates post-mortem.",
-      "dispatchedBy": [],
-      "composedFrom": [],
-      "route": "/docs/skill/hydra-incident",
-      "source": {
-        "path": "docs/operator-playbooks/hydra-incident.md"
       }
     },
     {
@@ -464,7 +440,7 @@
       "name": "hydra-target-incident",
       "path": "docs/operator-playbooks/hydra-target-incident.md",
       "stage": "operator-interactive",
-      "description": "Automated incident response for the Target project — post-merge regressions, web-service crashes, and deploy failures. Single-realm to the target's app directory; investigates root cause, attempts fix or revert, files a post-mortem. Target sibling of hydra-incident (which is Orchestrator-only).",
+      "description": "Automated incident response for the Target project — post-merge regressions, web-service crashes, and deploy failures. Single-realm to the target's app directory; investigates root cause, attempts fix or revert, files a post-mortem.",
       "dispatchedBy": [],
       "composedFrom": [
         "docs/operator-playbooks/_fragments/target-seam-preamble.md"

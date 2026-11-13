@@ -439,9 +439,8 @@ investigate/fix/revert. The revert-PR path is Step 8 (main-branch CI
 regression) only — do NOT add a revert here.
 
 REALM ROUTING (ADR-0025, issue #2553): the watcher dispatches the Target-scoped
-`hydra-target-incident`, NOT the Orchestrator's `hydra-incident`. Each
-Operate-layer incident skill is single-realm — `hydra-target-incident` operates
-only on `$TARGET_WS`, `hydra-incident` only on `~/hydra`. The dispatch
+`hydra-target-incident`. It is single-realm — it operates
+only on `$TARGET_WS`. The dispatch
 target string lives in `scripts/target/post-merge-health.ts` (the `--dispatch`
 spawn); it and this playbook move in lockstep.
 

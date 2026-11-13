@@ -1612,7 +1612,6 @@
         "skills": [
           "hydra-architect [operator-interactive]",
           "hydra-architecture-scan [pre-plan-producer]",
-          "hydra-auto-merge-window [operator-interactive]",
           "hydra-autopilot [brain]",
           "hydra-branch-prune [operator-interactive]",
           "hydra-cleanup [pre-plan-producer]",
@@ -1625,7 +1624,6 @@
           "hydra-epic-sprint [operator-interactive]",
           "hydra-grill [spec]",
           "hydra-hitl-grill [operator-interactive]",
-          "hydra-incident [operator-interactive]",
           "hydra-issue-research [pre-plan-producer]",
           "hydra-pr-rebase [operator-interactive]",
           "hydra-prd [operator-interactive]",
@@ -1653,7 +1651,6 @@
         "corpus": [
           "docs/operator-playbooks/hydra-architect.md [playbook]",
           "docs/operator-playbooks/hydra-architecture-scan.md [playbook]",
-          "docs/operator-playbooks/hydra-auto-merge-window.md [playbook]",
           "docs/operator-playbooks/hydra-autopilot.md [playbook]",
           "docs/operator-playbooks/hydra-branch-prune.md [playbook]",
           "docs/operator-playbooks/hydra-cleanup.md [playbook]",
@@ -1666,7 +1663,6 @@
           "docs/operator-playbooks/hydra-epic-sprint.md [playbook]",
           "docs/operator-playbooks/hydra-grill.md [playbook]",
           "docs/operator-playbooks/hydra-hitl-grill.md [playbook]",
-          "docs/operator-playbooks/hydra-incident.md [playbook]",
           "docs/operator-playbooks/hydra-issue-research.md [playbook]",
           "docs/operator-playbooks/hydra-pr-rebase.md [playbook]",
           "docs/operator-playbooks/hydra-prd.md [playbook]",

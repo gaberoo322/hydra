@@ -48,10 +48,6 @@
       "body": 4386,
       "description": 38
     },
-    "docs/operator-playbooks/hydra-auto-merge-window.md": {
-      "body": 1901,
-      "description": 40
-    },
     "docs/operator-playbooks/hydra-autopilot.md": {
       "body": 7469,
       "description": 25
@@ -95,10 +91,6 @@
     "docs/operator-playbooks/hydra-grill.md": {
       "body": 3046,
       "description": 34
-    },
-    "docs/operator-playbooks/hydra-incident.md": {
-      "body": 724,
-      "description": 19
     },
     "docs/operator-playbooks/hydra-issue-research.md": {
       "body": 285,

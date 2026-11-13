@@ -859,8 +859,8 @@ export function readBaseline(
  * dispatched, because failing to alarm must not look like a build failure.
  *
  * Realm note (ADR-0025, issue #2553): post-merge Target regressions route to
- * the Target-scoped hydra-target-incident, not the Orchestrator's hydra-incident
- * — each Operate-layer incident skill is single-realm.
+ * the Target-scoped hydra-target-incident — each Operate-layer incident skill is
+ * single-realm.
  *
  * `spawnImpl` is injectable so tests can assert the argv without spawning.
  */

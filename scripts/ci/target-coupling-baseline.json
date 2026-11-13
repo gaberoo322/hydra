@@ -12,7 +12,6 @@
     "playbooks::docs/operator-playbooks/hydra-digest.md::hydra-betting::name",
     "playbooks::docs/operator-playbooks/hydra-discover.md::hydra-betting::name",
     "playbooks::docs/operator-playbooks/hydra-grill.md::hydra-betting::name",
-    "playbooks::docs/operator-playbooks/hydra-incident.md::hydra-betting::name",
     "playbooks::docs/operator-playbooks/hydra-wayfinder.md::hydra-betting::name",
     "src::src/board-labels.ts::hydra-betting::name-comment",
     "src::src/scheduler/chores/wiring-liveness-output.ts::hydra-betting::name-comment",

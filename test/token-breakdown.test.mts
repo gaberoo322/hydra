@@ -61,7 +61,7 @@ describe("token-breakdown leaf — pure data-model primitives (issue #3513)", ()
       deriveSkill("<!-- hydra-dispatch v1 skill=hydra-dev dispatchId=x runId=y -->"),
       "hydra-dev",
     );
-    assert.equal(deriveSkill("<command-name>hydra-incident</command-name>"), "hydra-incident");
+    assert.equal(deriveSkill("<command-name>hydra-target-incident</command-name>"), "hydra-target-incident");
     assert.equal(deriveSkill("/hydra-digest please summarise"), "hydra-digest");
     assert.equal(deriveSkill("hey can you look at this bug"), INTERACTIVE_SKILL);
     assert.equal(deriveSkill(null), INTERACTIVE_SKILL);
@@ -189,8 +189,8 @@ describe("deriveSkill — in-transcript precedence (issue #2402)", () => {
     );
     // Leading-slash optional inside the command-name tag.
     assert.equal(
-      deriveSkill("<command-name>hydra-incident</command-name>"),
-      "hydra-incident",
+      deriveSkill("<command-name>hydra-target-incident</command-name>"),
+      "hydra-target-incident",
     );
     // A raw typed slash command (no command-name wrapper).
     assert.equal(deriveSkill("/hydra-digest please summarise"), "hydra-digest");
@@ -227,7 +227,7 @@ describe("deriveDispatchKind — precedence projection (issue #2403)", () => {
 
   test("<command-name> marker -> operator-invoked", () => {
     assert.equal(
-      deriveDispatchKind("<command-name>hydra-incident</command-name>"),
+      deriveDispatchKind("<command-name>hydra-target-incident</command-name>"),
       "operator-invoked",
     );
     assert.equal(

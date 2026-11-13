@@ -14,7 +14,7 @@
  *      written reason;
  *   2. the lanes the issue names behave as specified — hydra-review's Land-it
  *      shows the guard verdict and needs an explicit override choice that
- *      posts a `QA-Override:` line; hydra-auto-merge-window and hydra-sweep
+ *      posts a `QA-Override:` line; hydra-sweep
  *      skip denied PRs and never override; the autopilot builds `qa-verdict`
  *      events through the guard so decide.py's stale-verdict hold can fire;
  *   3. both required-check FETCH call sites (hydra-qa step 5 and the
@@ -135,16 +135,6 @@ const EXEMPT: ReadonlyArray<{ file: string; match: string; reason: string }> = [
     reason: "hydra-qa's own PASS arm: the PASS verdict it just posted at this head IS the guard's input",
   },
   {
-    file: "hydra-auto-merge-window.md",
-    match: "apply `operator-approved` to Tier-0 PRs and click `gh pr merge --auto`",
-    reason: "safety-model prose; item 4 directly below requires the guard, and the act loop runs it",
-  },
-  {
-    file: "hydra-auto-merge-window.md",
-    match: "`gh pr merge --auto` is idempotent",
-    reason: "failure-mode prose about overlapping passes, not a merge instruction",
-  },
-  {
     file: "_fragments/hydra-target-build-merge-flow.md",
     match: "gh pr merge",
     reason: "Target repo PRs: Target QA verdicts live on the linked Target issue, not in QA-Verdict trailers the guard reads",
@@ -201,7 +191,7 @@ describe("QA merge guard — every playbook merge call site (issue #4738)", () =
   });
 
   test("the detector sees the call sites it must (guards against a vacuous pass)", () => {
-    for (const rel of ["hydra-review.md", "hydra-auto-merge-window.md", "hydra-autopilot.md", "hydra-qa.md"]) {
+    for (const rel of ["hydra-review.md", "hydra-autopilot.md", "hydra-qa.md"]) {
       assert.ok(mergeCallSites(read(rel)).length > 0, `${rel} should carry a merge call site`);
     }
     assert.equal(mergeCallSites("gh pr merge 1 --disable-auto").length, 0, "a disarm is not a merge");
@@ -294,19 +284,6 @@ describe("hydra-review Land it — guard verdict + explicit QA-Override (issue #
 });
 
 describe("autonomous merge lanes skip denied PRs and never override (issue #4738)", () => {
-  test("hydra-auto-merge-window runs the guard before its first merge call and never overrides", () => {
-    const text = read("hydra-auto-merge-window.md");
-    const py = section(text, /^python3 <<PYEOF$/m, /^PYEOF$/m);
-    const guardIdx = py.indexOf(GUARD);
-    const mergeIdx = py.indexOf('"pr", "merge"');
-    assert.ok(guardIdx > -1, "the act loop must invoke the guard");
-    assert.ok(mergeIdx > -1, "the act loop still arms auto-merge");
-    assert.ok(guardIdx < mergeIdx, "the guard must run before any merge call");
-    assert.match(py, /guard\.returncode != 0[\s\S]*?continue/, "a non-zero guard exit skips the PR");
-    assert.doesNotMatch(py, /QA-Override/, "the window never posts an override");
-    assert.match(text, /never overrides/i);
-  });
-
   test("hydra-sweep never merges directly; any land runs the guard and never overrides", () => {
     const text = read("hydra-sweep.md");
     assert.equal(mergeCallSites(text).length, 0, "the sweep must not carry a direct merge call");
@@ -600,6 +577,42 @@ describe("required-ness is joined from branch protection, not the rollup (issue 
     ] as const) {
       assert.ok(!text.includes("isRequired"), `${name}: the rollup has no required-ness field — no token may remain`);
     }
+  });
+});
+
+describe("retired playbooks (issue #5493)", () => {
+  const RETIRED = ["hydra-" + "incident", "hydra-auto-" + "merge-window"];
+
+  test("retired incident and merge-window playbooks are gone and unreferenced by live playbooks, src and scripts", () => {
+    for (const name of RETIRED) {
+      assert.ok(!existsSync(join(PLAYBOOKS, `${name}.md`)), `${name}.md must stay deleted`);
+    }
+    const walk = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+        e.isDirectory()
+          ? e.name === "node_modules" ? [] : walk(join(dir, e.name))
+          : /\.(ts|mts|sh|md|py)$/.test(e.name) ? [join(dir, e.name)] : [],
+      );
+    const files = [
+      ...playbookFiles().map((f) => join(PLAYBOOKS, f)),
+      ...walk(join(ROOT, "src")),
+      ...walk(join(ROOT, "scripts")),
+    ];
+    for (const f of files) {
+      const text = readFileSync(f, "utf8");
+      for (const name of RETIRED) {
+        assert.ok(!new RegExp(`${name}(?![-\\w])`).test(text), `${f} must not mention ${name}`);
+      }
+    }
+  });
+
+  test("ADR-0025 amendment records the retirement without claiming to close the already-closed issue", () => {
+    const adr = readFileSync(
+      join(ROOT, "docs", "adr", "0025-target-operate-layer-single-realm-incident-skill.md"),
+      "utf8",
+    );
+    const amendment = adr.slice(adr.indexOf("## Amendment (2026-11, #5493)"));
+    assert.ok(amendment.includes("#5493"), "amendment cites #5493");
   });
 });
 

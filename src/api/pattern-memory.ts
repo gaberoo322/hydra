@@ -42,7 +42,7 @@ const FRICTION_SKILLS = ["hydra-dev", "hydra-target-build", "hydra-qa"] as const
  *
  * These routes are LIVE in production: hydra-dev, hydra-qa, and
  * hydra-target-build POST `/memory/subagent-lesson` and `/memory/subagent-friction`;
- * hydra-incident POSTs `/memory/:agent/pattern`. The URL surface is byte-identical
+ * `/memory/:agent/pattern` has no playbook caller since #5493. The URL surface is byte-identical
  * to before the split — only the source file owning each route changed.
  *
  * (Routes migrated from api/misc.ts in issue #2181, then from api/learning.ts

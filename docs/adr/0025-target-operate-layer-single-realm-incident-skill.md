@@ -1,6 +1,6 @@
 # ADR-0025: Target gets its own single-realm incident skill (hydra-target-incident)
 
-Status: Accepted
+Status: Accepted (amended 2026-11, #5493)
 Date: 2026-06-30
 Deciders: Operator + Hydra (via the design-concept artifact for issue #2553)
 Related: ADR-0013 (swappable single-target builder), ADR-0014 (simplicity discipline), hydra-incident playbook, hydra-target-build playbook (Step 8.6 post-merge health watcher)
@@ -78,3 +78,13 @@ Cross-realm invariants:
 - Tier stays **T2** — the change is skill-layer `.md` plus a one-line
   dispatch-name string in the Target post-merge watcher script; no `src/` logic,
   no `ci.yml`/`deploy.yml`.
+
+## Amendment (2026-11, #5493)
+
+`hydra-incident` and `hydra-auto-merge-window` were retired: nothing dispatched
+them and their bodies were stale. The single-realm rule now binds
+`hydra-target-incident` alone; the Orchestrator realm has no incident skill
+(the watchdog, deploy-drift check, emergency brake and pause controls cover
+it). The installed copies are removed by the existing banner-guarded orphan
+prune in `scripts/sync-skills.sh`, run by `scripts/deploy.sh`. The body above is
+left as the historical record.
