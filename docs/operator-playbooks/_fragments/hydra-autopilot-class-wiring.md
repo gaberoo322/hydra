@@ -2,10 +2,12 @@
 
 Per-class wiring details for signal classes. Read when investigating a specific
 class's dispatch logic, cooldown configuration, scope, or saturation guards.
-The authoritative source for dispatch policy is `scripts/autopilot/decide.py`.
+The authoritative sources for dispatch policy are `scripts/autopilot/classes.json`
+(per-class `cooldownSeconds`, `scope`, `model`) and `scripts/autopilot/decide.py`
+(`SIGNAL_LOOP_ORDER`); this file cites them by pointer and restates no value.
 
 > **Phase B wiring (issue #485, sub of #483):** `scout_orch` is a
-> calendar-driven signal class — `SIGNAL_COOLDOWNS["scout_orch"] = 7d`.
+> calendar-driven signal class — a weekly walk (its `cooldownSeconds` in `classes.json`).
 > The walk surface (categories from `docs/ai-leverage-categories.md`,
 > and nothing else — the `dep:<name>` package.json surface was removed
 > in issue #4556 because the tool-scout playbook has no dependency-walk
@@ -13,7 +15,7 @@ The authoritative source for dispatch policy is `scripts/autopilot/decide.py`.
 > deps:check` + the OSV scan) is built by
 > `src/scout/calendar-walk.ts:planWalk()`. Per-category cooldown
 > (30d default) and per-tool cooldown (90d, via the Phase A seen-list)
-> stack on top of the per-class 7d cooldown — all three must clear
+> stack on top of the per-class cooldown — all three must clear
 > before a category is dispatched. When the per-category cooldown says
 > "skip" but per-tool says "ready", the category-level skip wins
 > (operator preference: fewer issues). Each dispatched outcome is
@@ -21,10 +23,7 @@ The authoritative source for dispatch policy is `scripts/autopilot/decide.py`.
 > (`recordCalendarDispatch` for calendar walks) — one call lands the `hydra:scout:dispatches`
 > audit entry, the per-category cooldown stamp, and the per-day stat
 > counter that `/api/scout/stats` rolls up (issue #4556: calendar walks
-> were previously invisible on that endpoint). Steady-state cost slice:
-> ~4% of the \$50/day cap (`SCOUT_DAILY_COST_SHARE` in
-> `calendar-walk.ts`); operators override via
-> `state.limits.scout_cost_share`.
+> were previously invisible on that endpoint).
 >
 > The former USD cost-cap gates (scout cost-share, issue #532, and the
 > per-cycle `dev_target` backstop, issue #1059) were removed in issue #5175:
@@ -42,9 +41,9 @@ The authoritative source for dispatch policy is `scripts/autopilot/decide.py`.
 > via `hydra-prd` / `to-tickets`. It is **issue-producing, not
 > direct-dispatch** — it never dispatches `dev_orch` itself; the issues it
 > files re-enter the board as ordinary `ready-for-agent` work on a later
-> turn. `SIGNAL_COOLDOWNS["architecture_orch"] = 24h`
-> (`decide.py`) — a daily idle-reclamation cadence, in contrast to
-> `scout_orch`'s weekly 7d walk.
+> turn. its cooldown is the `architecture_orch` row's `cooldownSeconds`
+> in `classes.json` (hourly) — an idle-reclamation cadence, in contrast to
+> `scout_orch`'s weekly walk.
 >
 > Two precomputed Turn Snapshot signals gate it (decide.py reads
 > them verbatim, never recomputing board-empty or cooldown here — the
@@ -63,18 +62,18 @@ The authoritative source for dispatch policy is `scripts/autopilot/decide.py`.
 >   true when `ready_for_agent == 0 AND needs_research == 0 AND
 >   needs_triage == 0 AND work_queue (hydra:anchors:work-queue) == 0`.
 >
-> The 24h per-class cooldown is the BACK-STOP (honored by the shared
+> The per-class cooldown is the BACK-STOP (honored by the shared
 > `signal_is_cooled` guard); `arch_board_saturated` is the primary
 > suppressor. `architecture_orch` is registered in `decide.py`'s
-> `SIGNAL_CLASSES` dispatch tuple and excluded under `target-only` runs
-> via `SCOPE_TARGET_ONLY_EXCLUDE` (it scans the orchestrator's own
+> `SIGNAL_LOOP_ORDER` and excluded under `target-only` runs
+> because its `scope` column in `classes.json` is `orch` (it scans the orchestrator's own
 > codebase and emits orch-scope issues — orch-scope by definition).
 >
 > **`architecture_target` soft-dependency:** there is deliberately NO
 > `architecture_target` mirror today. It stays OUT until the Target PR
 > merge backlog (#718) drains — wiring it prematurely would manufacture
 > target work that cannot merge. When #718 clears, the mirror is added the
-> same way (`SCOPE_TARGET_ONLY_EXCLUDE` gains no target entry; a
+> same way (the mirror would be a new `scope: target` row in `classes.json`; a
 > target-scope saturation count + fallback predicate land in
 > a Turn Snapshot collector).
 
@@ -87,24 +86,24 @@ The authoritative source for dispatch policy is `scripts/autopilot/decide.py`.
 > **issue-producing, not direct-dispatch** — the issues/PR it files re-enter
 > the board as ordinary work on a later turn.
 >
-> - **Cadence / cooldown:** `SIGNAL_COOLDOWNS["retro_orch"] = 24h`
->   (`decide.py`) — a once-per-day cadence, the same daily back-stop as
->   `architecture_orch` (in contrast to `scout_orch`'s weekly 7d walk). The
->   24h cooldown is what enforces "at most once per day": the gating signal
+> - **Cadence / cooldown:** the `retro_orch` row's `cooldownSeconds`
+>   in `classes.json` (daily) — a once-per-day cadence, in contrast to
+>   `architecture_orch`'s hourly and `scout_orch`'s weekly cadence. The
+>   cooldown is what enforces "at most once per day": the gating signal
 >   only asserts a completed run *exists*, so without the cooldown the same
 >   run would re-fire on every idle turn.
 > - **Spare-capacity / no-preemption:** `retro_orch` is a signal class, so it
 >   has no slot semantics and `decide.py` dispatches every pipeline slot
->   (dev/QA/research/design-concept) BEFORE the signal loop. It is registered
->   LAST in the `decide.py` signal iteration tuple, making it the
->   lowest-priority signal class — a retro therefore never preempts an active
->   or pending dev/QA/research dispatch. That ordering, not a separate
+>   (dev/QA/research/design-concept) BEFORE the signal loop. Pipeline slots are
+>   dispatched before any signal class, so a retro never preempts an active
+>   or pending dev/QA/research dispatch (its position among signals is
+>   `SIGNAL_LOOP_ORDER` in `decide.py`; other classes follow it). That ordering, not a separate
 >   capacity gate, is how the issue's "does not preempt pipeline classes"
 >   requirement is met.
 > - **Scope / target:** `retro_orch` analyses the orchestrator's OWN autopilot
 >   runs and files orch-scope improvements — orch-scope by definition. It is
->   excluded under `target-only` runs via `SCOPE_TARGET_ONLY_EXCLUDE`,
->   mirroring `scout_orch` / `architecture_orch`. There is no
+>   excluded under `target-only` runs (its `scope` is `orch` in
+>   `classes.json`), mirroring `scout_orch` / `architecture_orch`. There is no
 >   `retro_target` mirror (the Target produces no autopilot runs to retro).
 > - **Signal seam:** the single gate is **`retro_run_available`** — true when
 >   a COMPLETED run exists to analyse (the Turn Snapshot `retro` collector reads the
@@ -126,18 +125,18 @@ The authoritative source for dispatch policy is `scripts/autopilot/decide.py`.
 > **Cleanup wiring (issue #960, parent #958):** `cleanup_orch` is the
 > high-confidence mechanical backfill class. It dispatches the headless
 > `/hydra-cleanup` skill — a **deterministic** dead-code + simplification
-> detector (a `knip`/`ts-prune` **devDependency**, NOT a runtime dep — ADR-0005
+> detector (a `knip` **devDependency**, NOT a runtime dep — ADR-0005
 > only constrains runtime deps) that finds provably-unused exports/files and
 > files them as GitHub issues. Like `architecture_orch` / `retro_orch` it is
 > **issue-producing, not direct-dispatch** — the issues it files re-enter the
 > board as ordinary work on a later turn.
 >
-> - **Cadence / cooldown:** `SIGNAL_COOLDOWNS["cleanup_orch"] = 3600` (1h) —
->   the same hourly backfill cadence as `discover_orch` / `architecture_orch`
->   (#959), so the workhorse runs hot on an idle board.
+> - **Cadence / cooldown:** the `cleanup_orch` row's `cooldownSeconds`
+>   in `classes.json` — an hourly backfill cadence like `discover_orch` /
+>   `architecture_orch` (#959), so the workhorse runs hot on an idle board.
 > - **Trigger / gate:** keyed off the **same** unified `orch_backfill_idle`
 >   signal as the backfill set. `cleanup_board_saturated` is the PRIMARY
->   suppressor (checked FIRST in `decide.py:_select_for_signal`, before the 1h
+>   suppressor (checked FIRST in `decide.py:_select_for_signal`, before the
 >   cooldown) — true when the count of OPEN issues carrying the stable
 >   `cleanup-scan` label exceeds `CLEANUP_BOARD_SATURATION_CAP = 10` (the cap
 >   lives in `src/autopilot/turn-snapshot/board-saturation.ts`, not this playbook, mirroring
@@ -155,16 +154,20 @@ The authoritative source for dispatch policy is `scripts/autopilot/decide.py`.
 >   `tsc` still pass", so the deletion is self-checking and routes straight to
 >   `ready-for-agent`.
 > - **Scope / target:** orch-scope by definition (it scans the orchestrator's
->   own `src/`), excluded under `target-only` via `SCOPE_TARGET_ONLY_EXCLUDE`,
->   mirroring `scout_orch` / `architecture_orch` / `retro_orch`. There is no
->   `cleanup_target` mirror (the Target PR merge backlog, #718, must drain first).
+>   own `src/`), excluded under `target-only` (`scope: orch` in `classes.json`),
+>   mirroring `scout_orch` / `architecture_orch` / `retro_orch`. Its Target
+>   mirror is the `cleanup_target` class (its own `classes.json` row and
+>   `SIGNAL_LOOP_ORDER` entry).
 
 > **Phase B wiring (issue #466, sub of #437):** `design_concept_orch`
 > fires before `dev_orch` for an orch anchor when the artifact is
 > missing or stale. Phase B is **warn-only** — a draft artifact whose
 > `gateCheck()` returns `ok:false` is still treated as "fresh present"
-> and `dev_orch` proceeds. Phase C (separate issue) will flip warn-only
-> to a hard block. The `design_concept_target` mirror lands in Phase D.
+> and `dev_orch` proceeds. The plan-level
+> selector stays warn-only (INV-009 is a stderr WARN); the hard gate is
+> per-anchor at PR time (the `design-concept-reconcile` required check and
+> `hydra-qa` preflight, see `hydra-qa-reference.md`), not in this selector.
+> The `design_concept_target` mirror lands in Phase D.
 >
 > Sequencing rule: when the best candidate carries a `designConcept`
 > block with `present:true` and `isFresh:true`, the

@@ -70,7 +70,7 @@ HYDRA_AUTOPILOT_TOKEN_BUDGET=100000 HYDRA_AUTOPILOT_MAX_SEC=600 claude --dangero
 HYDRA_AUTOPILOT_SCOPE=orch-only claude --dangerously-skip-permissions -p "/hydra-autopilot"
 ```
 
-Slash-args (`--scope=`, `--tokens=`, `--max-sec=`, `--idle-turns=`,
+Slash-args (`--scope=`, `--tokens=`, `--max-sec=`,
 `--subagent-soft=`, `--subagent-hard=`, `--unattended=`, `--quota-week-max=`) parse via `args-parse.sh` and override env
 vars. The `--quota-week-max` flag is the opt-in quota-percent budget (issue #3867 — see
 **Termination**); unset means disabled.
@@ -99,7 +99,7 @@ verdict's ladder):
 2. **Consult `/api/usage/eligibility`** (the Pacing Curve, #857): skip when
    `.reasons.paused == true` (operator pause, #988), `.reasons.sessionBlockedUntil`
    is a future instant (session-limit hard block, #1089),
-   `.reasons.emergencyStop == true` (5h cap ≥ 90%) or `.paceState == "ahead"`
+   `.reasons.emergencyStop == true` (hard-stop threshold, `HYDRA_USAGE_EMERGENCY_STOP_PERCENT`) or `.paceState == "ahead"`
    (above the curve); otherwise (`on`/`behind`, not emergency) launch via
    `systemctl --user start hydra-autopilot.service`.
 3. **Fail safe** — if the eligibility endpoint is unreachable, do NOT launch
@@ -114,7 +114,7 @@ self-expiring block (`hydra:autopilot:session-blocked-until`, TTL to the reset
 instant). While the block is in the future the eligibility route forces
 `allow=false` and surfaces `reasons.sessionBlockedUntil`, so the Gate skips
 relaunch into the exhausted quota instead of dying instantly on repeat. The
-OAuth 5h `emergencyStop` undershoots the true session limit, so this is the
+OAuth `emergencyStop` undershoots the true session limit, so this is the
 authoritative "the next run cannot make a single turn" signal. Admission
 resumes automatically once the reset passes (TTL expiry + a past-instant read
 guard) — no operator action needed.
@@ -151,7 +151,7 @@ Each launched run is still sized for up to 8h of work (the service's 9h
 prevents the ~15-min timer from ever stacking a second run on top of a live
 one. When there is nothing to do the run no longer self-terminates on idle
 turns (that arm was removed with term-check, #5070); it ends on the budget,
-clock, quota or wait-only idle-drain causes in `decide.py`'s `_check_termination`.
+clock, quota or wait-only-idle causes in `decide.py`'s `_check_termination`.
 The L2 decision brain in `decide.py` benefits from a stable in-process
 view of pipeline state across many turns, so the Gate launches one long run
 and lets it run to budget/clock/idle rather than firing many short bursts.
@@ -221,9 +221,8 @@ Why: a stale `~/.claude/skills/` mirror of this playbook against a newer
 state.json shape makes the model silently wedge mid-reconcile. The handshake
 converts that into a loud abort at second 0.
 
-A v1 state.json (legacy, no `schema_version` field) is interpreted as
-v1 via the `// 1` jq fallback above — mismatched against any modern
-playbook, the handshake aborts and the operator re-runs after
+A legacy state.json with no `schema_version` field is mismatched against any modern
+playbook, so the handshake aborts and the operator re-runs after
 `bootstrap.sh` writes a fresh v2 state on next invocation. There is
 no in-place upgrader: bootstrap is the single writer for state.json.
 

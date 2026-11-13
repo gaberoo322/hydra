@@ -32,7 +32,7 @@ order and dispatches each action through the appropriate tool:
   -----------          ----------------------
   dispatch             Agent(run_in_background=True, ...)
   auto-merge           Bash(gh pr review/merge)
-  apply-operator-approved   Bash(gh pr edit --add-label operator-approved)
+  apply-operator-approved   (retired: no longer emitted by decide(); see make_apply_operator_approved)
   update-branch        Bash(gh pr update-branch)
   surface-pr           Bash(gh api .../issues/N/labels + gh pr comment)
   reap                 Bash(./scripts/autopilot/reap.py completion ...)
@@ -235,7 +235,7 @@ Helpers `make_*` construct them so call sites stay typed.
 
   dispatch              { type, slot, skill, prompt_args, reason, worktreeBranch }
   auto-merge            { type, pr_number, tier, reason }
-  apply-operator-approved { type, pr_number, tier, reason, mechanical }
+  apply-operator-approved { type, pr_number, tier, reason, mechanical }  (retired: never emitted)
   update-branch         { type, pr_number, reason }
   surface-pr            { type, pr_number, cause, reason }
   reap                  { type, slot, task_id, total_tokens, skill }
@@ -610,9 +610,10 @@ SIGNAL_LOOP_ORDER = (
     # is met by being a real dispatch, NOT by editing the terminate path).
     "architecture_orch",
     # retro_orch (issue #920, parent #917) — daily per-run retrospective.
-    # Registered LAST in the signal iteration so it is the lowest-priority
-    # signal class: pipeline slots dispatch first (step 4), then the other
-    # signal classes, and only then is spare capacity spent on a retro.
+    # Registered after the discover/scout/architecture classes (several
+    # classes follow it in this tuple, e.g. cleanup_orch, the target mirrors,
+    # skill_prune, wayfinder_orch): pipeline slots dispatch first (step 4),
+    # then the signal classes in this order.
     # The 24h class cooldown (SIGNAL_COOLDOWNS) is honored by the shared
     # signal_is_cooled guard inside _select_for_signal.
     "retro_orch",

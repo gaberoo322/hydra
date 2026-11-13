@@ -10,14 +10,14 @@ directly — read this when debugging a missing record or metric.
 After PR-3 (#383) deleted the in-process control loop (ADR-0006), `src/cycle.ts`
 declared that autopilot subagents would write their own `hydra:cycle:*`
 records. That handoff is implemented by `POST /api/autopilot/cycle-record`
-(see `src/api/autopilot.ts`), invoked via `dispatch.sh cycle-record`.
+(see `src/api/autopilot-lifecycle.ts`), invoked via `dispatch.sh cycle-record`.
 
 The cycle-record write fires at **reap time**:
 
 1. **`reap.py completion`** — when a code-writing class (`hydra-dev` /
    `hydra-target-build`) reaps, it fires cycle-record with `status=completed`
    (or `status=failed` if the soft cap was tripped). The `cycleId` is the
-   dispatch's **`effective_cycle_id = worktree_branch or task_id`** (reap.py:650,
+   dispatch's **`effective_cycle_id = worktree_branch or task_id`** (`reap.py` symbol `effective_cycle_id`,
    issue #3391): for a worktree/feature-branch dispatch it is the synthesised
    worktree branch (`worktree-agent-<runToken>-t<N>-<slot>`); only a branch-less
    signal-class completion keys on the bare autopilot task_id. Either way the id
@@ -108,7 +108,7 @@ After the guarded arm (`qa-merge-guard.ts` allows, then `gh pr merge --auto --sq
 # Issue #3539: pass the dispatch's synthesised worktree branch (5th arg). It
 # becomes the pending entry's cycleId, so the merge-watch enrichment keys on the
 # SAME `effective_cycle_id = worktree_branch or task_id` reap used for its
-# CLASSIFIED cycle-record (reap.py:650). Without it, arming keyed the pending
+# CLASSIFIED cycle-record (`reap.py` `effective_cycle_id`). Without it, arming keyed the pending
 # entry on the bare $task_id while reap keyed its classified record on the branch
 # — divergent keys — so on every worktree dispatch the enrichment became an
 # un-joinable bare-UUID FIRST write with no anchorType → `unclassified` (the
@@ -155,20 +155,7 @@ section B.
 
 After PR-3 (#383) deleted `codex-runner.ts` (the Codex CLI, retired by ADR-0006), the legacy `recordSpend` writer
 that fed the retired daily-spend surrogate for code-writing work was removed.
-The autopilot now owns the daily-spend signal via a token surrogate. On
-each subagent reap that has authoritative `total_tokens`, the autopilot
-SHOULD fire:
-
-```bash
-curl -fsS -X POST -H "Content-Type: application/json" \
-  --data "$(jq -n \
-    --arg skill "$cls_skill" \
-    --argjson tokens "$total_tokens" \
-    --arg cycleId "$task_id" \
-    '{skill: $skill, tokens: $tokens, cycleId: $cycleId}')" \
-  "${HYDRA_API:-http://localhost:4000/api}/metrics/tokens" >/dev/null 2>&1 || \
-  echo "[autopilot] dispatch: tokens write failed for cycle=$task_id (non-fatal)" >&2
-```
+The autopilot now owns the daily-spend signal via a token surrogate. `reap.py` posts it on every reap that has authoritative `total_tokens` (the `wait_or_reap` / `reap` action-table rows in the main playbook) — the parent never hand-posts `/api/metrics/tokens`, which would double-count.
 
 This is best-effort and idempotent at the autopilot's `reaped_task_ids`
 layer (the reaper already dedupes by `task_id` before firing follow-up
