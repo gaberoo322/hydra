@@ -282,3 +282,49 @@ describe("decideLedgerSkip — ledgerless Target is a clean skip (#4553, mirrors
     assert.equal(decideLedgerSkip({ ...base, explicitSourcePath: true, appPackageJsonText: null }).skip, false);
   });
 });
+
+// --- issue #5498: Target-capability body layout ---
+import { probeTargetCapabilities } from "../scripts/target/target-capabilities.ts";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { layoutFromCapabilities, DEFAULT_BODY_LAYOUT } from "../scripts/ci/hydra-target-wire-or-retire-emit.ts";
+
+const capsFull = (() => {
+  const d = mkdtempSync(join(tmpdir(), "wor-caps-"));
+  writeFileSync(join(d, "package.json"), JSON.stringify({ scripts: { "deadcode:check": "x", "deadcode:update-baseline": "x" } }));
+  writeFileSync(join(d, "deadcode-baseline.json"), "{}");
+  const caps = probeTargetCapabilities({ workspace: d, appDir: d });
+  rmSync(d, { recursive: true, force: true });
+  return caps;
+})();
+
+describe("wire-or-retire emitter body layout", () => {
+  const ledger = "| `src/lib/a.ts` | wire-or-retire | nothing | 2026-04-01 |\n";
+
+  test("with appSubdir '' the body carries no subdirectory prefix and names the Target's scripts", () => {
+    const caps = capsFull;
+    const plan = planWireOrRetireEmit(ledger, [], "2026-06-01", 3, layoutFromCapabilities("", caps));
+    const body = plan.items[0].body;
+    assert.ok(!body.includes("web/"), "no web/ literal");
+    assert.match(body, /`deadcode-baseline\.json`/);
+    assert.match(body, /npm run deadcode:update-baseline/);
+    assert.match(body, /under `src`/);
+  });
+
+  test("with a nested appSubdir every repo-relative path is joined through it", () => {
+    const layout = layoutFromCapabilities("app", {
+      deadcodeBaseline: { ok: true, value: "app/deadcode-baseline.json" },
+    });
+    const body = planWireOrRetireEmit(ledger, [], "2026-06-01", 3, layout).items[0].body;
+    assert.match(body, /`app\/deadcode-baseline\.json`/);
+    assert.match(body, /under `app\/src`/);
+  });
+
+  test("a Target with no dead-code tooling renders an explicit generic step, not a made-up script", () => {
+    const body = planWireOrRetireEmit(ledger, [], "2026-06-01", 3, DEFAULT_BODY_LAYOUT).items[0].body;
+    assert.ok(!/npm run deadcode/.test(body));
+    assert.match(body, /exposes no baseline-update script/);
+  });
+});
+

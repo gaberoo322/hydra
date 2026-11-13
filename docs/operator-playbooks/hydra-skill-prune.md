@@ -65,7 +65,8 @@ Only ONE skill is chosen. Do not batch.
 
 ## Step 2 — Propose deletions along the Pocock taxonomy
 
-Read the chosen playbook and classify every deletion candidate into exactly one
+Prune toward the playbook rules in `CODING_STANDARDS.md` (`STD-PLAYBOOK-*`).
+Classify every deletion candidate in the chosen playbook into exactly one
 Pocock bucket:
 
 - **Duplication** — the same material stated in two places (a rule restated in
@@ -75,8 +76,7 @@ Pocock bucket:
   changelog line whose fix has long merged; a "NOTE for slice #N" that shipped;
   a retired-subsystem caveat). Delete the fossil.
 - **No-op** — a paragraph whose deletion does **not** change agent behavior (a
-  motivational preamble, a "why this exists" essay that no step reads, a
-  redundant re-explanation of a rule already stated mechanically).
+  preamble, a "why this exists" essay that no step reads, a restated rule).
 
 This is **demote-or-remove-with-parity, never blind deletion** — mirror
 `hydra-cleanup`'s demote-not-delete discipline. A candidate that carries a
@@ -104,8 +104,8 @@ now reads the actual diff.)
 # written to the real playbook path (Step 4 is what writes it to disk).
 mkdir -p evals/skill-prune/.staged
 git show "origin/master:docs/operator-playbooks/hydra-${SKILL}.md" \
-  > evals/skill-prune/.staged/before.md
-printf '%s' "$PRUNED_BODY" > evals/skill-prune/.staged/after.md
+  > evals/skill-prune/.staged/before.md  # ref-check: example
+printf '%s' "$PRUNED_BODY" > evals/skill-prune/.staged/after.md  # ref-check: example
 
 # Invoke the pinned promptfoo directly with -c against the REAL-PAIR config
 # (evals/skill-prune/parity.yaml — a subdirectory, deliberately outside the

@@ -109,6 +109,16 @@ export interface DispatchClassRow {
   readonly scope: DispatchClassScope;
   /** GitHub label the class's filing skill stamps; null = files nothing. */
   readonly provenanceLabel: string | null;
+  /**
+   * Completion obligations of the row's DEFAULT `skill` (issue #5473). Per-SKILL
+   * facts: reap.py resolves them by the skill that ran, and rows sharing a
+   * skill must agree. `cycleRecord` = the skill's completions write a
+   * cycle-record; `worktreeGc` = reap fires the worktree sweep;
+   * `reflectionDeposit` = the skill runs the planning-time reflection deposit.
+   */
+  readonly cycleRecord: boolean;
+  readonly worktreeGc: boolean;
+  readonly reflectionDeposit: boolean;
   /** Free-form design rationale (formerly inline comments in decide.py). */
   readonly notes?: string;
 }
@@ -128,7 +138,13 @@ const REQUIRED_COLUMNS = [
   "cooldownSeconds",
   "scope",
   "provenanceLabel",
+  "cycleRecord",
+  "worktreeGc",
+  "reflectionDeposit",
 ] as const;
+
+/** The three boolean completion-obligation columns (issue #5473). */
+const OBLIGATION_COLUMNS = ["cycleRecord", "worktreeGc", "reflectionDeposit"] as const;
 
 const KINDS: readonly string[] = ["pipeline", "signal"];
 const SCOPES: readonly string[] = ["orch", "target", "both"];
@@ -293,6 +309,11 @@ export function parseClassTaxonomy(jsonText: string): readonly DispatchClassRow[
     ) {
       fail(`${name}: provenanceLabel must be null or a non-empty string`);
     }
+    for (const col of OBLIGATION_COLUMNS) {
+      if (typeof row[col] !== "boolean") {
+        fail(`${name}: ${col} must be a boolean`);
+      }
+    }
     const cooldown = row.cooldownSeconds;
     if (row.kind === "signal") {
       if (typeof cooldown !== "number" || !Number.isInteger(cooldown) || cooldown < 0) {
@@ -319,6 +340,9 @@ export function parseClassTaxonomy(jsonText: string): readonly DispatchClassRow[
       cooldownSeconds: cooldown as number | null,
       scope: row.scope as DispatchClassScope,
       provenanceLabel: row.provenanceLabel as string | null,
+      cycleRecord: row.cycleRecord as boolean,
+      worktreeGc: row.worktreeGc as boolean,
+      reflectionDeposit: row.reflectionDeposit as boolean,
       ...(typeof row.notes === "string" ? { notes: row.notes } : {}),
     });
   }
@@ -376,55 +400,37 @@ export const SIGNAL_CLASS_COOLDOWNS: Readonly<Record<string, number>> =
 // ---------------------------------------------------------------------------
 
 /**
- * The skills whose completions reap.py records as CYCLES — a TS mirror of
- * `CYCLE_RECORD_SKILLS` in `scripts/autopilot/reap.py`, where the POLICY lives
- * ("research and discover dispatches are subagent work but don't fit the
- * 'cycle' semantic", #430/#466; `hydra-qa` joined in #4730 so per-review cost
- * is recorded). Everything downstream of the cycle-record
- * write — metrics trend rows, `stats.anchorDistribution`, the durable
- * dispatch-outcome records (#2942) the retro `crossRunTrend` folds — is
- * therefore structurally blind to every class NOT dispatched by one of these
- * skills, and a consumer reading those views as class liveness sees "dark"
- * where the truth is "not in this ledger" (issue #4392: three false
- * "producers dark" alarms, #3752 lineage).
- *
- * The mirror exists so read surfaces can LABEL that blind spot
- * (`coverage.classesNotRecorded`); the policy stays in reap.py. Pinned to the
- * reap.py set literal by `test/taxonomy-classes.test.mts` (the same cross-file
- * parity discipline as the decide.py tuple tests) — edit both together or the
- * suite reddens.
+ * Cycle-record coverage comes from the `cycleRecord` taxonomy column (issue
+ * #5473; formerly a hand-kept skill-set mirror of reap.py's gate).
+ * reap.py resolves the same column by the skill that ran, so everything
+ * downstream of the cycle-record write — metrics trend rows,
+ * `stats.anchorDistribution`, the durable dispatch-outcome records (#2942) the
+ * retro `crossRunTrend` folds — is structurally blind to every class whose row
+ * has `cycleRecord: false`, and a consumer reading those views as class
+ * liveness sees "dark" where the truth is "not in this ledger" (issue #4392:
+ * three false "producers dark" alarms, #3752 lineage).
  */
-export const CYCLE_RECORD_SKILLS: ReadonlySet<string> = new Set([
-  "hydra-dev",
-  "hydra-target-build",
-  "hydra-grill",
-  // Issue #4730: QA dispatches are recorded so "tokens per review" is
-  // answerable from the dispatch-outcome ledger (qa_orch is a non-merging
-  // `other`-role class on the class scoreboard — never scored on merge rate).
-  "hydra-qa",
-]);
 
 /**
  * Dispatch classes whose completions DO write a cycle-record — the partition
  * complement of {@link CLASSES_WITHOUT_CYCLE_RECORD}. DERIVED from the same
- * taxonomy join (rows whose `skill` is in {@link CYCLE_RECORD_SKILLS}), never
+ * the `cycleRecord` column, never
  * hand-listed, so the two lists partition {@link DISPATCH_CLASSES} by
  * construction (issue #4392 design-concept INV-3: no class can ever land in
  * neither list when classes.json grows).
  */
 export const CLASSES_WITH_CYCLE_RECORD: readonly string[] = Object.freeze(
-  DISPATCH_CLASSES.filter((r) => CYCLE_RECORD_SKILLS.has(r.skill)).map(
+  DISPATCH_CLASSES.filter((r) => r.cycleRecord).map(
     (r) => r.name,
   ),
 );
 
 /**
  * Dispatch classes that structurally never appear in a cycle-derived ledger —
- * their completions are reaped, but reap.py's `CYCLE_RECORD_SKILLS` gate fires
+ * their completions are reaped, but reap.py's `cycleRecord` gate fires
  * no cycle-record for their skill, so no metrics-trend row, `anchorDistribution`
  * bucket, or dispatch-outcome record can carry them. DERIVED, never
- * hand-listed: the {@link DISPATCH_CLASSES} rows whose `skill` is outside
- * {@link CYCLE_RECORD_SKILLS}, in file (dispatch) order. Emitted as
+ * hand-listed: the {@link DISPATCH_CLASSES} rows with `cycleRecord: false`, in file (dispatch) order. Emitted as
  * `coverage.classesNotRecorded` by `GET /api/metrics` and the retro bundle's
  * `crossRunTrend.coverage` so a consumer reads "these classes are not in this
  * ledger" instead of a confident 0. Class liveness itself comes from
@@ -432,7 +438,7 @@ export const CLASSES_WITH_CYCLE_RECORD: readonly string[] = Object.freeze(
  * distributions.
  */
 export const CLASSES_WITHOUT_CYCLE_RECORD: readonly string[] = Object.freeze(
-  DISPATCH_CLASSES.filter((r) => !CYCLE_RECORD_SKILLS.has(r.skill)).map(
+  DISPATCH_CLASSES.filter((r) => !r.cycleRecord).map(
     (r) => r.name,
   ),
 );
@@ -450,10 +456,10 @@ export const CLASSES_WITHOUT_CYCLE_RECORD: readonly string[] = Object.freeze(
  * signal. A non-PR class finishing in 90 seconds (`qa_orch`, `health`) is
  * normal, not a red flag.
  *
- * A strict subset of {@link CYCLE_RECORD_SKILLS} BY CONSTRUCTION here, and
- * pinned by a test (`test/retro-bundle.test.mts`): the short-circuit signal
+ * A strict subset of the `cycleRecord` skills, pinned by a test
+ * (`test/retro-bundle.test.mts`): the short-circuit signal
  * reads the dispatch-outcome ledger's `durationMs`, which only
- * `CYCLE_RECORD_SKILLS` completions write — so adding a PR-producing skill
+ * `cycleRecord` completions write — so adding a PR-producing skill
  * without a cycle record would make the predicate structurally blind to it.
  * Deliberately NOT sourced from reap.py: this labels read-side drill semantics
  * (which dispatches can short-circuit), not a write-side gate.

@@ -17,7 +17,7 @@ Research improvement opportunities for the Hydra orchestrator (`~/hydra`). Produ
 1. `~/hydra/CLAUDE.md` — architecture, conventions
 2. `~/hydra/config/direction/architecture-review.md` — known issues, scores
 3. `~/hydra/config/direction/priorities.md` — target project needs
-4. `~/hydra/config/feedback/to-{planner,executor,skeptic}.md` — recurring problems (note: `to-skeptic.md` is now loaded only for the high-risk-review path; low/medium-risk uses the deterministic preflight gate)
+4. Recurring problems: the open `needs-triage` / `blocked` issues on `gaberoo322/hydra` and the retro seen-list
 
 Then live state (parallel):
 ```bash
@@ -31,9 +31,8 @@ trend=d.get('trend',d.get('metrics',[]))
 merged=sum(1 for m in trend if int(m.get('tasksMerged',0))>0)
 failed=sum(1 for m in trend if int(m.get('tasksFailed',0))>0)
 empty=sum(1 for m in trend if 'no task' in m.get('taskTitle','').lower() or 'skipped' in m.get('taskTitle','').lower())
-rolled=sum(1 for m in trend if m.get('rolledBack') in ['true',True])
 costs=[float(m.get('costUsd',0)) for m in trend]
-print(f'Cycles: {len(trend)} | Merged: {merged} | Failed: {failed} | Empty: {empty} | Rolled: {rolled}')
+print(f'Cycles: {len(trend)} | Merged: {merged} | Failed: {failed} | Empty: {empty}')
 print(f'Merge rate: {100*merged//max(len(trend),1)}% | Empty rate: {100*empty//max(len(trend),1)}%')
 print(f'Total cost: \${sum(costs):.2f} | Cost/merge: \${sum(costs)/max(merged,1):.2f}')
 "
@@ -63,7 +62,7 @@ Spawn three researchers — Control Loop, Learning, Infrastructure. Each gets th
 - **Claude:** `Task(...)` ×3 in one message.
 
 ### Agent 1: Control Loop & Efficiency
-Investigate: empty cycle reduction, scope creep patterns, verification pipeline (mutation/JIT kill rates), plan cache hit rate, model routing accuracy, cycle-time bottleneck, cost optimization (caching, thread reuse, context compression).
+Investigate: empty cycle reduction, scope creep patterns, verification pipeline (mutation/JIT kill rates), model routing accuracy, cycle-time bottleneck, cost optimization (caching, context compression).
 
 Files: the autopilot decision and verification modules under `scripts/autopilot/` and `scripts/ci/` (the in-process control-loop modules were deleted, ADR-0006).
 
@@ -293,7 +292,7 @@ heredoc so the `<<'EOF'` injection-safety quoting is preserved:
 
 ```bash
 . ~/hydra/scripts/hydra/footer.sh
-gh issue create --repo gaberoo322/hydra --title "..." --label "needs-triage" --body "$(cat <<'EOF'
+gh issue create --repo gaberoo322/hydra --title "..." --body "$(cat <<'EOF'
 ## Summary
 <1-2 sentences>
 
@@ -318,6 +317,8 @@ EOF
 )
 $(hydra_issue_footer hydra-research)"
 ```
+
+**State label (HARD):** `gh issue create` carries FLAG labels only, never a state. Immediately after it returns the issue URL, write the first state through the lifecycle seam: `npx tsx scripts/lifecycle.ts advance <N> needs-triage --actor hydra-research` (from none, gate-free). If it returns `illegal-transition` with observed state `needs-triage` (the reconcile zero-state backstop raced it), carry on. A non-zero exit is otherwise final — never fall back to a direct label write (ADR-0047 D3/D4).
 
 Issues MUST have acceptance criteria — `/hydra-dev` requires them.
 

@@ -100,6 +100,9 @@ export function deriveTaxonomyClasses(
     cooldownSeconds: r.cooldownSeconds,
     scope: r.scope,
     provenanceLabel: r.provenanceLabel,
+    cycleRecord: r.cycleRecord,
+    worktreeGc: r.worktreeGc,
+    reflectionDeposit: r.reflectionDeposit,
     ...(typeof r.notes === "string" ? { notes: r.notes } : {}),
   }));
   return {

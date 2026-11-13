@@ -38,7 +38,7 @@
 
 import type { DispatchOutcomeRecord } from "../redis/dispatch-outcomes.ts";
 import { bucketDispatchOutcome } from "../autopilot/cycle-status.ts";
-// Issue #4392: the taxonomy-derived complement of reap.py's CYCLE_RECORD_SKILLS
+// Issue #4392: the taxonomy-derived complement of the `cycleRecord` taxonomy column reap.py resolves
 // (a constant import — no I/O function is pulled in beyond the taxonomy's
 // one-time classes.json load, so the fold stays Redis-free as documented).
 import { CLASSES_WITHOUT_CYCLE_RECORD } from "../taxonomy/classes.ts";
@@ -230,7 +230,7 @@ interface CrossRunCoverage {
   rankingSound: boolean;
   /**
    * Dispatch classes that structurally never appear in this fold's inputs —
-   * their completions fire no cycle-record (reap.py's `CYCLE_RECORD_SKILLS`
+   * their completions fire no cycle-record (the `cycleRecord` taxonomy column's
    * gate), and dispatch-outcome records are written by that same path, so no
    * record can carry them however often they dispatch (issue #4392: three
    * false "producers dark" alarms, #4388 the latest, from consumers reading

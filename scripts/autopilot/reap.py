@@ -115,6 +115,7 @@ from reap_state import (
     mirror_cross_run_state_to_redis,
     redis_cli,
 )
+import taxonomy  # noqa: E402  (per-skill completion obligations, #5473)
 import reap_state  # noqa: E402  (attribute access: STATE_PATH is the persist target)
 import run_ledger  # noqa: E402  (the ONE state-document writer, #5075)
 
@@ -141,6 +142,7 @@ from reap_ghrefs import (
     _fetch_dev_orch_pr_list_json,
     _fetch_pr_list_json,
     _gh_run,
+    _lifecycle_argv,
 )
 
 # Issue #4398: the three dev_orch/dev_target stall-recovery handlers moved to
@@ -188,38 +190,33 @@ REFL_SOURCES_DIR = Path(os.environ.get("HYDRA_AUTOPILOT_REFL_DIR", "/tmp"))
 # completion outcome; the counters are incremented by saveDesignConcept()
 # / grill-artifact.sh at write time.
 #
-# Issue #4730 adds `hydra-qa`. Like grilling, QA is not code-writing, but its
-# per-dispatch cost is exactly what "tokens per review" / "tokens per caught
-# defect" need, and before this it was answerable only by hand from run
-# digests (qa_orch sat in coverage.classesNotRecorded and the class scoreboard
-# read it as `insufficient-sample`). A reaped hydra-qa completion now writes a
-# `status=completed` cycle-record (anchorType `qa-review`) whose durable
-# dispatch-outcome record carries class `qa_orch`, the anchor ref and tokens.
-# QA has no "merged" outcome — it never opens a PR, so no merge-watch /
-# reconcile enrichment ever upgrades it — and the class scoreboard scores it as
-# a non-merging `other`-role class (`not-scored`, like design_concept_orch),
-# never on merge rate. It is deliberately NOT in REFLECTION_DEPOSIT_SKILLS:
-# hydra-qa never runs the planning-time reflection-source deposit recipe.
-CYCLE_RECORD_SKILLS = {"hydra-dev", "hydra-target-build", "hydra-grill", "hydra-qa"}
-# Issue #4392: this set is the POLICY that shapes every cycle-derived ledger —
-# metrics-trend rows, /api/metrics stats.anchorDistribution, and the durable
-# dispatch-outcome records (#2942) the retro crossRunTrend folds — so classes
-# dispatched by any OTHER skill (the whole producer family: discover/
-# architecture/cleanup/scout/retro, plus research) can never appear in those
-# views however often they fire. Reading such a view as class liveness produced
-# three false "producers dark" alarms (#3752, #4302, #4388). The set is
-# MIRRORED in src/taxonomy/classes.ts (CYCLE_RECORD_SKILLS, whose derived
-# CLASSES_WITHOUT_CYCLE_RECORD is emitted as coverage.classesNotRecorded by
-# /api/metrics and crossRunTrend so consumers read "not in this ledger" instead
-# of a confident 0). test/taxonomy-classes.test.mts pins the two definitions
-# together — edit both or the suite reddens.
+# Completion obligations (cycle-record, worktree sweep, reflection-deposit
+# diagnostic) are per-SKILL facts held in the Dispatch-Class Taxonomy
+# (classes.json `cycleRecord` / `worktreeGc` / `reflectionDeposit`, #5473) and
+# resolved here BY THE SKILL THAT RAN via `taxonomy.skill_obligations` -- a
+# wayfinder_orch `task` ticket dispatches hydra-dev, so it keeps all three.
+# Issue #4392: the cycleRecord column shapes every cycle-derived ledger
+# (metrics-trend rows, /api/metrics stats.anchorDistribution, the durable
+# dispatch-outcome records the retro crossRunTrend folds), so classes dispatched
+# by any other skill can never appear in those views however often they fire;
+# src/taxonomy/classes.ts derives CLASSES_WITHOUT_CYCLE_RECORD from the same
+# column so consumers read "not in this ledger" instead of a confident 0.
+# hydra-grill writes a design-concept artifact (no reflection deposit);
+# hydra-qa never opens a PR and runs no planning-time deposit recipe.
 CYCLE_RECORD_SCRIPT = Path(__file__).parent / "dispatch.sh"
 
-# Issue #2450: subset of CYCLE_RECORD_SKILLS that actually run the planning-time
-# reflection-source deposit recipe. hydra-grill writes a design-concept artifact,
-# not a reflection-source deposit, so it is NOT in this set — adding it would
-# produce a false-positive WARN on every grill completion.
-REFLECTION_DEPOSIT_SKILLS: frozenset[str] = frozenset({"hydra-dev", "hydra-target-build"})
+
+def _obligations_for(skill):
+    """Completion obligations of `skill`. DELIBERATE fail-open carve-out to the
+    taxonomy.py no-fallback rule: reap is the completion path and must never abort
+    (the old static sets could not fail), so an unreadable/corrupt/missing
+    classes.json (TaxonomyError, OSError incl. the stat TOCTOU, UnicodeDecodeError)
+    logs loudly to stderr and owes nothing."""
+    try:
+        return taxonomy.skill_obligations(skill)
+    except (taxonomy.TaxonomyError, OSError, UnicodeDecodeError) as exc:
+        print(f"[autopilot] WARN taxonomy-unavailable skill={skill}: {exc}", file=sys.stderr)
+        return taxonomy.SkillObligations(False, False, False)
 
 # Worktree-orphan GC trigger (issue #911).
 #
@@ -239,7 +236,6 @@ REFLECTION_DEPOSIT_SKILLS: frozenset[str] = frozenset({"hydra-dev", "hydra-targe
 # and swallowed — exactly like `_fire_cycle_record`. Skipped entirely unless
 # the dispatch was a worktree-bearing class, and suppressible via
 # HYDRA_REAP_WORKTREE_GC=0 for operators who prefer the timer alone.
-WORKTREE_GC_SKILLS = {"hydra-dev", "hydra-target-build", "hydra-qa"}
 WORKTREE_GC_SCRIPT = Path(__file__).resolve().parents[1] / "branch-prune.sh"
 
 # Issue #2020: a reflection-deposit presence diagnostic. `_read_reflection_sources`
@@ -712,29 +708,29 @@ def _fire_cycle_record(
     tokens (invariant 7) and report postEscalationMergeRate (invariant 8). Empty
     (the non-escalation majority) → dispatch.sh omits both fields (truthful null).
 
-    Cycle-record fire gate (issue #3284): normally only CYCLE_RECORD_SKILLS
-    (code-writing classes) trip a cycle-record write. But the ONLY class that
+    Cycle-record fire gate (issue #3284): normally only skills whose taxonomy
+    `cycleRecord` column is true trip a cycle-record write. But the ONLY class that
     cascade-escalates today is `cleanup_orch` (skill `hydra-cleanup`), a SIGNAL
-    class NOT in CYCLE_RECORD_SKILLS — so without an escalation-scoped exception,
+    class whose skill has `cycleRecord: false` — so without an escalation-scoped exception,
     an escalated cleanup dispatch would deposit its provenance, reap would read
     it, and then `_fire_cycle_record` would early-return and DISCARD it, leaving
     the outcome record (and thus the whole cascade rollup, which filters on a
     non-null `escalationAttempt`) permanently empty. So when a non-empty
     `escalation` blob is present we STILL fire the cycle-record write even for a
-    non-CYCLE_RECORD skill — the escalated attempt's durable outcome record is
+    `cycleRecord: false` skill — the escalated attempt's durable outcome record is
     exactly what the cascade metrics need. Non-escalated signal completions are
-    unaffected (empty escalation → the original CYCLE_RECORD_SKILLS-only gate).
+    unaffected (empty escalation → the original cycleRecord-column-only gate).
     """
     if not CYCLE_RECORD_SCRIPT.exists():
         return
     # Fire for code-writing classes (the #430 semantic) OR whenever a cascade
     # escalation provenance blob rode in (issue #3284) — the escalating class
     # (`cleanup_orch`/`hydra-cleanup`) is a signal class outside
-    # CYCLE_RECORD_SKILLS, so gating purely on the skill would silently drop the
+    # the cycleRecord column, so gating purely on the skill would silently drop the
     # escalated attempt's outcome record and structurally zero the cascade fold.
     if not skill:
         return
-    if skill not in CYCLE_RECORD_SKILLS and not escalation:
+    if not _obligations_for(skill).cycle_record and not escalation:
         return
     # Issue #3391: key the cycle-record on the synthesised worktree branch when
     # one is known, so the test-count-bearing write lands on the SAME indexed
@@ -818,7 +814,7 @@ def _fire_worktree_gc(skill: str | None) -> None:
     branch is gone), so overlapping invocations across rapid reaps converge
     harmlessly on the same reclaimed set.
     """
-    if not skill or skill not in WORKTREE_GC_SKILLS:
+    if not skill or not _obligations_for(skill).worktree_gc:
         return
     if os.environ.get("HYDRA_REAP_WORKTREE_GC", "1") == "0":
         return
@@ -1534,6 +1530,8 @@ def _fire_reflection_for_completion(
 # is now a data dependency: run_completion's fire steps take this record —
 # never the mutable slot — and nothing between the #3895 mismatch probe and
 # the release reads `s["slots"][cls]` at all.
+
+
 @dataclass(frozen=True)
 class CompletionSnapshot:
     """Immutable copy of every slot-derived field a completion's fire steps need.
@@ -1575,10 +1573,9 @@ def _release_dispatch_claim(cls: str, dispatch_id: str | None, outcome: str) -> 
     seam's idempotent `{ok:true, prior:null}` and is logged, not retried."""
     if not dispatch_id or cls.endswith("_target"):
         return
-    argv = [
-        "npx", "tsx", "scripts/lifecycle.ts", "release",
-        "--dispatch", str(dispatch_id), "--outcome", outcome, "--actor", "reap",
-    ]
+    argv = _lifecycle_argv(
+        "release", "--dispatch", str(dispatch_id), "--outcome", outcome, "--actor", "reap",
+    )
     try:
         r = subprocess.run(
             argv, capture_output=True, text=True, check=False, timeout=60,
@@ -1601,11 +1598,40 @@ def _release_dispatch_claim(cls: str, dispatch_id: str | None, outcome: str) -> 
     _append_log(f"claim_release cls={cls} dispatch_id={dispatch_id} outcome={outcome} result={result}")
 
 
-def _claim_release_outcome(cls: str, pr_exists: bool | None) -> str:
+def _qa_anchor_still_needs_qa(anchor_ref: str | None) -> bool | None:
+    """Does the qa_orch anchor issue still carry `needs-qa` right now? (#5318 INV-8)
+
+    ONE `gh issue view --json labels` read through the shared `_gh_run` seam.
+    True = still awaiting review (the QA dispatch posted no verdict that moved
+    it), False = it moved on, None = unreadable / not an `issue-<N>` anchor.
+    Never raises."""
+    m = re.match(r"^issue-(\d+)$", (anchor_ref or "").strip())
+    if not m:
+        return None
+    proc = _gh_run(
+        "issue", "view", m.group(1), "--repo", REPO, "--json", "labels",
+        context=f"#{m.group(1)} qa_orch claim-outcome labels view",
+    )
+    if proc is None or proc.returncode != 0:
+        return None
+    try:
+        labels = {
+            e.get("name") for e in (json.loads(proc.stdout).get("labels") or []) if isinstance(e, dict)
+        }
+    except (ValueError, AttributeError, TypeError):  # intentional: unparseable labels payload reads as unknown (None), caller treats it as not-confirmed
+        return None
+    return "needs-qa" in labels
+
+
+def _claim_release_outcome(cls: str, pr_exists: bool | None, anchor_ref: str | None = None) -> str:
     if cls == "dev_orch":
         return "pr-opened" if pr_exists is True else ("no-pr" if pr_exists is False else "released")
     if cls == "qa_orch":
-        return "verdict-posted"
+        # #5318 INV-8: a QA dispatch that ended with the anchor STILL `needs-qa`
+        # posted no verdict that moved it: a `stall`, which the seam's qa-stall
+        # Live Cap counts. Moved on = verdict landed; unreadable = plain release.
+        still = _qa_anchor_still_needs_qa(anchor_ref)
+        return "released" if still is None else ("stall" if still else "verdict-posted")
     return "released"
 
 
@@ -2013,7 +2039,7 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # hydra-grill is excluded regardless: it writes a design-concept artifact,
     # not a reflection-source deposit, so it never runs this recipe at all.
     # Best-effort: print to stderr (operator-visible) AND append to the run log.
-    if (skill in REFLECTION_DEPOSIT_SKILLS and
+    if (_obligations_for(skill).reflection_deposit and
             reflection_presence in (
                 REFL_PRESENCE_EMPTY, REFL_PRESENCE_READ_ERROR, REFL_PRESENCE_NO_TASK_ID,
             )):
@@ -2147,8 +2173,10 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
 
     # ADR-0047 D4 (#5418): release the dispatcher claim by dispatch id, after
     # the accounting writes and the hoisted PR-list fetch. Non-fatal, order-neutral.
-    if snap.slot_occupied:
-        _release_dispatch_claim(cls, snap.dispatch_id, _claim_release_outcome(cls, pr_exists))
+    # The outcome (which may read one issue's labels, qa_orch, #5318 INV-8) is
+    # only computed when there is a claim to release.
+    if snap.slot_occupied and snap.dispatch_id and not cls.endswith("_target"):
+        _release_dispatch_claim(cls, snap.dispatch_id, _claim_release_outcome(cls, pr_exists, snap.anchor_ref))
 
     # Issue #1820: the reflection-record WRITE producer wired in #1119 Slice 1
     # (self_heal.append_failure → _fire_reflection_record) was dead on the live
@@ -2171,7 +2199,7 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # pinned resume dispatch. Fully best-effort/non-fatal.
     _handle_dev_orch_stall(
         s, cls, skill, snap.anchor_ref, task_id, snap.worktree_branch,
-        dev_orch_pr_list_json
+        dev_orch_pr_list_json, snap.dispatch_id,
     )
 
     # Issue #4045: the flip side of the stall check above — a dev_orch

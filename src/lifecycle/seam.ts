@@ -658,6 +658,13 @@ export interface AdvanceInput {
   /** `completed` (default) or `not planned`, when `to === "closed"`. */
   closeReason?: string;
   actor?: string;
+  /**
+   * Optional compare-and-set precondition (#5318 INV-5): when given and the
+   * re-read single state label differs (or is absent/ambiguous), `advance`
+   * refuses `from-mismatch` BEFORE any write, in BOTH modes. A stale caller
+   * premise (a snapshot-driven writer) is not a gate the shadow switch may bypass.
+   */
+  from?: string;
 }
 
 export type AdvanceResult =
@@ -754,6 +761,18 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
   if (isClosed) {
     await jr(entry(deps, { kind: "refused", from, result: "refused:issue-closed", written: false }, input));
     return { ok: false, issue, code: "issue-closed", mode, written: false };
+  }
+
+  // 3a. caller premise (--from): refused in both modes, before any write (#5318 INV-5).
+  if (input.from !== undefined && from !== input.from) {
+    await jr(
+      entry(
+        deps,
+        { kind: "refused", from: stateLabels.length === 0 ? null : stateLabels.join(","), result: "refused:from-mismatch", written: false },
+        input,
+      ),
+    );
+    return { ok: false, issue, code: "from-mismatch", mode, written: false };
   }
 
   // 3b. legality lookup comes BEFORE the cap step, so an illegal move refuses

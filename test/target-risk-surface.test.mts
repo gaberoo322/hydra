@@ -257,3 +257,9 @@ describe("print-target-facts — the playbook identity + risk-surface seam (issu
     assert.match(rendered!, /export TARGET_NAME='csb'\\''s-fork'/);
   });
 });
+
+describe("collectTargetFacts shape (issue #5498 INV-2)", () => {
+  test("collectTargetFacts() return shape is unchanged (no capabilities key)", () => {
+    assert.equal("capabilities" in collectTargetFacts(), false);
+  });
+});

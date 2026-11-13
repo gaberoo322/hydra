@@ -63,7 +63,7 @@ one-liner → stop, tell operator to run `/triage` first.
 
 If body has **>5 acceptance criteria** OR description suggests **>8 files changed**:
 1. `/to-tickets $issue_number` to decompose (Claude; upstream renamed `to-issues`→`to-tickets` in Pocock v1.1)
-2. `gh issue edit $issue_number --add-label blocked --remove-label ready-for-agent`
+2. `npx tsx scripts/lifecycle.ts advance $issue_number blocked --reason blocked-by-issue --rationale "decomposed into #a #b ..." --actor hydra-dev` (list the child numbers; a non-zero exit is final — never fall back to a direct label write, ADR-0047 D4)
 3. Comment on parent listing children
 4. Stop — `/hydra-sweep` picks up children after triage
 
@@ -94,28 +94,22 @@ issue may still need a one-time correction.
 
 The dispatched child prompt MUST include the scope-respect block below.
 
-### 4. Claim the issue (dispatcher claim — ADR-0047 D4)
-The seam performs the `ready-for-agent` → `in-progress` advance; workers never
-write the label directly. Interactive parent (operator-named issue):
+### 4. Claim the anchor (the parent is the dispatcher — ADR-0047 D4)
+The seam performs the `ready-for-agent` -> `in-progress` advance; workers never
+write the label directly.
 ```bash
-npx tsx scripts/lifecycle.ts dispatch $issue_number --dispatch interactive-dev-$issue_number-$(date +%s) --class dev_orch --run interactive --purpose fresh
+dispatch_id="hydra-dev-$(date +%s)"
+npx tsx scripts/lifecycle.ts dispatch $issue_number --dispatch "$dispatch_id" --class dev_orch --run interactive --purpose fresh
 ```
-`claim-held` → exclude that issue and re-run selection (at most 3 picks, then
-stop with a report); `parked:*` or an enforce `advance-refused` → stop and
-report, no label write.
+Keep the `$dispatch_id`: step 6 releases the claim with it. `claim-held` ->
+exclude that issue and re-run selection (at most 3 picks, then stop with a
+report); `parked:*` or an enforce `advance-refused` -> stop and report. A
+non-zero exit is final; never fall back to a direct `in-progress` label write
+(the `lifecycle-state-label-guard` PreToolUse hook denies it).
 
 ### 5. Spawn worktree agent
 
 - **Claude:** `Agent(isolation: "worktree", prompt: <child-prompt>)`
-- **Codex (retired, ADR-0006):** Create worktree first, then `codex exec` inside it:
-  ```bash
-  WT=/dev/shm/hydra-worktrees/issue-${issue_number}-$(date +%s)
-  git -C ~/hydra worktree add -b "issue-${issue_number}-dev" "$WT" master
-  # MANDATORY: /dev/shm worktrees have no ancestor node_modules — symlink first.
-  # (cue: devshm-verify-worktree-needs-node-modules-symlink)
-  ln -sfn /home/gabe/hydra/node_modules "$WT/node_modules"
-  (cd "$WT" && codex exec --skill hydra-dev-child --json "{\"issue\":${issue_number}}")
-  ```
 
 **Branch held by a stale sibling worktree (cue:
 pr-branch-checked-out-in-stale-sibling-worktree).** `git worktree add -b
@@ -143,8 +137,9 @@ trailing slash matches a directory, not the symlink-as-file. After staging, run
 is empty before committing. Prefer staging touched files by path.
 
 The child prompt MUST include the worktree-guard preamble, the PATH ANCHORING
-block, the ENTERWORKTREE ANCHOR block, and the scope-respect block (all in
-`hydra-dev-child-flow.md`). The child runs the child execution contract there.
+block, the ENTERWORKTREE ANCHOR block, and the scope-respect block (all in this
+fragment, below). The child runs the child execution contract in
+`hydra-dev-child-flow.md`.
 
 ### Child-prompt worktree-guard preamble (REQUIRED)
 
@@ -232,10 +227,9 @@ RULES:
 ```
 
 > Orthogonal note (issue #1861 / #549 — NOT the #2371 fix): the custom
-> `worktree-write-fence.sh` PreToolUse ghost-write hook is currently
-> *uninstalled* on this host. Installing it via `scripts/setup-claude-hooks.sh`
-> closes the orthogonal ghost-write-to-main gap but does NOT resolve the #2371
-> symptom above. Keep hook installation as a separate operator step.
+> `worktree-write-fence.sh` PreToolUse ghost-write hook is installed (see
+> `scripts/setup-claude-hooks.sh`). It closes the ghost-write-to-main gap but
+> does NOT resolve the #2371 symptom above.
 
 ### Child-prompt scope-respect block (REQUIRED — issue #396)
 
@@ -252,7 +246,11 @@ The linked issue contains a `## Files in scope` section (mandatory) and may cont
 3. Treat `Files out of scope` as the HARD boundary — touching anything matching these entries will fail CI's scope-check gate. Do not touch them unless absolutely required.
 4. If you DO have to touch an out-of-scope file (e.g. a shared test fixture, an adjacent import), include a `scope-justification:` block in the PR body listing each affected file with a one-line rationale. Example:
 
+   <!-- ref-check: example-start -->
+
        scope-justification: `test/helpers/fixtures.ts` — fixture used by the new test added in scope
+
+   <!-- ref-check: example-end -->
 
 5. Mirror the issue's `## Files in scope` section into the PR body so the gate can match against either source.
 6. CODE-SPAN TRAP: the scope-check parser treats EVERY backticked code-span inside the `Files in scope` / `Files out of scope` sections as a scope entry, not just the bullet paths. When you write those sections (or any prose under those headings), keep non-path filenames PLAIN-TEXT. A stray backticked filename in prose becomes a phantom entry that can hard-block one of your real in-scope files.
@@ -266,19 +264,19 @@ The CI `scope-check` job at `.github/workflows/ci.yml` enforces this contract.
 
 **Success (PR URL returned):**
 
-Transition the source issue `ready-for-agent`/`in-progress` → `needs-qa` so
-`qa_orch` auto-fires on the open PR and the stale `ready-for-agent` can't
-re-surface the issue for a duplicate dispatch (the #770/#754 hazard, root cause
-of #846). Remove BOTH `ready-for-agent` AND `in-progress`, add `needs-qa`.
-`gh issue edit --remove-label` is idempotent, so listing both is safe. The
-transition is keyed by the **issue number** via raw `gh issue edit` — NOT
-`moveItemToLane`, a `src/` helper this bash playbook cannot call.
+Move the source issue to `needs-qa` through the lifecycle seam so `qa_orch`
+auto-fires on the open PR and a stale `ready-for-agent` can't re-surface the
+issue for a duplicate dispatch (the #770/#754 hazard, root cause of #846). The
+seam's `pr-open` gate verifies the PR is open and its body closes the issue; a
+non-zero exit is final for this step (log the JSON line; never fall back to a
+direct label write). In the autopilot path reap's needs-qa promotion already
+performs this move, so a `pr-merged` / `illegal-transition` refusal is not an
+error. Then release the claim:
 
 ```bash
-gh issue edit "$issue_number" --repo gaberoo322/hydra \
-  --remove-label "ready-for-agent" --remove-label "in-progress" \
-  --add-label "needs-qa" \
-  || echo "WARN: failed to move issue #${issue_number} to needs-qa (non-fatal) — relabel by hand"
+npx tsx scripts/lifecycle.ts advance "$issue_number" needs-qa --evidence pr="$pr_number" --actor hydra-dev \
+  || echo "WARN: lifecycle advance to needs-qa refused for #${issue_number} (non-fatal; reap/reconcile own the hand-back)"
+npx tsx scripts/lifecycle.ts release "$issue_number" --dispatch "$dispatch_id" --outcome pr-opened
 ```
 
 Dependents are NOT unblocked here: the PR is unmerged, so the blocker is not
@@ -287,7 +285,9 @@ closed yet. The autopilot Phase 1.5 sweep (`recover-stale.sh` via
 
 **Failure (including isolation-abort):**
 ```bash
-gh issue edit $issue_number --remove-label in-progress --add-label ready-for-agent
+npx tsx scripts/lifecycle.ts advance $issue_number ready-for-agent --actor hydra-dev \
+  || echo "WARN: advance to ready-for-agent refused (non-fatal; reap's needs-dev-resume relabel and the reconcile stale arm own the no-PR hand-back)"
+npx tsx scripts/lifecycle.ts release $issue_number --dispatch "$dispatch_id" --outcome no-pr
 gh issue comment $issue_number --body "> *Automated agent comment*
 
 Agent attempted implementation but failed.

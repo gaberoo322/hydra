@@ -492,7 +492,7 @@
       "name": "hydra-target-retro",
       "path": "docs/operator-playbooks/hydra-target-retro.md",
       "stage": "operator-interactive",
-      "description": "Per-run (or daily) Target retrospective — deep-reads failed and reframed Target builds plus subagent friction reports, extracts recurring failure patterns, and routes them — capped ≤2/run, deduped — into the Target planner/executor feedback surface (prompt-shaped) and Redis Target-backlog (code-shaped). NO gated PR, NO tier machinery.",
+      "description": "Per-run (or daily) Target retrospective — deep-reads failed and reframed Target builds plus subagent friction reports, extracts recurring failure patterns, and files them — capped ≤2/run, deduped — as needs-triage issues on the Target board. NO gated PR, NO tier machinery.",
       "dispatchedBy": [],
       "composedFrom": [
         "docs/operator-playbooks/_fragments/target-seam-preamble.md"
@@ -562,7 +562,7 @@
       "name": "hydra-wayfinder",
       "path": "docs/operator-playbooks/hydra-wayfinder.md",
       "stage": "operator-interactive",
-      "description": "Plan Hydra work too big for one agent session as a shared map of investigation tickets on gaberoo322/hydra — chart the fog into native blocking decision tickets, resolve them one at a time, then hand the cleared map to hydra-prd (epic) or /to-spec (spec). Adapts Matt Pocock's `wayfinder`.",
+      "description": "Plan Hydra work too big for one agent session as a shared map of investigation tickets on gaberoo322/hydra — chart the fog into native blocking decision tickets, resolve them one at a time, then hand the cleared map to hydra-prd (epic) or hydra-grill (spec). Adapts Matt Pocock's `wayfinder`.",
       "dispatchedBy": [],
       "composedFrom": [],
       "route": "/docs/skill/hydra-wayfinder",

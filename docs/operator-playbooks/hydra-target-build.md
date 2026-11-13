@@ -264,11 +264,10 @@ git status --short
 Load context (parallel):
 - `~/hydra/config/direction/priorities.md`
 - `~/hydra/config/direction/vision.md`
-- `~/hydra/config/feedback/to-planner.md` and `~/hydra/config/feedback/to-executor.md` — optional, read if present (gitignored runtime files `hydra-target-retro` / `hydra-target-incident` append to; `to-executor.md` is created lazily). A missing file is a silent skip, never a discovery hunt.
 - The Target board (open issues), via **REST** — never `gh --json` / GraphQL (ADR-0031 Decision 6): `gh api -X GET search/issues -f q="repo:$TARGET_GH_REPO is:issue is:open" --jq '.items[] | "#\(.number) [\(.labels | map(.name) | join(","))] \(.title)"'`. (Replaces the retired `hydra backlog ls` + `LRANGE hydra:anchors:work-queue` Redis reads.)
 
 > **Direction docs are a mirror — refresh if stale (issue #1791).** The
-> `~/hydra/config/direction/{priorities,roadmap}.md` files loaded above are the
+> `~/hydra/config/direction/priorities.md` file loaded above is the
 > orchestrator's COMMITTED copy and the runtime source of truth for the
 > in-process readers. The LIVE docs that
 > `/hydra-target-research` writes each cycle live in the Target repo at
@@ -285,7 +284,6 @@ Load context (parallel):
 >
 > ```bash
 > cp "${HYDRA_TARGET_REPO:-$TARGET_WS}"/direction/priorities.md ~/hydra/config/direction/priorities.md
-> cp "${HYDRA_TARGET_REPO:-$TARGET_WS}"/direction/roadmap.md   ~/hydra/config/direction/roadmap.md
 > ```
 
 > **Superseded direction docs are non-groundable — check the banner before you plan from a doc (issue #2728).** A direction doc whose premise has been retired carries a machine-readable header banner as its first non-blank content line:
@@ -332,7 +330,7 @@ Cross-reference drift check. Skip if recently merged.
 
 ### 3. Plan (planner role)
 
-Read `~/hydra/config/feedback/to-planner.md` if present. Read relevant source. Design ONE bounded task:
+Read relevant source. Design ONE bounded task:
 - ≤5 files, 3–5 testable criteria, scope boundary, advances vision, hard verification commands.
 
 Complexity:
@@ -429,12 +427,14 @@ EOF
 
 If executing requires touching a file outside the planned scope (shared fixture, adjacent import), record a justification rationale at the same time:
 
+<!-- ref-check: example-start -->
 ```bash
 SCOPE_JUSTIFICATIONS=$(cat <<'EOF'
 scope-justification: `src/test-helpers.ts` — shared fixture required by the new test
 EOF
 )
 ```
+<!-- ref-check: example-end -->
 
 CI's `scope-check` gate (`.github/workflows/ci.yml` in the orchestrator repo, mirrored in the target repo if present) reads these sections from the PR body. Skipping this step doesn't block the build today (no hard requirement on PR body shape for target-repo PRs), but it's how the orchestrator learns the subagent's intended blast radius — and it's the contract reviewers + `hydra-qa` use to spot scope creep.
 
@@ -576,8 +576,6 @@ the merged change against the captured intent — that is the artifact's only
 consumer; it never blocks a merge by itself.
 
 ### 5. Execute
-
-Read `~/hydra/config/feedback/to-executor.md` if present.
 
 Step 0.6 already created `$TARGET_WT` on branch `feature/$CYCLE_ID` off `origin/main`. Stay in that worktree — do NOT `cd` into `$TARGET_WS`, do NOT `git checkout main`, do NOT `git pull` from the main checkout (that's the race that #542 is fixing).
 
@@ -917,7 +915,7 @@ git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" worktr
 
 - **Hydra orchestrator**: `~/hydra/` (TS, ESM, node:test)
 - **Target**: `$TARGET_APP_DIR` (verify commands per the target's own `.hydra/manifest.json`; stack, framework versions, and conventions per the Target's own docs — `$TARGET_WS/CONTEXT.md`, plus `$TARGET_APP_DIR/AGENTS.md` / `CLAUDE.md` when present)
-- **Config**: `~/hydra/config/direction/` and `~/hydra/config/feedback/`
+- **Config**: `~/hydra/config/direction/`
 - **Backlog/API**: `bin/hydra` → http://localhost:4000
 - **Redis**: `docker exec hydra-redis-1 redis-cli`
 

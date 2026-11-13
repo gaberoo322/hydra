@@ -94,7 +94,7 @@ Alerts:
 ### Class-liveness evidence rule (issue #4392 — MANDATORY before filing any "class X is dark / 0 dispatches" finding)
 
 Cycle-derived distributions structurally CANNOT show producer classes. Only
-skills in reap.py's `CYCLE_RECORD_SKILLS` (hydra-dev, hydra-target-build,
+skills with `cycleRecord: true` in classes.json (hydra-dev, hydra-target-build,
 hydra-grill) write cycle-records, so `GET /api/metrics`
 (`stats.anchorDistribution`, `trend`) and the retro bundle's
 `crossRunTrend.byClass` are blind to discover/architecture/cleanup/scout/retro
@@ -193,12 +193,11 @@ Include the cited `impactPerCost` (and the flags) verbatim in any finding's
 Evidence section.
 
 ### 2b. Cost & efficiency
-From metrics: cost/merged feature, cost of empty cycles, plan cache hit rate, grounding duration trend, thread reuse rate.
+From metrics: cost/merged feature, cost of empty cycles.
 
 Alerts:
 - Cost/merge >$5 → efficiency finding
 - Empty-cycle cost >30% of total → waste finding
-- Grounding duration up >20% over 20 cycles → performance finding
 
 ### 2c. Backlog & queue health
 ```bash
@@ -308,7 +307,7 @@ real tier).
 
 **Bug / health:**
 ```bash
-gh issue create --title "..." --label "needs-triage" --body "$(cat <<'EOF'
+gh issue create --title "..." --body "$(cat <<'EOF'
 ## Problem
 ## Evidence
 ## Impact
@@ -321,7 +320,7 @@ $(hydra_issue_footer hydra-discover 'tier N')"
 
 **Improvement:**
 ```bash
-gh issue create --title "..." --label "needs-triage" --body "$(cat <<'EOF'
+gh issue create --title "..." --body "$(cat <<'EOF'
 ## Problem Statement
 ## Evidence
 ## Proposed Solution
@@ -337,6 +336,8 @@ EOF
 )
 $(hydra_issue_footer hydra-discover 'tier N')"
 ```
+
+**State label (HARD):** `gh issue create` carries FLAG labels only, never a state. Immediately after it returns the issue URL, write the first state through the lifecycle seam: `npx tsx scripts/lifecycle.ts advance <N> needs-triage --actor hydra-discover` (from none, gate-free). If it returns `illegal-transition` with observed state `needs-triage` (the reconcile zero-state backstop raced it), carry on. A non-zero exit is otherwise final — never fall back to a direct label write (ADR-0047 D3/D4).
 
 ## Calibration
 
@@ -361,7 +362,7 @@ Otherwise log in summary, don't create.
 Tier 3:
 ```
 [hydra-discover] Tier 1+2+3 (iteration N). Deep dive triggered by: high empty rate.
-  Explored: anchor-selection.ts, planner-prompt.ts, codex-runner.ts
+  Explored: <files explored>
   Research: classifier cascade techniques (3 sources)
   Findings: 1 arch (planner context missing anchor-type-specific enrichment)
   Created: #48. Skipped: 0.
