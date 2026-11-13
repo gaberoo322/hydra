@@ -179,7 +179,7 @@ export function scanSource(file: string, source: string): ScanSourceResult {
     };
     visit(sf);
     return { ok: true, findings };
-  } catch (err) {
+  } catch (err) { /* intentional: surfaced as an ok:false result, printed by the CLI */
     return { ok: false, error: `scan of ${file} crashed: ${String(err)}` };
   }
 }
@@ -201,7 +201,7 @@ export async function scanTrackedFiles(): Promise<ScanTrackedResult> {
       for (const f of r.findings) keys.add(findingKey(rel, f));
     }
     return { ok: true, keys: [...keys].sort() };
-  } catch (err) {
+  } catch (err) { /* intentional: surfaced as an ok:false result, printed by the CLI */
     return { ok: false, error: `tracked-file scan failed: ${String(err)}` };
   }
 }
