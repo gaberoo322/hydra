@@ -340,6 +340,7 @@
   "test/mutation-runner-classification.test.mts": 2,
   "test/mutation-skip-patterns.test.mts": 2,
   "test/mutation.test.mts": 3,
+  "test/never-throw-scan.test.mts": 2,
   "test/notification-consumer.test.mts": 15,
   "test/now-console-format.test.mts": 3,
   "test/now-console-state.test.mts": 3,
