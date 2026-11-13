@@ -201,6 +201,42 @@ describe("decide.py - Fable instant-death replay (#5323)", () => {
     assert.ok(plan.actions.some((a: any) => a.type === "reap" && a.slot === "dev_target"), "the reap is still emitted");
   });
 
+  test("an orch-realm class over its weekly share is not replayed; the skip names orch_realm_share_exceeded and the reap survives (#5479 INV-3)", () => {
+    const mk = (share: number) => {
+      const st = baseState({
+        slots: { dev_target: null },
+        signals: { orch_realm_weekly_share: share },
+        last_dispatch_by_class: { retro_orch: { turn: 2, skill: "hydra-retro", prompt_args: {}, worktreeBranch: BRANCH } },
+      });
+      st.limits.orch_realm_weekly_share_cap = 0.5;
+      return st;
+    };
+    const over = decide(mk(0.9), [death({ slot: "retro_orch" })]).plan;
+    assert.equal(over.actions.filter((a: any) => a.type === "dispatch" && a.slot === "retro_orch").length, 0);
+    assert.ok(over.reasons.includes("instant-death-replay-suppressed:retro_orch:orch_realm_share_exceeded"), over.reasons.join());
+    assert.ok(over.actions.some((a: any) => a.type === "reap" && a.slot === "retro_orch"), "the reap is still emitted");
+    // Sibling shape: under the cap the same orch class still replays.
+    const under = decide(mk(0.1), [death({ slot: "retro_orch" })]).plan;
+    assert.equal(under.actions.filter((a: any) => a.type === "dispatch" && a.slot === "retro_orch").length, 1, under.reasons.join());
+  });
+
+  test("a replay plan passes assert_invariants.py against the post-decide state (#5479 INV-4)", () => {
+    const dir = tmp();
+    const s = join(dir, "state.json");
+    writeFileSync(s, JSON.stringify(withTurnSnapshot(baseState())));
+    writeFileSync(join(dir, "cands.json"), "null");
+    writeFileSync(join(dir, "events.json"), JSON.stringify([death()]));
+    const d = spawnSync("python3", [DECIDE, "decide", s, join(dir, "cands.json"), join(dir, "events.json")], {
+      encoding: "utf-8", env: { ...process.env, HYDRA_AUTOPILOT_RUN_END_POST: "off" },
+    });
+    assert.equal(d.status, 0, d.stderr);
+    const plan = JSON.parse(d.stdout);
+    assert.equal(replays(plan).length, 1, "the replay is emitted");
+    writeFileSync(join(dir, "plan.json"), d.stdout);
+    const r = spawnSync("python3", [join(SCRIPTS, "assert_invariants.py"), join(dir, "plan.json"), s], { encoding: "utf-8" });
+    assert.equal(r.status, 0, r.stderr);
+  });
+
   test("an `inherit` class has no dispatch_model on the reap action", () => {
     const st = baseState({
       slots: { dev_target: null },
