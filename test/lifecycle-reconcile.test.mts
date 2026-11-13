@@ -625,6 +625,7 @@ describe("PR-covered ready-for-agent promotion (#5489)", () => {
     const { w, add, journal } = world();
     add(500, ["ready-for-agent"]);
     w.prs = [closing(500)];
+    w.prRecords.set(1400, { number: 1400, state: "OPEN", body: "Closes #500" });
     const report = await runReconcile(w.deps);
     assert.deepEqual(w.edits, [{ issue: 500, remove: ["ready-for-agent"], add: ["needs-qa"] }]);
     assert.deepEqual(report.prCovered, { promoted: 1, ambiguous: 0, claimHeld: 0, refused: 0 });
@@ -671,6 +672,7 @@ describe("PR-covered ready-for-agent promotion (#5489)", () => {
     for (const n of [510, 511, 512]) {
       add(n, ["ready-for-agent"]);
       w.prs.push(closing(n));
+      w.prRecords.set(900 + n, { number: 900 + n, state: "OPEN", body: `Closes #${n}` });
     }
     const report = await runReconcile(w.deps, { maxPrCoveredPromotions: 2 });
     assert.equal(report.prCovered.promoted, 2);
