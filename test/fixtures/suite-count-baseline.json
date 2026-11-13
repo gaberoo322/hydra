@@ -243,7 +243,7 @@
   "test/glm-drainer-runner.test.mts": 9,
   "test/glm-eligibility-sweep.test.mts": 5,
   "test/glm-eligibility.test.mts": 5,
-  "test/glm-finish.test.mts": 8,
+  "test/glm-finish.test.mts": 9,
   "test/glm-gate.test.mts": 9,
   "test/glm-pick.test.mts": 13,
   "test/glm-prompt.test.mts": 2,

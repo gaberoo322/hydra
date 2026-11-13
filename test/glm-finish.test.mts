@@ -39,6 +39,7 @@ import {
   type FinishVerdict,
 } from "../src/glm/finish.ts";
 import { capFilePath, quotaBlockFilePath } from "../src/glm/gate.ts";
+import { gateClaimReleased } from "../src/lifecycle/gates.ts";
 import { loadDrainerConfig } from "../src/glm/drainer-config.ts";
 import type { WorkerProvider } from "../src/glm/providers.ts";
 import { runDriverMode, type DriverDeps } from "../src/glm/drainer-driver.ts";
@@ -387,7 +388,10 @@ function makeFinishDeps(opts: FakeOpts = {}): { deps: FinishDeps; calls: string[
     advanceState: async (issue, to, opts) => {
       if (reject.has("advanceState")) throw new Error("injected advanceState rejection");
       const pr = opts.evidence?.pr;
-      calls.push(`advance:${issue}:${opts.from}->${to}${pr !== undefined ? `:pr=${pr}` : ""}`);
+      const dispatch = opts.evidence?.dispatch;
+      calls.push(
+        `advance:${issue}:${opts.from}->${to}${pr !== undefined ? `:pr=${pr}` : ""}${dispatch !== undefined ? `:dispatch=${dispatch}` : ""}`,
+      );
       return { ok: true };
     },
     viewIssueTitle: async (issue) => {
@@ -460,6 +464,55 @@ function makeFinishDeps(opts: FakeOpts = {}): { deps: FinishDeps; calls: string[
 function ranInput(overrides: Partial<FinishInput> = {}): FinishInput {
   return { issue: 77, worktree: WT, branch: BRANCH, authorRaw: OUTCOME_CLEAN, authorExitCode: 0, ...overrides };
 }
+
+describe("runFinish requeues past the drainer's own held claim (#5318 QA round 5)", () => {
+  // The tick runs finish while its claim is still held. The fake advanceState
+  // here answers with the REAL claim-released gate over a held claim, so a
+  // requeue that omits the owner's dispatch id is refused exactly as enforce
+  // mode would refuse it.
+  const HELD = "agent-glm-77-1700000000";
+  function heldClaimDeps(): ReturnType<typeof makeFinishDeps> {
+    const h = makeFinishDeps();
+    h.deps.advanceState = async (issue, to, opts) => {
+      const res = gateClaimReleased(
+        { issue, from: "in-progress", to: "ready-for-agent", flags: [], evidence: opts.evidence ?? {} },
+        { claim: { ok: true, value: { held: { dispatchId: HELD } } } },
+      );
+      h.calls.push(`advance:${issue}:${opts.from}->${to}:${res.ok ? "ok" : res.code}`);
+      return res.ok ? { ok: true } : { ok: false, code: res.code ?? "refused" };
+    };
+    return h;
+  }
+
+  test("with the claim's dispatch id the requeue passes the gate", async () => {
+    const h = heldClaimDeps();
+    const r = await runFinish(h.deps, ranInput({ authorRaw: "", authorExitCode: 1, dispatchId: HELD }));
+    assert.equal(r.action, "release-not-authored");
+    assert.ok(h.calls.includes("advance:77:in-progress->ready-for-agent:ok"));
+    assert.doesNotMatch(h.logs.join("\n"), /failed to release issue/);
+  });
+
+  test("without it, or with another dispatch's id, the gate refuses claim-held and finish logs it", async () => {
+    for (const dispatchId of [undefined, "agent-glm-77-other"]) {
+      const h = heldClaimDeps();
+      await runFinish(h.deps, ranInput({ authorRaw: "", authorExitCode: 1, ...(dispatchId ? { dispatchId } : {}) }));
+      assert.ok(h.calls.includes("advance:77:in-progress->ready-for-agent:claim-held"));
+      assert.match(h.logs.join("\n"), /WARN failed to release issue #77 \(non-fatal\): claim-held/);
+    }
+  });
+
+  test("every requeue arm sends the dispatch id as evidence", async () => {
+    const arms: Array<Partial<FinishInput>> = [
+      { authorRaw: "", authorExitCode: 1 },
+      { authorRaw: OUTCOME_NOT_RUN },
+    ];
+    for (const arm of arms) {
+      const h = makeFinishDeps();
+      await runFinish(h.deps, ranInput({ ...arm, dispatchId: HELD }));
+      assert.ok(h.calls.includes(`advance:77:in-progress->ready-for-agent:dispatch=${HELD}`), JSON.stringify(h.calls));
+    }
+  });
+});
 
 describe("runFinish — the post-author arms, in order (issue #4337 D13, issue #4685 INV-4)", () => {
   test("driver-fault arm: FAULTED journal line, worktree removed, ONE plain release, no withhold", async () => {

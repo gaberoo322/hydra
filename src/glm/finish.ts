@@ -334,6 +334,14 @@ export interface FinishInput {
    * and NO attribution trailers.
    */
   provider?: WorkerProvider;
+  /**
+   * The drainer's dispatch id (its worktree name). The tick runs finish while
+   * its claim is still held, so a requeue to `ready-for-agent` carries this as
+   * `dispatch` evidence: the `claim-released` gate passes for the claim's owner
+   * and refuses `claim-held` for anyone else. Absent on the standalone `finish`
+   * mode, which holds no claim.
+   */
+  dispatchId?: string;
 }
 
 /** The `finish` driver mode's stdout line (INV-10). */
@@ -475,9 +483,17 @@ async function defensivePush(deps: FinishDeps, input: FinishInput): Promise<void
   }
 }
 
-async function releaseClaim(deps: FinishDeps, issue: number, withhold: boolean): Promise<void> {
+async function releaseClaim(
+  deps: FinishDeps,
+  issue: number,
+  withhold: boolean,
+  dispatchId: string | undefined,
+): Promise<void> {
   const r = await safe(deps, `release issue #${issue}`, () =>
-    deps.advanceState(issue, LABEL_READY, { from: LABEL_IN_PROGRESS }),
+    deps.advanceState(issue, LABEL_READY, {
+      from: LABEL_IN_PROGRESS,
+      ...(dispatchId !== undefined ? { evidence: { dispatch: dispatchId } } : {}),
+    }),
   );
   if (r && r.ok === false) deps.log(`WARN failed to release issue #${issue} (non-fatal): ${r.code}`);
   if (withhold) {
@@ -882,7 +898,7 @@ async function finishInner(deps: FinishDeps, input: FinishInput): Promise<Finish
   switch (verdict.action) {
     case "release-not-authored": {
       await removeWorktreeIfPassed(deps, input.worktree);
-      await releaseClaim(deps, issue, false);
+      await releaseClaim(deps, issue, false, input.dispatchId);
       return {
         action: "release-not-authored",
         issue,
@@ -897,7 +913,7 @@ async function finishInner(deps: FinishDeps, input: FinishInput): Promise<Finish
       await removeWorktreeIfPassed(deps, input.worktree);
       await deleteRemoteBranchIfPushed(deps, input.branch);
       if (verdict.withhold) logCapReached(deps, issue, timeoutCount, config.timeoutResumeCap);
-      await releaseClaim(deps, issue, verdict.withhold);
+      await releaseClaim(deps, issue, verdict.withhold, input.dispatchId);
       // D17: only from evidence, only AFTER the release (issue #4841 INV-7:
       // now on EVERY ran arm, not just this one).
       const quotaBlockedUntil = recordQuotaBlockIfSessionFailed(deps, outcome, authorStdout, nowSec, input.provider);
@@ -919,7 +935,7 @@ async function finishInner(deps: FinishDeps, input: FinishInput): Promise<Finish
       // The remote branch deliberately STAYS — it is the resume record the
       // pick phase picks up next tick (issue #4337 INV-4/5).
       if (verdict.withhold) logCapReached(deps, issue, timeoutCount, config.timeoutResumeCap);
-      await releaseClaim(deps, issue, verdict.withhold);
+      await releaseClaim(deps, issue, verdict.withhold, input.dispatchId);
       // The #4593 loop fix: a 429 here must block the provider too, or every
       // tick re-launches the resumed branch into the same exhausted quota.
       const quotaBlockedUntil = recordQuotaBlockIfSessionFailed(deps, outcome, authorStdout, nowSec, input.provider);
@@ -935,7 +951,7 @@ async function finishInner(deps: FinishDeps, input: FinishInput): Promise<Finish
     case "withhold-preflight-blocked": {
       await removeWorktreeIfPassed(deps, input.worktree);
       await deleteRemoteBranchIfPushed(deps, input.branch);
-      await releaseClaim(deps, issue, true); // always withhold — the T2/T3 fence hit
+      await releaseClaim(deps, issue, true, input.dispatchId); // always withhold — the T2/T3 fence hit
       // The timeout counter is deliberately untouched (INV-4).
       const quotaBlockedUntil = recordQuotaBlockIfSessionFailed(deps, outcome, authorStdout, nowSec, input.provider);
       return {
@@ -952,7 +968,7 @@ async function finishInner(deps: FinishDeps, input: FinishInput): Promise<Finish
         `PR creation failed for issue #${issue} — releasing claim (branch/worktree left for operator inspection)`,
       );
       if (verdict.withhold) logCapReached(deps, issue, timeoutCount, config.timeoutResumeCap);
-      await releaseClaim(deps, issue, verdict.withhold);
+      await releaseClaim(deps, issue, verdict.withhold, input.dispatchId);
       const quotaBlockedUntil = recordQuotaBlockIfSessionFailed(deps, outcome, authorStdout, nowSec, input.provider);
       return {
         action: "release-after-failed-pr",
@@ -1010,7 +1026,7 @@ export async function runFinish(deps: FinishDeps, input: FinishInput): Promise<F
     // editIssueLabels call.
     if (!deps.config.dryRun) {
       try {
-        await releaseClaim(deps, input.issue, false);
+        await releaseClaim(deps, input.issue, false, input.dispatchId);
       } catch (nested) {
         logger.error({ err: nested }, "[glm-finish] best-effort release also threw (non-fatal)");
       }

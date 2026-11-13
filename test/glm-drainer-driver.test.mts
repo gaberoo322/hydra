@@ -717,6 +717,24 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
     assert.equal(r.releases[0].outcome, "released");
   });
 
+  test("every finish call carries the tick's own dispatch id, so finish can requeue past its still-held claim", async () => {
+    // Finish runs inside the try whose finally releases the claim, so the claim
+    // is still held when finish requeues; the claim-released gate passes only
+    // for the id the claim was opened with.
+    for (const o of [{}, { worktreeAddFails: true }, { bodyThrows: true }]) {
+      const r = rig(o);
+      const seen: Array<string | undefined> = [];
+      r.deps.runFinish = (async (_d: unknown, input: { dispatchId?: string }) => {
+        seen.push(input.dispatchId);
+        return { action: "release-not-authored", issue: 77, labels: [], pr: null, quotaBlockedUntil: null, dryRun: false };
+      }) as unknown as DriverDeps["runFinish"];
+      const { line } = await tickOf(r);
+      assert.equal(seen.length, 1);
+      assert.match(String(seen[0]), /^agent-glm-77-/);
+      assert.equal(seen[0], line.claim.dispatchId);
+    }
+  });
+
   test("a release that REJECTS is caught: WARN logged, the successful tick result is preserved (exit 0, finish intact)", async () => {
     const r = rig({ releaseThrows: true, forceFinish: { action: "open-pr" } });
     const { exitCode, line } = await tickOf(r);
