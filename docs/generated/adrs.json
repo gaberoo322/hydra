@@ -207,7 +207,6 @@
         "docs/operator-playbooks/hydra-cleanup.md",
         "docs/operator-playbooks/hydra-grill.md",
         "docs/operator-playbooks/hydra-sweep.md",
-        "docs/operator-playbooks/hydra-target-qa.md",
         "docs/operator-playbooks/hydra-tool-scout.md",
         "docs/operator-playbooks/hydra-wire-or-retire.md",
         "docs/operator-playbooks/thermo-nuclear-code-quality-review.md",
