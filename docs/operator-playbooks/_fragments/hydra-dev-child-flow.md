@@ -200,7 +200,7 @@ npm run deposit:reflect -- hydra-dev <ANCHOR_REF> --file .hydra-refl.json
 
 **Grounding test-count deposit (issue #2754 — MANDATORY, child-step 8a, right
 after `npm test` passes).** The helper parses the node:test footer of the log
-you just captured (it never re-runs the ~11 minute suite with `--from-log`) and
+you just captured (it never re-runs the full suite with `--from-log`) and
 deposits `hydra-grounding-tests-<task_id>` (`testsAfter` / `testsPassingAfter`)
 keyed on the SAME harness `task_id`. Best-effort:
 ```bash

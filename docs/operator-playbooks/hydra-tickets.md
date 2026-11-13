@@ -31,12 +31,13 @@ above, because each is actively wrong for an AFK dispatch:
 - **Base step 5, "Publish…"** — upstream publishes prose bodies itself and says
   to apply `ready-for-agent` to every ticket. Both are wrong here (below).
 
-## Why the publish step must be superseded, not layered on
+## Child labelling rule: follow the renderer, not upstream
 
 **Child labelling rule.** Upstream's "apply `ready-for-agent` to every ticket" is
-right for the Orchestrator board, but the rule is stated once, in the
-`childInitialState()` doc comment in `scripts/ci/hydra-prd-render.ts`, not here:
-read it there and follow the renderer.
+right for the Orchestrator board (orch children are born `ready-for-agent`), but
+Target children with dependencies are filed `blocked`. The authoritative rule is
+`childInitialState(slice, scope)` in `scripts/ci/hydra-prd-render.ts`: follow the
+renderer rather than applying upstream's blanket label.
 
 ## Publish through the renderer
 
@@ -63,10 +64,10 @@ deterministic and unit-tested (`test/hydra-prd-template.test.mts`).
    lifecycle state is data (`parentInitialState()` / `childInitialState(slice)`)
    written in the same step through the seam — `npx tsx scripts/lifecycle.ts
    advance <N> needs-triage --actor hydra-tickets` (from none, gate-free;
-   tolerate `illegal-transition` with observed state `needs-triage`), then for an
-   child `advance <N> ready-for-agent --reason scoped --rationale
-   "<epic title> slice <i>" --actor hydra-tickets` (orch scope; the
-   `childInitialState()` comment is the one statement of the rule). A non-zero exit is otherwise
+   tolerate `illegal-transition` with observed state `needs-triage`), then for every
+   child, `advance <N> <childInitialState(slice, scope)> --reason scoped --rationale
+   "<epic title> slice <i>" --actor hydra-tickets` (`ready-for-agent` for orch
+   scope; see the child labelling rule above). A non-zero exit is otherwise
    final; never a direct state-label write (ADR-0047 D3/D4).
 5. **Stamp the tier** — `Expected tier: N` per child from `GET /api/tier`, the
    single tier authority. Never self-classify by path.

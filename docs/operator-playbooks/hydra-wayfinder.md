@@ -222,8 +222,7 @@ upstream `grilling`).
   (Operator-interactive — the `/tmp` worktree-safety fences `hydra-grill` needs
   for BG dispatch don't apply here.)
 - **`wayfinder:grilling`** (HITL) — one-question-at-a-time conversation via
-  **`hydra-grill` (or `mattpocock-skills:grilling`)** (sharpens against Hydra's `CONTEXT.md` + ADRs and updates
-  them inline) or **`/grilling`** + **`mattpocock-skills:domain-modeling`**. The default type.
+  **`mattpocock-skills:grilling`** + **`mattpocock-skills:domain-modeling`** (sharpens against Hydra's `CONTEXT.md` + ADRs; domain-modeling updates them inline). `hydra-grill` is reserved for the spec-handoff route (it needs an anchor issue). The default type.
 - **`wayfinder:task`** (HITL or AFK) — manual work that must happen before a
   *decision* can be made (provision access, move data so its shape is visible,
   sign up for a service so its API can be judged). The one type that *does* rather
@@ -259,7 +258,7 @@ context stays inside the smart zone, and the map stays collaboratively editable.
 
 ### Chart the map  (`arguments: []` — a loose idea)
 
-1. **Name the destination.** Run `hydra-grill` (or `mattpocock-skills:grilling`) (+ `mattpocock-skills:domain-modeling`) to pin
+1. **Name the destination.** Run `mattpocock-skills:grilling` (+ `mattpocock-skills:domain-modeling`) to pin
    down what the map is finding its way to — a spec to hand to `hydra-grill` (spec stage, ADR-0035), a
    decision to lock, or an in-place change. The destination fixes scope, so it's
    settled first. Ground it in Hydra's `CONTEXT.md` and relevant ADRs.
@@ -281,7 +280,7 @@ context stays inside the smart zone, and the map stays collaboratively editable.
 2. **Choose the ticket.** If the operator named one, use it. Else take the first
    frontier ticket in order. **Claim it** (assign to the driver) before any work.
 3. **Resolve it** — zoom as needed (fetch related/closed ticket bodies on demand);
-   invoke the skill the type names (`mattpocock-skills:research`, `mattpocock-skills:prototype`, `hydra-grill` (or `mattpocock-skills:grilling`)).
+   invoke the skill the type names (`mattpocock-skills:research`, `mattpocock-skills:prototype`, `mattpocock-skills:grilling`).
    If in doubt, grill.
 4. **Record the resolution:** post the answer as a comment, close the ticket, tick
    its `## Sub-issues` box, and append a one-line gist to Decisions-so-far. Closing

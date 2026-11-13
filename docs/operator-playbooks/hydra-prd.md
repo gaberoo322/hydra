@@ -212,7 +212,7 @@ for i in 1..N; do
     "${KIND_FLAG[@]}" \
     --body "$CHILD_BODY" | grep -oP '/issues/\K\d+')
   # Two-hop birth: zero-state -> needs-triage is gate-free; then the child's
-  # childInitialState() (the labelling rule lives in that doc comment). A returned illegal-transition with
+  # childInitialState() — ready-for-agent for orch children (the labelling rule lives in that doc comment). A returned illegal-transition with
   # observed state `needs-triage` (the reconcile zero-state backstop raced it)
   # is tolerated; any other non-zero exit is final — never a direct label write.
   npx tsx scripts/lifecycle.ts advance "$CHILD_NUM" needs-triage --actor hydra-prd
