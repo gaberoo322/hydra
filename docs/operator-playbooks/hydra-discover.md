@@ -193,12 +193,11 @@ Include the cited `impactPerCost` (and the flags) verbatim in any finding's
 Evidence section.
 
 ### 2b. Cost & efficiency
-From metrics: cost/merged feature, cost of empty cycles, plan cache hit rate, grounding duration trend, thread reuse rate.
+From metrics: cost/merged feature, cost of empty cycles.
 
 Alerts:
 - Cost/merge >$5 → efficiency finding
 - Empty-cycle cost >30% of total → waste finding
-- Grounding duration up >20% over 20 cycles → performance finding
 
 ### 2c. Backlog & queue health
 ```bash
