@@ -428,9 +428,11 @@ def backfill_prior_turn(*, now: int | None = None) -> int:
     ts = int(time.time()) if now is None else int(now)
     try:
         state = run_ledger.load(STATE_PATH, fill_defaults=False)
-    except run_ledger.LedgerTypeError:
+    except run_ledger.LedgerTypeError as exc:
+        print(f"[autopilot] heartbeat: backfill state failed type validation ({exc}); reading leniently", file=sys.stderr)
         state = run_ledger.read_prior(STATE_PATH)
-    except (FileNotFoundError, ValueError, OSError):
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        print(f"[autopilot] heartbeat: backfill state read failed ({exc})", file=sys.stderr)
         return 0
     if not isinstance(state, dict):
         return 0
@@ -438,7 +440,8 @@ def backfill_prior_turn(*, now: int | None = None) -> int:
         return 0
     try:
         turn_n = int(state.get("turn", 0) or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as exc:
+        print(f"[autopilot] heartbeat: backfill turn not an integer ({exc})", file=sys.stderr)
         return 0
     if turn_n <= 0:
         return 0
