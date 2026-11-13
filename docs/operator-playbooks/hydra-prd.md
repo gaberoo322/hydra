@@ -17,7 +17,7 @@ Take a structured `PrdInput` and emit one **parent epic** issue plus **N tracer-
 
 **Target render scope (issue #5168).** `renderChildBody()` and `childLabels()` take an optional last argument, a `RenderScope`. The default `{ kind: "orch" }` renders exactly the Orchestrator output this playbook describes. `{ kind: "target", riskSurface }` renders for the Target board instead: every path stays in scope, there is no `Expected tier`, and slices on the risk surface get `Money-critical: yes` plus the `money-critical` label. The Target publish recipe is `/hydra-tickets target`. This playbook's own `--apply` path stays Orchestrator-only.
 
-Unlike the generic upstream `/to-spec` skill (renamed from `/to-prd` in Pocock v1.1 — it was always a spec, not a PRD) — which interviews the operator via `AskUserQuestion` — `hydra-prd` is **fully parameterised**: input is structured JSON, output is GitHub issues. There are zero `AskUserQuestion` calls in this playbook; if the input is malformed, the skill stops with a validation report rather than asking for clarification.
+Unlike the generic upstream `to-spec` skill (renamed from `/to-prd` in Pocock v1.1 — it was always a spec, not a PRD) — which interviews the operator via `AskUserQuestion` — `hydra-prd` is **fully parameterised**: input is structured JSON, output is GitHub issues. There are zero `AskUserQuestion` calls in this playbook; if the input is malformed, the skill stops with a validation report rather than asking for clarification.
 
 The skill is **dry-run by default**. To actually create issues on `gaberoo322/hydra`, pass `--apply` (or `apply=true`). Dry-run prints the rendered parent and child bodies plus the validation report, so the operator can review before committing.
 
@@ -38,7 +38,7 @@ The skill reads a `PrdInput` JSON object — from a file (`--input=/tmp/prd.json
   "problem": "Prose using Hydra glossary terms (Orchestrator, Target, Modification Tier, ...). At least one sentence.",
   "rationale": "Why ship this now. Links to Target Outcomes, Outcome Holdback, or Modification Tier where relevant.",
   "expectedGlossaryTerms": ["Orchestrator", "Target", "Modification Tier"],
-  "sourceRef": "hydra:reports:research:2026-05-18T00:00:00Z",
+  "sourceRef": "issue-5000",
   "slices": [
     {
       "title": "alpha — bootstrap the foo skeleton",
@@ -212,7 +212,7 @@ for i in 1..N; do
     "${KIND_FLAG[@]}" \
     --body "$CHILD_BODY" | grep -oP '/issues/\K\d+')
   # Two-hop birth: zero-state -> needs-triage is gate-free; then the child's
-  # childInitialState() (`ready-for-agent`). A returned illegal-transition with
+  # childInitialState() (the labelling rule lives in that doc comment). A returned illegal-transition with
   # observed state `needs-triage` (the reconcile zero-state backstop raced it)
   # is tolerated; any other non-zero exit is final — never a direct label write.
   npx tsx scripts/lifecycle.ts advance "$CHILD_NUM" needs-triage --actor hydra-prd
@@ -226,7 +226,7 @@ PARENT_BODY_FINAL=$(... renderParentBody(input, [SIBLING_NUMS[1], ..., SIBLING_N
 gh issue edit "$PARENT_NUM" --repo gaberoo322/hydra --body "$PARENT_BODY_FINAL"
 ```
 
-The two-pass approach (parent with placeholders → children → re-render parent with real numbers) is the same pattern `/to-tickets` uses and the only one that keeps issue references resolvable without a back-edit per child.
+The two-pass approach (parent with placeholders → children → re-render parent with real numbers) is the same pattern `to-tickets` uses and the only one that keeps issue references resolvable without a back-edit per child.
 
 ### 7. Report
 

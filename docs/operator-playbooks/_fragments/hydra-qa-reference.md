@@ -49,12 +49,12 @@ The `deep-qa-gate` required CI check (`.github/workflows/deep-qa-gate.yml`) repo
 
 **Invariant — the CheckRun never contradicts the status, and never becomes a second required check.** The advisory CheckRun always mirrors the commit status's state; if the two ever disagreed, the commit status wins (it is the authoritative primitive). The CheckRun is deliberately **not** added to branch protection: two required checks of the same name is ambiguous, and a required CheckRun that the workflow never produces for non-T4 PRs re-introduces the non-T4-blocked-forever failure ADR-0020 Decision 4 rejected. When auditing a `deep-qa-gate` verdict, read the **commit status** as the truth; the CheckRun is a UI/rollup convenience that should always agree with it.
 
-## Phase A — shadow mode (current)
+## Spec axis when the artifact is missing (`DESIGN_CONCEPT_MODE`)
 
-The design-concept gate is in **Phase A — shadow mode** (epic #437). The artifact does not yet exist for PRs whose parent issues pre-date the design-concept system. To avoid blocking the entire merge queue during cut-over, this skill is configurable:
+The dispatch-side gate (`gateDispatch` in `src/lifecycle/gates.ts`) already refuses to dispatch a `needs-design-concept` anchor without an approved artifact. This section covers only what QA does at review time when an artifact is still missing (parent issues that pre-date the design-concept system):
 
-- **Phase A (default, `DESIGN_CONCEPT_MODE=warn`)** — missing artifact logs a warning, the Spec axis is skipped (reports "no artifact (Phase A shadow mode)"), and QA proceeds with the Standards axis only.
-- **Phase B/C (`DESIGN_CONCEPT_MODE=enforce`)** — missing artifact fails the PR with the message: `design-concept artifact required; run hydra-grill on the parent issue or attach 'design-concept-exempt' label (operator-only)`.
+- **`DESIGN_CONCEPT_MODE=warn` (default)** — missing artifact logs a warning, the Spec axis is skipped (reports "no artifact"), and QA proceeds with the Standards axis only.
+- **`DESIGN_CONCEPT_MODE=enforce`** — missing artifact fails the PR with the message: `design-concept artifact required; run hydra-grill on the parent issue or attach 'design-concept-exempt' label (operator-only)`.
 
 The mode is read from the shell variable `$DESIGN_CONCEPT_MODE` (default: `warn`). In both modes, an explicit `design-concept-exempt` label on the PR (operator-only) bypasses the Spec axis with an audit-log comment, regardless of whether the artifact exists.
 
@@ -66,7 +66,7 @@ The skill **never loops waiting on CI**. After the two-axis review it emits exac
 
 | Verdict | Meaning | Autopilot behaviour |
 |---|---|---|
-| `PASS` | The review fold found no blocking finding (T1–T3: lone low findings become follow-ups) AND every required CI check has concluded successfully. | Approve and merge immediately. |
+| `PASS` | The review fold found no blocking finding (T1–T3: lone low findings become follow-ups) AND every required CI check has concluded successfully. | Comment the verdict (never approve — the shared identity cannot self-approve, #848); the lifecycle seam's `qa-verdict` gate reads the PASS trailer and auto-merge lands the PR once required checks pass. |
 | `FAIL` | The review fold found a blocking finding (T1–T3: any medium/high — a low never blocks; T4: any finding), OR a required check has already failed/errored/timed-out. | Comment failing criteria and re-label via step 3's bounce-label helper: `needs-dev-resume` while the linked PR is still open — any provenance (issue #4766) — `ready-for-agent` only when no open PR remains. See step 10. |
 | `PASS-pending-CI` | Both axes pass, no required check has failed, but at least one check (required or optional) is still `queued` / `in_progress` / `pending`. | Re-poll CI on the autopilot tick; merge once green or downgrade to `FAIL` if a required check later fails. The `hydra-qa` subagent has already exited. |
 | `FAIL-pending-CI` | Reserved tier — currently unused by the classifier. Documented so operators / future playbooks can route a "review passed but a non-required check is in a soft-failure tier that we want to surface" case without re-running QA. | Treat as `PASS-pending-CI` for merge gating; surface in the verdict body. |
@@ -112,11 +112,11 @@ PR #3881:
 Pre-merge QA (sections 1–11) is the **Pre-merge Gate**. This section is the
 **Post-merge Regression Check**: the *producer* of the Outcome Holdback events
 (`holdback.reverted` / `holdback.cap-reached` / `holdback.revert_failed`) that
-the notification consumer (now the Operator Channel router, `src/operator-channel/route-event.ts`;
-formerly the deleted `src/digest.ts`) has long consumed but nothing produced since the in-process
-`src/holdback.ts` watcher was deleted in the ADR-0006 cut-over. Without this,
-no enrolled merge (T2/T3/T4 — see "carries up the ladder" below) is actually
-watched for Target-Outcome regression — the holdback is a no-op.
+the notification consumer (the Operator Channel router, `src/operator-channel/route-event.ts`)
+consumes. The in-process watcher was deleted in the ADR-0006 cut-over and
+`src/holdback.ts` was rebuilt as the request-scoped producer this section drives;
+without enrollment, no merge (T2/T3/T4 — see "carries up the ladder" below) is
+watched for Target-Outcome regression.
 
 **This is NOT a resurrected in-process watcher.** It is request-scoped work
 the autopilot poll loop dispatches *after* a merge. There is no timer, no

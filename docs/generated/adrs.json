@@ -653,6 +653,7 @@
         "CONTEXT.md",
         "config/orchestrator/vision.md",
         "docs/adr/0005-operator-escalation-is-narrow.md",
+        "docs/operator-playbooks/hydra-qa.md",
         "docs/reference.md"
       ],
       "source": {
@@ -1041,7 +1042,8 @@
         "CONTEXT-MAP.md",
         "CONTEXT.md",
         "docs/adr/0030-one-pocock-skill-lineage-replaces-forks.md",
-        "docs/operator-playbooks/hydra-autopilot.md"
+        "docs/operator-playbooks/hydra-autopilot.md",
+        "docs/operator-playbooks/hydra-wayfinder.md"
       ],
       "source": {
         "path": "docs/adr/0035-spec-stage-stays-hydra-owned.md"

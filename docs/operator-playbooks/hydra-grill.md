@@ -10,15 +10,17 @@ arguments: [anchor, scope]
 
 Produce a **design-concept artifact** for a Hydra anchor before any code-writing
 dispatch. Adapts Matt Pocock's upstream `grill-with-docs` to operate against
-Hydra's own vocabulary — `CONTEXT.md`, ADRs under `docs/adr/`, and
-Redis-backed research reports.
+Hydra's own vocabulary — `CONTEXT.md`, ADRs under `docs/adr/`, and the
+anchor issue's body and comments.
 
-This skill is Phase A of the design-concept gate (#437). The artifact lands in
-Redis via `POST /api/design-concepts` and is consumed in later phases by:
+This skill produces the artifact for the design-concept gate (#437). The artifact
+lands in Redis via `POST /api/design-concepts` and is consumed by:
 
-- the autopilot (`scripts/autopilot/decide.py`) before `dev_orch` / `dev_target`
-  dispatch (Phase B);
-- the rewritten `hydra-qa` two-axis review (sub-issue #440).
+- the dispatch gate: `gateDispatch` in `src/lifecycle/gates.ts` refuses to
+  dispatch a `needs-design-concept` anchor without an approved fresh artifact,
+  and `scripts/autopilot/decide_selectors/dev.py` yields while
+  `orch_pending_grill_anchor` is set;
+- the `hydra-qa` two-axis review (Spec axis).
 
 **Consumer-side shape (ADR-0008).** `GET /api/design-concepts/:anchorRef`
 returns a **flat** body: the artifact fields (`anchorRef`, `scope`,
@@ -27,9 +29,8 @@ single `gate` sub-object. There is **no `.concept` envelope** — consumers read
 `.invariants` / `.scope` / `.gate` directly, never `.concept.*`. Probing for a
 `.concept` field returns `undefined`.
 
-Phase A: **build & shadow only**. The autopilot does not yet refuse dispatch
-without an artifact. The skill is invocable on demand by the operator and
-exists for end-to-end shakedown.
+The skill is dispatched by the autopilot (`design_concept_orch`) and is also
+invocable on demand by the operator.
 
 ## Read these first
 
@@ -39,10 +40,12 @@ exists for end-to-end shakedown.
 - [`src/design-concept.ts`](../../src/design-concept.ts) —
   `gateCheck()` is the only definition of "what the gate will accept".
 - [`CONTEXT.md`](../../CONTEXT.md) — the ubiquitous-language glossary.
-- Upstream skills (read these for the Q&A discipline, not the wiring):
-  `~/.claude/skills/grill-with-docs/SKILL.md`,
-  `~/.claude/skills/grill-me/SKILL.md`,
-  `~/.claude/skills/prototype/SKILL.md`.
+- Upstream skills (read these for the Q&A discipline, not the wiring): the
+  installed plugin ids `mattpocock-skills:grilling` and
+  `mattpocock-skills:prototype`; `grill-with-docs` and `grill-me` are not
+  exposed as skills — read their `SKILL.md` under
+  `~/.claude/plugins/cache/claude-plugins-official/mattpocock-skills/*/skills/`
+  (`engineering/grill-with-docs`, `productivity/grill-me`).
 
 ## Inputs
 
@@ -147,13 +150,8 @@ fi
    Start with the ones the issue body references by number or title. Then
    grep for any ADR mentioning a module path the change is likely to touch.
 
-3. **Research report** (if present):
-   ```bash
-   curl -sf --max-time 5 \
-     "http://localhost:4000/api/reports/research/$ANCHOR" \
-     || echo '{"missing": true}'
-   ```
-   Absent report is fine — research is not a prerequisite for grilling.
+3. **Research** — there is no research-report API route; research findings
+   live in the anchor issue's body and comments (step 4). Nothing to fetch.
 
 4. **Issue body**:
    ```bash
@@ -302,10 +300,10 @@ For each candidate gap surfaced in Step 3:
      `web/src/lib/<context>/docs/adr/NNNN-kebab-slug.md` for scoped ones.
      The per-context CONTEXT.md is glossary-only; ADRs go in adr/.
 
-   **Phase A behaviour**: the gate fails closed on any non-empty
-   `glossaryGaps` (per `gateCheck()` rule 1). The whitelist-via-Redis
-   escape hatch lands in a later sub-issue. Phase A grilling sessions
-   that surface genuinely-new terms WILL escalate to handoff (Step 8).
+   **Gate behaviour**: the gate fails closed on any non-empty
+   `glossaryGaps` (per `gateCheck()` rule 1). There is no whitelist escape
+   hatch: a grilling session that surfaces genuinely-new terms WILL
+   escalate to handoff (Step 8).
    That is intentional — the operator either lands the `CONTEXT.md` PR or
    invokes the override.
 
@@ -453,9 +451,8 @@ anchor issue — no dated queue issue is created (ADR-0034 §8.1, resolution on
 2. Always starts with the exact heading `## hydra-grill handoff` — never
    freeform prose. The body carries: the anchorRef, the server-computed
    artifactHash, every gate reason verbatim, a one-paragraph "what was
-   explored" summary, and the recommended next step (`/grill-with-docs
-   #<N>` against the draft; re-run `/hydra-grill <N> orch` once the
-   questions are resolved). If `approve` already ran but the full-gate
+   explored" summary, and the recommended next step (an interactive
+   `/hydra-grill <N> orch` re-run to resolve the open questions). If `approve` already ran but the full-gate
    confirm failed, the comment says "approved-but-unconfirmed".
 3. References the artifact's `anchorRef` and `artifactHash` so the
    operator can pull the draft from Redis to continue from.
@@ -481,9 +478,8 @@ ${GATE_REASONS}
 
 What was explored: <one-paragraph summary of the Q&A loop's coverage>.
 
-Next step: run \`/grill-with-docs #${ANCHOR_NUM}\` against the draft, or
-re-run \`/hydra-grill ${ANCHOR_NUM} ${SCOPE}\` once the open questions are
-resolved.
+Next step: re-run \`/hydra-grill ${ANCHOR_NUM} ${SCOPE}\` interactively once the
+open questions are resolved.
 EOF
 )
 gh issue comment "$ANCHOR_NUM" --repo "$REPO" --body "$HANDOFF_BODY"
@@ -512,16 +508,12 @@ Side effects:
 - Sandbox under `/tmp/hydra-prototype-<anchor>` is **always** deleted
   before this skill returns, even on failure paths.
 
-## Out of scope (Phase A)
+## Out of scope
 
-- Autopilot wiring to refuse `dev_orch` / `dev_target` dispatch without an
-  artifact. That lands in Phase B (a follow-up sub-issue of #437).
-- CI merge-gate hook to require an artifact in the PR body. Phase C.
-- Target-side autopilot wiring that *refuses* `dev_target` dispatch
-  without an approved artifact. Phase D. (Target-side READ wiring — what
-  this skill reads when `scope=target` — landed via Step 2.target above;
-  the artifact carries the target vocabulary forward to
-  `hydra-target-build`.)
+- CI merge-gate hook to require an artifact in the PR body (owned by the
+  `design-concept-reconcile` workflow, not this skill).
+- Target-side READ wiring is covered by Step 2.target above; the artifact
+  carries the target vocabulary forward to `hydra-target-build`.
 
 ## Manual invocation
 
@@ -535,7 +527,7 @@ bash scripts/autopilot/grill-artifact.sh content-gate 439
 bash scripts/autopilot/grill-artifact.sh gate 439
 
 # Operator overrides a failed gate (rare; reserved for edge cases the
-# Phase A whitelist would have handled):
+# gate cannot discharge):
 bash scripts/autopilot/grill-artifact.sh approve 439 "operator:gabe"
 ```
 

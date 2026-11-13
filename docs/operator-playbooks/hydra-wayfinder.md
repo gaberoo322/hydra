@@ -1,6 +1,6 @@
 ---
 name: hydra-wayfinder
-description: Plan Hydra work too big for one agent session as a shared map of investigation tickets on gaberoo322/hydra — chart the fog into native blocking decision tickets, resolve them one at a time, then hand the cleared map to hydra-prd (epic) or /to-spec (spec). Adapts Matt Pocock's `wayfinder`.
+description: Plan Hydra work too big for one agent session as a shared map of investigation tickets on gaberoo322/hydra — chart the fog into native blocking decision tickets, resolve them one at a time, then hand the cleared map to hydra-prd (epic) or hydra-grill (spec). Adapts Matt Pocock's `wayfinder`.
 when_to_use: "When the operator has a large, foggy Hydra initiative to plan (bigger than one session), says 'wayfind', 'chart a map', 'plan this big change', or wants to break a vague initiative into decision tickets before writing a spec. Interactive / operator-driven — not an autopilot dispatch class."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) WebSearch(*) WebFetch(*) Agent(*)
 arguments: [map, ticket]
@@ -13,10 +13,10 @@ of investigation tickets on `gaberoo322/hydra`. A loose idea has arrived, wrappe
 in fog: the way from here to the **destination** isn't visible yet. This skill
 charts that way as issues on the tracker, then resolves the tickets one at a time
 until the route is clear and the map can be handed off — to `hydra-prd` for an
-implementation epic, or `/to-spec` for a spec.
+implementation epic, or `hydra-grill` (spec stage, ADR-0035) for a spec.
 
 This is the Hydra-native adaptation of Matt Pocock's upstream `wayfinder`
-(`~/.claude/skills/wayfinder/SKILL.md`) — same charting discipline, wired to
+(plugin cache: `~/.claude/plugins/cache/claude-plugins-official/mattpocock-skills/*/skills/engineering/wayfinder/SKILL.md`; not exposed as a skill) — same charting discipline, wired to
 Hydra's tracker (`gaberoo322/hydra`), label vocabulary, **native** sub-issue +
 blocked-by convention (map internals), the body-text `## Sub-issues` epic format
 so `hydra-epic-close` can GC a completed map, and the two-conventions boundary of
@@ -36,7 +36,7 @@ Wayfinder is **planning** by default: each ticket resolves a *decision*, and the
 map is done when the way is clear — nothing left to decide before someone goes
 and builds the thing. The pull to just start coding is usually the signal you've
 reached the edge of the map and it's time to hand off — to `hydra-prd` (for an
-implementation epic) or `/to-spec` → `/to-tickets` → `hydra-dev` (for a spec).
+implementation epic) or `hydra-grill` (spec) → `hydra-tickets` → `hydra-dev` (for a spec).
 Produce decisions, not deliverables, unless the map's `## Notes` explicitly
 carries execution into the map.
 
@@ -80,7 +80,7 @@ to it before choosing a ticket.>
 
 ## Notes
 
-<domain area; which skills each session should consult (e.g. grill-with-docs for
+<domain area; which skills each session should consult (e.g. hydra-grill for
 domain-model questions, prototype for logic/UI questions); standing preferences.>
 
 ## Decisions so far
@@ -215,15 +215,15 @@ upstream `grilling`).
 
 - **`wayfinder:research`** (AFK) — read primary sources (docs, third-party APIs,
   the codebase) and link a cited markdown summary. Invoke the upstream
-  **`/research`** skill. Use when knowledge outside the working tree is needed.
+  **`mattpocock-skills:research`** skill. Use when knowledge outside the working tree is needed.
 - **`wayfinder:prototype`** (HITL) — raise discussion fidelity with a cheap
-  concrete artifact via the **`/prototype`** skill (logic or UI branch). Link the
+  concrete artifact via the **`mattpocock-skills:prototype`** skill (logic or UI branch). Link the
   prototype; don't paste it. Use when "how should it look / behave" is the crux.
   (Operator-interactive — the `/tmp` worktree-safety fences `hydra-grill` needs
   for BG dispatch don't apply here.)
 - **`wayfinder:grilling`** (HITL) — one-question-at-a-time conversation via
-  **`/grill-with-docs`** (sharpens against Hydra's `CONTEXT.md` + ADRs and updates
-  them inline) or **`/grilling`** + **`/domain-modeling`**. The default type.
+  **`hydra-grill` (or `mattpocock-skills:grilling`)** (sharpens against Hydra's `CONTEXT.md` + ADRs and updates
+  them inline) or **`/grilling`** + **`mattpocock-skills:domain-modeling`**. The default type.
 - **`wayfinder:task`** (HITL or AFK) — manual work that must happen before a
   *decision* can be made (provision access, move data so its shape is visible,
   sign up for a service so its API can be judged). The one type that *does* rather
@@ -259,15 +259,15 @@ context stays inside the smart zone, and the map stays collaboratively editable.
 
 ### Chart the map  (`arguments: []` — a loose idea)
 
-1. **Name the destination.** Run `/grill-with-docs` (+ `/domain-modeling`) to pin
-   down what the map is finding its way to — a spec to hand to `/to-spec`, a
+1. **Name the destination.** Run `hydra-grill` (or `mattpocock-skills:grilling`) (+ `mattpocock-skills:domain-modeling`) to pin
+   down what the map is finding its way to — a spec to hand to `hydra-grill` (spec stage, ADR-0035), a
    decision to lock, or an in-place change. The destination fixes scope, so it's
    settled first. Ground it in Hydra's `CONTEXT.md` and relevant ADRs.
 2. **Map the frontier — breadth-first.** Grill again, fanning across the whole
    space rather than deep on one thread, surfacing open decisions and first
    takeable steps. **If no fog surfaces** — the way is already clear, small enough
    for one session — you don't need a map; stop and tell the operator to go
-   straight to `/to-spec` (or `hydra-prd` for an epic).
+   straight to `hydra-grill` (spec stage, ADR-0035) (or `hydra-prd` for an epic).
 3. **Create the map** (`wayfinder:map`): Destination + Notes filled, Decisions-so-
    far empty, fog sketched into Not-yet-specified, empty `## Sub-issues`.
 4. **Create the specifiable tickets** as issues; **second pass** wires the native
@@ -281,7 +281,7 @@ context stays inside the smart zone, and the map stays collaboratively editable.
 2. **Choose the ticket.** If the operator named one, use it. Else take the first
    frontier ticket in order. **Claim it** (assign to the driver) before any work.
 3. **Resolve it** — zoom as needed (fetch related/closed ticket bodies on demand);
-   invoke the skill the type names (`/research`, `/prototype`, `/grill-with-docs`).
+   invoke the skill the type names (`mattpocock-skills:research`, `mattpocock-skills:prototype`, `hydra-grill` (or `mattpocock-skills:grilling`)).
    If in doubt, grill.
 4. **Record the resolution:** post the answer as a comment, close the ticket, tick
    its `## Sub-issues` box, and append a one-line gist to Decisions-so-far. Closing
@@ -310,7 +310,7 @@ maps exist and points back here, so this skill owns the map lifecycle end to end
   (each closed ticket is a primary source) into an ADR + structured PRD JSON, then
   `hydra-prd --apply` emits the parent epic + dependency-ordered tracer-bullet
   children stamped `Expected tier: N` (the #3125 → ADR-0028 → epic #3285 pattern;
-  ADR-0029 Decision 4 / survey F7). `/to-spec` → `/to-tickets` is **not** the epic
+  ADR-0029 Decision 4 / survey F7). `hydra-grill` (spec) → `hydra-tickets` is **not** the epic
   route — reserve it for the spec-destination route below.
 - **Destination = Target work (an implementation epic on the Target board)** →
   run **`/hydra-tickets target`** (issue #5168). The map stays on
@@ -321,8 +321,8 @@ maps exist and points back here, so this skill owns the map lifecycle end to end
   `ready-for-agent` for `dev_target`, and its dependent slices `blocked`.
   This is also the route a `research_target` milestone-scoping escalation
   points at.
-- **Destination = a spec** → run **`/to-spec`**, synthesising the map's
-  Decisions-so-far into the spec, then **`/to-tickets`** to slice it into
+- **Destination = a spec** → run **`hydra-grill` (spec stage, ADR-0035)**, synthesising the map's
+  Decisions-so-far into the spec, then **`hydra-tickets`** to slice it into
   tracer-bullet build issues for `hydra-dev`.
 - **Destination = a locked decision** → the decision lives in the map + its
   tickets; record it as an ADR if it governs future work (`docs/adr/NNNN-*.md`).
@@ -351,7 +351,7 @@ handoff. Add `keep-open` if the map should persist as a reference after handoff.
     and #3059's `deriveBoardState` filter parse. `hydra-prd`'s capstone translation
     *is* the bridge; do not collapse the two conventions into one.
 - **Producers** — the epic handoff routes through **`hydra-prd`** (the Hydra-native
-  epic producer); the spec route uses `/to-spec` → `/to-tickets`. Not a bespoke
+  epic producer); the spec route uses `hydra-grill` (spec) → `hydra-tickets`. Not a bespoke
   issue writer.
 
 ## Out of scope (this skill)
@@ -365,7 +365,7 @@ handoff. Add `keep-open` if the map should persist as a reference after handoff.
   `hydra-review`, not in this skill — see `docs/agents/issue-tracker.md
   § Wayfinding operations → Autopilot integration`.
 - **Target tracker.** This playbook targets `gaberoo322/hydra` (orchestrator
-  planning). A Target (`~/hydra-betting`) variant is a future adaptation.
+  planning). Target work is filed through `/hydra-tickets target` (see the Target-work route above), not by a Target-side map.
 
 ## Rules
 
