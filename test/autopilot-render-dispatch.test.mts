@@ -629,7 +629,7 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
       devAction({ kind: "ForwardFixRed", anchor: "issue-4728", branch: "worktree-agent-glm-4728", pr: 4776 }),
     );
     const secStart = PLAYBOOK.indexOf("**Red-PR forward-fix dispatch contract");
-    const secEnd = PLAYBOOK.indexOf("The cap (red-CI arm only): `state.red_forward_fix_attempts`");
+    const secEnd = PLAYBOOK.indexOf("The cap (red-CI arm only):");
     assert.ok(secStart >= 0 && secEnd > secStart, "playbook contract section markers present");
     const section = PLAYBOOK.slice(secStart, secEnd);
     const flat = (text: string) => text.replace(/\s+/g, " ");
@@ -656,7 +656,7 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
       devAction({ kind: "ForwardFixRed", anchor: "issue-4720", branch: "b", pr: 5003 }),
     );
     const secStart = PLAYBOOK.indexOf("**Red-PR forward-fix dispatch contract");
-    const secEnd = PLAYBOOK.indexOf("The cap (red-CI arm only): `state.red_forward_fix_attempts`");
+    const secEnd = PLAYBOOK.indexOf("The cap (red-CI arm only):");
     assert.ok(secStart >= 0 && secEnd > secStart, "playbook section markers must exist in order");
     const flat = (text: string) => text.replace(/\s+/g, " ");
     for (const text of [out.prompt, flat(PLAYBOOK.slice(secStart, secEnd))]) {
@@ -685,7 +685,7 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
   test("the forward-fix contract's five steps are the playbook's five (same bold step titles, same order)", () => {
     const out = render("dev_orch", devAction({ kind: "ForwardFixRed", anchor: "issue-1", branch: "b", pr: 2 }));
     const titles = (text: string) => [...text.matchAll(/^\d\. \*\*([^*]+)\*\*/gm)].map((m) => m[1]);
-    const section = PLAYBOOK.slice(PLAYBOOK.indexOf("**Red-PR forward-fix dispatch contract"), PLAYBOOK.indexOf("The cap (red-CI arm only): `state.red_forward_fix_attempts`"));
+    const section = PLAYBOOK.slice(PLAYBOOK.indexOf("**Red-PR forward-fix dispatch contract"), PLAYBOOK.indexOf("The cap (red-CI arm only):"));
     const want = titles(section);
     assert.equal(want.length, 5, "the playbook contract has five steps");
     assert.deepEqual(titles(out.prompt.slice(out.prompt.indexOf("Red-PR forward-fix contract"))), want);
@@ -833,6 +833,15 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
     const sweep = render("sweep_orch", action("sweep_orch", "hydra-sweep", { prompt_args: { scope: "orch", anchor: "issue-4823" } }));
     assert.match(sweep.prompt, /match by closing ref, not by title/);
     assert.match(sweep.prompt, /put its name in the URL PATH \(`DELETE \.\.\.\/labels\/<name>`\)/);
+    assert.match(sweep.prompt, /scripts\/lifecycle\.ts advance <N> <to>/);
+    assert.match(retro.prompt, /Issue STATE labels .* move only through `npx tsx scripts\/lifecycle\.ts advance <N> <to> \.\.\.`/);
+    assert.match(retro.prompt, /refusal exits non-zero and is final/);
+    // QA round 2: a Target sweep keeps the flag-label mechanics but NOT the
+    // orchestrator-seam state rule (the Target board is outside the seam).
+    const tsweep = render("sweep_target", action("sweep_target", "hydra-target-sweep"));
+    assert.match(tsweep.prompt, /put its name in the URL PATH \(`DELETE \.\.\.\/labels\/<name>`\)/);
+    assert.match(tsweep.prompt, /wipes ALL labels/);
+    assert.doesNotMatch(tsweep.prompt, /Issue STATE labels/);
     const health = render("health", action("health", "hydra-doctor"));
     assert.doesNotMatch(health.prompt, /Admission rule/);
     assert.match(health.prompt, /Invoke the `hydra-doctor` skill \(via the Skill tool\) and follow it end to end/);

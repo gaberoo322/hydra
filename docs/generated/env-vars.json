@@ -1766,6 +1766,18 @@
       }
     },
     {
+      "name": "HYDRA_LIFECYCLE_BIN",
+      "readSites": [
+        {
+          "path": "scripts/autopilot/recover-stale.sh"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/autopilot/recover-stale.sh"
+      }
+    },
+    {
       "name": "HYDRA_LOG_DETERMINISTIC",
       "readSites": [
         {
@@ -2125,6 +2137,18 @@
       }
     },
     {
+      "name": "HYDRA_RECOVER_STALE_CLAIM_MIN",
+      "readSites": [
+        {
+          "path": "scripts/autopilot/recover-stale.sh"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/autopilot/recover-stale.sh"
+      }
+    },
+    {
       "name": "HYDRA_RECOVER_STALE_DEBUG",
       "readSites": [
         {
@@ -2221,6 +2245,21 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/claude-hooks/git-remote-fence.sh"
+      }
+    },
+    {
+      "name": "HYDRA_REPO_ROOT",
+      "readSites": [
+        {
+          "path": "scripts/docs/generate-inventories.ts"
+        },
+        {
+          "path": "scripts/test/suite-count-check.mjs"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/docs/generate-inventories.ts"
       }
     },
     {
@@ -2423,6 +2462,18 @@
       "inEnvExample": false,
       "source": {
         "path": "src/target-config.ts"
+      }
+    },
+    {
+      "name": "HYDRA_TMP_REAP_ROOT",
+      "readSites": [
+        {
+          "path": "scripts/reap-stale-tmp.sh"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/reap-stale-tmp.sh"
       }
     },
     {

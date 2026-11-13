@@ -50,7 +50,6 @@ import { bucketDispatchOutcome } from "../src/autopilot/cycle-status.ts";
 import {
   PR_PRODUCING_SKILLS,
   CLASSES_PRODUCING_PRS,
-  CYCLE_RECORD_SKILLS,
   DISPATCH_CLASSES,
 } from "../src/taxonomy/classes.ts";
 // Issue #3785: exercises the REAL read-side join (not a hand-rolled `.outcome`
@@ -2585,15 +2584,15 @@ describe("drill clauses — forward-fix + short-circuit (#4856)", () => {
 // ---------------------------------------------------------------------------
 
 describe("PR_PRODUCING_SKILLS / CLASSES_PRODUCING_PRS (#4856)", () => {
-  test("PR_PRODUCING_SKILLS is a strict subset of CYCLE_RECORD_SKILLS; CLASSES_PRODUCING_PRS derives from the taxonomy (#4856)", () => {
+  test("PR_PRODUCING_SKILLS is a strict subset of the cycleRecord-column skills; CLASSES_PRODUCING_PRS derives from the taxonomy (#4856)", () => {
     // Strict subset: adding a PR-producing skill without a cycle record is
     // impossible without this test reddening (the short-circuit clause reads
-    // the dispatch-outcome ledger's durationMs, which only CYCLE_RECORD_SKILLS
+    // the dispatch-outcome ledger's durationMs, which only cycleRecord
     // completions write).
     for (const skill of PR_PRODUCING_SKILLS) {
       assert.ok(
-        CYCLE_RECORD_SKILLS.has(skill),
-        `${skill} must stay inside CYCLE_RECORD_SKILLS`,
+        DISPATCH_CLASSES.some((r) => r.skill === skill && r.cycleRecord),
+        `${skill} must stay inside the cycleRecord column's skills`,
       );
     }
     // Derived, never hand-listed: the emitted list IS the taxonomy join.

@@ -39,6 +39,7 @@ import {
   type FinishVerdict,
 } from "../src/glm/finish.ts";
 import { capFilePath, quotaBlockFilePath } from "../src/glm/gate.ts";
+import { gateClaimReleased } from "../src/lifecycle/gates.ts";
 import { loadDrainerConfig } from "../src/glm/drainer-config.ts";
 import type { WorkerProvider } from "../src/glm/providers.ts";
 import { runDriverMode, type DriverDeps } from "../src/glm/drainer-driver.ts";
@@ -384,6 +385,15 @@ function makeFinishDeps(opts: FakeOpts = {}): { deps: FinishDeps; calls: string[
       calls.push(`label:${issue}:r=${(labels.remove ?? []).join("+") ?? ""}:a=${(labels.add ?? []).join("+") ?? ""}`);
       return { ok: true };
     },
+    advanceState: async (issue, to, opts) => {
+      if (reject.has("advanceState")) throw new Error("injected advanceState rejection");
+      const pr = opts.evidence?.pr;
+      const dispatch = opts.evidence?.dispatch;
+      calls.push(
+        `advance:${issue}:${opts.from}->${to}${pr !== undefined ? `:pr=${pr}` : ""}${dispatch !== undefined ? `:dispatch=${dispatch}` : ""}`,
+      );
+      return { ok: true };
+    },
     viewIssueTitle: async (issue) => {
       calls.push(`title:${issue}`);
       return "Fake issue title";
@@ -455,6 +465,55 @@ function ranInput(overrides: Partial<FinishInput> = {}): FinishInput {
   return { issue: 77, worktree: WT, branch: BRANCH, authorRaw: OUTCOME_CLEAN, authorExitCode: 0, ...overrides };
 }
 
+describe("runFinish requeues past the drainer's own held claim (#5318 QA round 5)", () => {
+  // The tick runs finish while its claim is still held. The fake advanceState
+  // here answers with the REAL claim-released gate over a held claim, so a
+  // requeue that omits the owner's dispatch id is refused exactly as enforce
+  // mode would refuse it.
+  const HELD = "agent-glm-77-1700000000";
+  function heldClaimDeps(): ReturnType<typeof makeFinishDeps> {
+    const h = makeFinishDeps();
+    h.deps.advanceState = async (issue, to, opts) => {
+      const res = gateClaimReleased(
+        { issue, from: "in-progress", to: "ready-for-agent", flags: [], evidence: opts.evidence ?? {} },
+        { claim: { ok: true, value: { held: { dispatchId: HELD } } } },
+      );
+      h.calls.push(`advance:${issue}:${opts.from}->${to}:${res.ok ? "ok" : res.code}`);
+      return res.ok ? { ok: true } : { ok: false, code: res.code ?? "refused" };
+    };
+    return h;
+  }
+
+  test("with the claim's dispatch id the requeue passes the gate", async () => {
+    const h = heldClaimDeps();
+    const r = await runFinish(h.deps, ranInput({ authorRaw: "", authorExitCode: 1, dispatchId: HELD }));
+    assert.equal(r.action, "release-not-authored");
+    assert.ok(h.calls.includes("advance:77:in-progress->ready-for-agent:ok"));
+    assert.doesNotMatch(h.logs.join("\n"), /failed to release issue/);
+  });
+
+  test("without it, or with another dispatch's id, the gate refuses claim-held and finish logs it", async () => {
+    for (const dispatchId of [undefined, "agent-glm-77-other"]) {
+      const h = heldClaimDeps();
+      await runFinish(h.deps, ranInput({ authorRaw: "", authorExitCode: 1, ...(dispatchId ? { dispatchId } : {}) }));
+      assert.ok(h.calls.includes("advance:77:in-progress->ready-for-agent:claim-held"));
+      assert.match(h.logs.join("\n"), /WARN failed to release issue #77 \(non-fatal\): claim-held/);
+    }
+  });
+
+  test("every requeue arm sends the dispatch id as evidence", async () => {
+    const arms: Array<Partial<FinishInput>> = [
+      { authorRaw: "", authorExitCode: 1 },
+      { authorRaw: OUTCOME_NOT_RUN },
+    ];
+    for (const arm of arms) {
+      const h = makeFinishDeps();
+      await runFinish(h.deps, ranInput({ ...arm, dispatchId: HELD }));
+      assert.ok(h.calls.includes(`advance:77:in-progress->ready-for-agent:dispatch=${HELD}`), JSON.stringify(h.calls));
+    }
+  });
+});
+
 describe("runFinish — the post-author arms, in order (issue #4337 D13, issue #4685 INV-4)", () => {
   test("driver-fault arm: FAULTED journal line, worktree removed, ONE plain release, no withhold", async () => {
     const h = makeFinishDeps();
@@ -463,7 +522,7 @@ describe("runFinish — the post-author arms, in order (issue #4337 D13, issue #
     assert.deepEqual(r.labels, [READY]);
     assert.match(h.logs.join("\n"), /authoring driver FAULTED \(exit=1\) for issue #77 — see driver stderr above/);
     assert.doesNotMatch(h.logs.join("\n"), /authoring session did not run/);
-    assert.deepEqual(h.calls, [`worktree-remove:${WT}`, `label:77:r=in-progress:a=ready-for-agent`]);
+    assert.deepEqual(h.calls, [`worktree-remove:${WT}`, `advance:77:in-progress->ready-for-agent`]);
     assert.equal(h.files.has(TIMEOUT_FILE), false, "a fault never touches the timeout counter");
   });
 
@@ -476,7 +535,7 @@ describe("runFinish — the post-author arms, in order (issue #4337 D13, issue #
       /authoring session did not run for issue #77: glm-auth-token-missing — ANTHROPIC_AUTH_TOKEN is unset/,
     );
     assert.doesNotMatch(h.logs.join("\n"), /FAULTED/);
-    assert.deepEqual(h.calls, [`worktree-remove:${WT}`, `label:77:r=in-progress:a=ready-for-agent`]);
+    assert.deepEqual(h.calls, [`worktree-remove:${WT}`, `advance:77:in-progress->ready-for-agent`]);
   });
 
   test("worktree-create-failure shape (no worktree/branch): releases with nothing to remove", async () => {
@@ -489,7 +548,7 @@ describe("runFinish — the post-author arms, in order (issue #4337 D13, issue #
       authorExitCode: 0,
     });
     assert.equal(r.action, "release-not-authored");
-    assert.deepEqual(h.calls, [`label:77:r=in-progress:a=ready-for-agent`], "no worktree removal, no git effects");
+    assert.deepEqual(h.calls, [`advance:77:in-progress->ready-for-agent`], "no worktree removal, no git effects");
     assert.match(h.logs.join("\n"), /glm-worktree-create-failed/);
   });
 
@@ -517,7 +576,7 @@ describe("runFinish — the post-author arms, in order (issue #4337 D13, issue #
         `title:77`,
         `pr-create:${BRANCH}`,
         `unlink:${TIMEOUT_FILE}`,
-        `label:77:r=ready-for-agent+in-progress:a=needs-qa`,
+        `advance:77:in-progress->needs-qa:pr=12345`,
         `write:${CAP_FILE}`,
         `worktree-remove:${WT}`,
       ],
@@ -562,7 +621,7 @@ describe("runFinish — the post-author arms, in order (issue #4337 D13, issue #
         `git:rev-list --count origin/master..HEAD`,
         `push:${BRANCH}`,
         `worktree-remove:${WT}`,
-        `label:77:r=in-progress:a=ready-for-agent`,
+        `advance:77:in-progress->ready-for-agent`,
       ],
     );
     assert.equal(h.files.get(TIMEOUT_FILE), "1\n", "the PR-less timeout accumulates (INV-6)");
@@ -581,7 +640,7 @@ describe("runFinish — the post-author arms, in order (issue #4337 D13, issue #
         `worktree-remove:${WT}`,
         `ls-remote:${BRANCH}`,
         `branch-delete:${BRANCH}`,
-        `label:77:r=in-progress:a=ready-for-agent`,
+        `advance:77:in-progress->ready-for-agent`,
       ],
     );
     assert.equal(r.quotaBlockedUntil, null, "no 429 in the stdout -> no quota block");
@@ -609,7 +668,7 @@ describe("runFinish — the post-author arms, in order (issue #4337 D13, issue #
       /issue #77: timeout resume cap reached \(2\/2\) — releasing with glm-withhold so the Claude dev_orch lane takes this issue and its pushed branch over/,
     );
     // INV-3: the withhold rides a SEPARATE second gh issue edit, after the release.
-    const releaseIdx = h.calls.indexOf(`label:77:r=in-progress:a=ready-for-agent`);
+    const releaseIdx = h.calls.indexOf(`advance:77:in-progress->ready-for-agent`);
     const withholdIdx = h.calls.indexOf(`label:77:r=:a=glm-withhold`);
     assert.ok(releaseIdx >= 0, "expected the release write");
     assert.ok(withholdIdx > releaseIdx, "the withhold write must follow the release write");
@@ -635,7 +694,7 @@ describe("runFinish — the post-author arms, in order (issue #4337 D13, issue #
         `worktree-remove:${WT}`,
         `ls-remote:${BRANCH}`,
         `branch-delete:${BRANCH}`,
-        `label:77:r=in-progress:a=ready-for-agent`,
+        `advance:77:in-progress->ready-for-agent`,
         `label:77:r=:a=glm-withhold`,
       ],
     );
@@ -669,7 +728,7 @@ describe("runFinish — the post-author arms, in order (issue #4337 D13, issue #
     // number (gh pr edit is broken for labels here, ADR-0034 §7) — in the
     // fake that is the SAME editIssueLabels seam, called with the PR number.
     assert.ok(h.calls.includes(`label:999:r=:a=${GLM_LABEL_AUTHORED}`), `expected the adopted-PR relabel:\n${h.calls.join("\n")}`);
-    assert.ok(h.calls.includes(`label:77:r=ready-for-agent+in-progress:a=needs-qa`), "adoption must still advance the issue to needs-qa");
+    assert.ok(h.calls.includes(`advance:77:in-progress->needs-qa:pr=999`), "adoption must still advance the issue to needs-qa");
     assert.equal(h.files.get(CAP_FILE), "1\n", "an adopted PR counts against the daily cap like a fresh one");
   });
 
@@ -690,7 +749,7 @@ describe("runFinish — the post-author arms, in order (issue #4337 D13, issue #
     assert.doesNotMatch(joined, /worktree-remove:/, "the worktree stays for operator inspection");
     assert.doesNotMatch(joined, /branch-delete:/, "the remote branch stays for operator inspection");
     assert.doesNotMatch(joined, /a=needs-qa/);
-    assert.ok(h.calls.includes(`label:77:r=in-progress:a=ready-for-agent`), "the claim is still released");
+    assert.ok(h.calls.includes(`advance:77:in-progress->ready-for-agent`), "the claim is still released");
   });
 
   test("D5: a FAILED adopt lookup (gh pr list error) is a genuine failure, never a crash", async () => {
@@ -708,7 +767,7 @@ describe("runFinish — the post-author arms, in order (issue #4337 D13, issue #
     const h = makeFinishDeps({ commitCount: 0 });
     const r = await runFinish(h.deps, ranInput({ authorRaw: OUTCOME_TIMEOUT_429 }));
     assert.equal(r.action, "release-nothing-produced");
-    const releaseIdx = h.calls.indexOf(`label:77:r=in-progress:a=ready-for-agent`);
+    const releaseIdx = h.calls.indexOf(`advance:77:in-progress->ready-for-agent`);
     const quotaIdx = h.calls.indexOf(`write:${QUOTA_FILE}`);
     assert.ok(releaseIdx >= 0 && quotaIdx > releaseIdx, `the quota block must be recorded after the release:\n${h.calls.join("\n")}`);
     // No parseable reset clause in the fixture stdout -> the 60-min fallback.
@@ -721,7 +780,7 @@ describe("runFinish — the post-author arms, in order (issue #4337 D13, issue #
     const h = makeFinishDeps({ commitCount: 1, prBody: null });
     const r = await runFinish(h.deps, ranInput({ authorRaw: OUTCOME_TIMEOUT_429 }));
     assert.equal(r.action, "keep-partial-for-resume");
-    const releaseIdx = h.calls.indexOf(`label:77:r=in-progress:a=ready-for-agent`);
+    const releaseIdx = h.calls.indexOf(`advance:77:in-progress->ready-for-agent`);
     const quotaIdx = h.calls.indexOf(`write:${QUOTA_FILE}`);
     assert.ok(releaseIdx >= 0 && quotaIdx > releaseIdx, `the quota block must be recorded after the release:\n${h.calls.join("\n")}`);
     assert.equal(r.quotaBlockedUntil, NOW_SEC + QUOTA_BLOCK_FALLBACK_SECONDS);
@@ -733,15 +792,15 @@ describe("runFinish — the post-author arms, in order (issue #4337 D13, issue #
     const r = await runFinish(h.deps, ranInput({ authorRaw: "", authorExitCode: 1 }));
     assert.equal(r.action, "release-not-authored");
     assert.match(h.logs.join("\n"), /WARN worktree remove \(\/repo\/wts\/agent-glm-77-1\) threw \(non-fatal\)/);
-    assert.ok(h.calls.includes(`label:77:r=in-progress:a=ready-for-agent`), "the release must still run");
+    assert.ok(h.calls.includes(`advance:77:in-progress->ready-for-agent`), "the release must still run");
   });
 
   test("effect isolation: a throwing evidence dep on the ran path degrades, never crashes (finish-fault backstop)", async () => {
     // countCommits reads through the guarded runGit; make it throw so the
     // top-level catch fires and the best-effort plain release still lands.
-    const h = makeFinishDeps({ commitCount: 1, rejectEffects: ["editIssueLabels"] });
+    const h = makeFinishDeps({ commitCount: 1, rejectEffects: ["advanceState"] });
     const r = await runFinish(h.deps, ranInput());
-    // The label seam throwing on the advance arm is caught per-effect (WARN),
+    // The seam throwing on the advance arm is caught per-effect (WARN),
     // not by the top-level catch — the arm completes.
     assert.equal(r.action, "open-pr");
     assert.match(h.logs.join("\n"), /WARN advance issue #77 to needs-qa threw \(non-fatal\)/);
@@ -759,7 +818,7 @@ describe("runFinish — the post-author arms, in order (issue #4337 D13, issue #
     assert.equal(r.action, "finish-fault");
     assert.equal(r.issue, 77);
     assert.match(String(r.detail), /injected log sink failure/);
-    assert.ok(h.calls.includes(`label:77:r=in-progress:a=ready-for-agent`), "the best-effort plain release still landed");
+    assert.ok(h.calls.includes(`advance:77:in-progress->ready-for-agent`), "the best-effort plain release still landed");
     assert.deepEqual(r.labels, []);
   });
 });
@@ -824,7 +883,7 @@ describe("runFinish — dry-run is hermetic on the fault path (issue #4978 INV-6
     assert.equal(r.dryRun, true);
     assert.equal(r.detail, "injected fault");
     assert.equal(
-      h.calls.filter((c) => c.startsWith("label:")).length,
+      h.calls.filter((c) => c.startsWith("label:") || c.startsWith("advance:")).length,
       0,
       `dry-run fault arm must not edit labels:\n${h.calls.join("\n")}`,
     );
@@ -844,7 +903,7 @@ describe("runFinish — dry-run is hermetic on the fault path (issue #4978 INV-6
     };
     const r = await runFinish(h.deps, ranInput());
     assert.equal(r.action, "finish-fault");
-    assert.equal(h.calls.filter((c) => c.startsWith("label:")).length, 0);
+    assert.equal(h.calls.filter((c) => c.startsWith("label:") || c.startsWith("advance:")).length, 0);
   });
 });
 
@@ -883,7 +942,7 @@ describe("runDriverMode('finish') — one FinishResult JSON line, exit 0 (issue 
     assert.equal(out.exitCode, 0);
     const parsed = JSON.parse(out.line) as FinishResult;
     assert.equal(parsed.action, "release-not-authored");
-    assert.ok(h.calls.includes(`label:77:r=in-progress:a=ready-for-agent`), "the claim is salvaged, not crashed on");
+    assert.ok(h.calls.includes(`advance:77:in-progress->ready-for-agent`), "the claim is salvaged, not crashed on");
   });
 
   test("a ran outcome WITHOUT worktree and branch is bad-argv (exit-1 arm)", async () => {
@@ -966,6 +1025,10 @@ describe("runFinish — provider attribution + per-provider 429 (INV-7/8/10)", (
         calls.push(`label:${issue}:a=${(labels.add ?? []).join("+")}`);
         return { ok: true };
       },
+      advanceState: async (issue, to, opts) => {
+        calls.push(`advance:${issue}:${opts.from}->${to}`);
+        return { ok: true };
+      },
       viewIssueTitle: async () => "Fake title",
       createPr: async () =>
         o.prOk === false ? { ok: false, stderr: "boom" } : { ok: true, url: "https://github.com/x/y/pull/9" },
@@ -1035,7 +1098,7 @@ describe("runFinish — provider attribution + per-provider 429 (INV-7/8/10)", (
     const h = finishHarness(2, null);
     const r = await runFinish(h.deps, input(ZAI_P, OUT_429));
     assert.equal(r.action, "keep-partial-for-resume");
-    const releaseIdx = h.calls.findIndex((c) => c.startsWith("label:77:"));
+    const releaseIdx = h.calls.findIndex((c) => c.startsWith("advance:77:"));
     const writeIdx = h.calls.indexOf(`write:${quotaBlockFilePath(CAP_DIR, "zai")}`);
     assert.ok(releaseIdx >= 0 && writeIdx > releaseIdx, h.calls.join("\n"));
     assert.equal(r.quotaBlockedUntil, NOW_SEC + 3600);

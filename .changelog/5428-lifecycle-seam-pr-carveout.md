@@ -1,0 +1,1 @@
+- fix: lifecycle seam scanner no longer counts PR-label flag writes as state writes (#5428)

@@ -17,7 +17,7 @@ Take a structured `PrdInput` and emit one **parent epic** issue plus **N tracer-
 
 **Target render scope (issue #5168).** `renderChildBody()` and `childLabels()` take an optional last argument, a `RenderScope`. The default `{ kind: "orch" }` renders exactly the Orchestrator output this playbook describes. `{ kind: "target", riskSurface }` renders for the Target board instead: every path stays in scope, there is no `Expected tier`, and slices on the risk surface get `Money-critical: yes` plus the `money-critical` label. The Target publish recipe is `/hydra-tickets target`. This playbook's own `--apply` path stays Orchestrator-only.
 
-Unlike the generic upstream `/to-spec` skill (renamed from `/to-prd` in Pocock v1.1 — it was always a spec, not a PRD) — which interviews the operator via `AskUserQuestion` — `hydra-prd` is **fully parameterised**: input is structured JSON, output is GitHub issues. There are zero `AskUserQuestion` calls in this playbook; if the input is malformed, the skill stops with a validation report rather than asking for clarification.
+Unlike the generic upstream `to-spec` skill (renamed from `/to-prd` in Pocock v1.1 — it was always a spec, not a PRD) — which interviews the operator via `AskUserQuestion` — `hydra-prd` is **fully parameterised**: input is structured JSON, output is GitHub issues. There are zero `AskUserQuestion` calls in this playbook; if the input is malformed, the skill stops with a validation report rather than asking for clarification.
 
 The skill is **dry-run by default**. To actually create issues on `gaberoo322/hydra`, pass `--apply` (or `apply=true`). Dry-run prints the rendered parent and child bodies plus the validation report, so the operator can review before committing.
 
@@ -38,7 +38,7 @@ The skill reads a `PrdInput` JSON object — from a file (`--input=/tmp/prd.json
   "problem": "Prose using Hydra glossary terms (Orchestrator, Target, Modification Tier, ...). At least one sentence.",
   "rationale": "Why ship this now. Links to Target Outcomes, Outcome Holdback, or Modification Tier where relevant.",
   "expectedGlossaryTerms": ["Orchestrator", "Target", "Modification Tier"],
-  "sourceRef": "hydra:reports:research:2026-05-18T00:00:00Z",
+  "sourceRef": "issue-5000",
   "slices": [
     {
       "title": "alpha — bootstrap the foo skeleton",
@@ -182,16 +182,20 @@ In `--apply` mode:
 # 6a. Render parent body with placeholders (we don't have child numbers yet).
 PARENT_BODY=$(... renderParentBody(input, []) ...)
 
-# 6b. Create the parent issue. Labels come from parentLabels() — enhancement
-#     plus needs-triage, so the epic is born with a stable lifecycle label
-#     instead of only a category label (issue #3788 Cause 2: a category-label-
-#     only epic reverts to fully label-less the moment a later sweep clears a
-#     stale `blocked`, and stays an untriaged-orphan false-positive forever).
+# 6b. Create the parent issue. Creation carries FLAG labels only —
+#     parentLabels() is just `enhancement`. The epic's lifecycle STATE is
+#     parentInitialState() (`needs-triage`), written through the lifecycle seam
+#     in the same step so the epic is born with a stable state instead of only a
+#     category label (issue #3788 Cause 2: a category-label-only epic reverts to
+#     fully label-less the moment a later sweep clears a stale `blocked`, and
+#     stays an untriaged-orphan false-positive forever). Epics are never
+#     `ready-for-agent` (#777/#794). Issue #5322: no state label at creation.
 PARENT_NUM=$(gh issue create \
   --repo gaberoo322/hydra \
   --title "$INPUT_TITLE" \
-  --label "enhancement,needs-triage" \
+  --label "enhancement" \
   --body "$PARENT_BODY" | grep -oP '/issues/\K\d+')
+npx tsx scripts/lifecycle.ts advance "$PARENT_NUM" needs-triage --actor hydra-prd
 
 # 6c. Create children in dependency order (the input is already sorted; the
 #     validator rejected any slice that depends on a later sibling).
@@ -199,12 +203,21 @@ declare -A SIBLING_NUMS
 for i in 1..N; do
   CHILD_BODY=$(... renderChildBody(input, i, PARENT_NUM, SIBLING_NUMS, EXPECTED_TIER[i]) ...)
   CHILD_TITLE="${slice[i].title}"
-  CHILD_LABELS="ready-for-agent,${slice[i].kind:-enhancement}"
+  # childLabels(): the kind flag only (`enhancement`, or `bug` per slice.kind).
+  KIND_FLAG=(--label enhancement)
+  [ "${slice[i].kind}" = "bug" ] && KIND_FLAG=(--label bug)   # kind flag only, never a state
   CHILD_NUM=$(gh issue create \
     --repo gaberoo322/hydra \
     --title "$CHILD_TITLE" \
-    --label "$CHILD_LABELS" \
+    "${KIND_FLAG[@]}" \
     --body "$CHILD_BODY" | grep -oP '/issues/\K\d+')
+  # Two-hop birth: zero-state -> needs-triage is gate-free; then the child's
+  # childInitialState() — ready-for-agent for orch children (the labelling rule lives in that doc comment). A returned illegal-transition with
+  # observed state `needs-triage` (the reconcile zero-state backstop raced it)
+  # is tolerated; any other non-zero exit is final — never a direct label write.
+  npx tsx scripts/lifecycle.ts advance "$CHILD_NUM" needs-triage --actor hydra-prd
+  npx tsx scripts/lifecycle.ts advance "$CHILD_NUM" ready-for-agent --reason scoped \
+    --rationale "$INPUT_TITLE slice $i" --actor hydra-prd
   SIBLING_NUMS[$i]=$CHILD_NUM
 done
 
@@ -213,7 +226,7 @@ PARENT_BODY_FINAL=$(... renderParentBody(input, [SIBLING_NUMS[1], ..., SIBLING_N
 gh issue edit "$PARENT_NUM" --repo gaberoo322/hydra --body "$PARENT_BODY_FINAL"
 ```
 
-The two-pass approach (parent with placeholders → children → re-render parent with real numbers) is the same pattern `/to-tickets` uses and the only one that keeps issue references resolvable without a back-edit per child.
+The two-pass approach (parent with placeholders → children → re-render parent with real numbers) is the same pattern `to-tickets` uses and the only one that keeps issue references resolvable without a back-edit per child.
 
 ### 7. Report
 
@@ -239,9 +252,9 @@ In dry-run mode the header reads `(dry-run; no GitHub issues created)` and the c
 | Surface              | Form                                                                |
 | -------------------- | ------------------------------------------------------------------- |
 | Parent issue body    | `## Problem`, `## Rationale`, `## Sub-issues` (checklist), source footer |
-| Parent labels        | `enhancement`, `needs-triage` (stable lifecycle label from creation, issue #3788) |
+| Parent labels        | `enhancement` (flag); first state `needs-triage` via `parentInitialState()` + `lifecycle advance` (stable state from birth, issues #3788, #5322) |
 | Child issue body     | `## Parent` `#N`, `## What to build`, `## Acceptance criteria`, `## Files in scope`, `## Files out of scope`, `## Blocked by`, `Expected tier: N` |
-| Child labels         | `ready-for-agent`, `enhancement` (or `bug`)                         |
+| Child labels         | `enhancement` (or `bug`) flag; first state `ready-for-agent` via `childInitialState()` + `lifecycle advance` |
 | Cross-skill contract | Parent's `## Sub-issues` is parseable by `hydra-epic-close`'s `parseEpicReferences()` — see the cross-test in `test/hydra-prd-template.test.mts` |
 
 ## Tier classification — live API
@@ -256,7 +269,7 @@ The emitted child issues each carry an `Expected tier: N` line stamped from `/ap
 - **Dependency order.** Slices must be listed earliest-first. The validator rejects any slice with a `dependsOn` that points at a later or self index.
 - **Hydra glossary.** The parent narrative uses **Orchestrator**, **Target**, **Modification Tier**, **Outcome Holdback**, **Untouchable Core** verbatim where applicable. The vocabulary check flags gaps as a soft warning.
 - **Files in scope on every child.** The issue-label-validation workflow (#396) requires it; the validator pre-enforces it so the skill never produces an invalid child.
-- **Parent carries `needs-triage` from creation** (issue #3788). A tracking-parent epic is never directly implementable, so it correctly never gets `ready-for-agent` — but it still needs *some* stable lifecycle label, or it silently reverts to fully label-less (an `untriaged_orphans` false positive) the first time a sweep clears an unrelated stale label. `hydra-sweep`'s `needs-triage` lane already special-cases tracking parents (skips auto-triage, runs the stuck-ness gate instead), so this is a safe label to stamp at birth.
+- **Parent is born into `needs-triage`** (issue #3788; written through the `scripts/lifecycle.ts` CLI, never as a creation label, issue #5322). A tracking-parent epic is never directly implementable, so it correctly never gets `ready-for-agent` — but it still needs *some* stable lifecycle label, or it silently reverts to fully label-less (an `untriaged_orphans` false positive) the first time a sweep clears an unrelated stale label. `hydra-sweep`'s `needs-triage` lane already special-cases tracking parents (skips auto-triage, runs the stuck-ness gate instead), so this is a safe label to stamp at birth.
 - **One pass.** The skill creates the parent and N children, then exits. It does not poll, retry, or watch.
 
 ## Failure modes

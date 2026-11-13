@@ -67,6 +67,9 @@ interface Paths {
   log: string;
   ghStub: string;
   ghCallsLog: string;
+  /** Recorder standing in for `scripts/lifecycle.ts` (#5318). */
+  lifecycleStub: string;
+  lifecycleCallsLog: string;
 }
 
 /**
@@ -122,7 +125,11 @@ esac
 `,
   );
   chmodSync(ghStub, 0o755);
-  return { dir, state: join(dir, "state.json"), log: join(dir, "nightly.log"), ghStub, ghCallsLog };
+  const lifecycleStub = join(dir, "lifecycle-stub.sh");
+  const lifecycleCallsLog = join(dir, "lifecycle-calls.log");
+  writeFileSync(lifecycleStub, `#!/usr/bin/env bash\necho "$*" >> "${lifecycleCallsLog}"\nexit 0\n`);
+  chmodSync(lifecycleStub, 0o755);
+  return { dir, state: join(dir, "state.json"), log: join(dir, "nightly.log"), ghStub, ghCallsLog, lifecycleStub, lifecycleCallsLog };
 }
 
 function writeState(path: string, patch: Record<string, unknown>): void {
@@ -168,6 +175,7 @@ function runCompletion(
       HYDRA_TARGET_GITHUB_REPO: TARGET_REPO_FIXTURE,
       HYDRA_REAP_WORKTREE_GC: "0", // keep the worktree-GC side-effect out of the test
       HYDRA_AUTOPILOT_GH_CLI: paths.ghStub,
+      HYDRA_AUTOPILOT_LIFECYCLE_CLI: paths.lifecycleStub,
       ...ghEnv,
     },
     encoding: "utf-8",
@@ -597,14 +605,12 @@ describe("reap.py completion → dev_orch path unchanged by the #4195 extraction
         !calls.some((c) => c.includes(`--repo ${TARGET_REPO_FIXTURE}`)),
         `dev_orch must never target the TARGET repo: ${JSON.stringify(calls)}`,
       );
+      const advances = existsSync(tmp.lifecycleCallsLog)
+        ? readFileSync(tmp.lifecycleCallsLog, "utf-8").split("\n").filter((l) => l.startsWith("advance "))
+        : [];
       assert.ok(
-        calls.some(
-          (c) =>
-            c.startsWith("issue edit 3726") &&
-            c.includes("--remove-label in-progress") &&
-            c.includes("--add-label needs-dev-resume"),
-        ),
-        `dev_orch keeps its needs-dev-resume relabel: ${JSON.stringify(calls)}`,
+        advances.some((c) => c.startsWith("advance 3726 needs-dev-resume") && c.includes("--from in-progress")),
+        `dev_orch keeps its needs-dev-resume move (now through the seam, #5318): ${JSON.stringify(advances)}`,
       );
 
       const s = JSON.parse(readFileSync(tmp.state, "utf-8"));

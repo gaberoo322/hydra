@@ -401,3 +401,42 @@ describe("reap.py — hydra-qa completion is cycle-recorded (issue #4730)", () =
     }
   });
 });
+
+describe("reap.py — hydra-target-qa completion is cycle-recorded (issue #5474)", () => {
+  test("a reaped qa_target dispatch posts a cycle record with anchor type qa-review", async () => {
+    const tmp = makeTmp();
+    const cap = await startCaptureServer();
+    try {
+      const taskId = "aQa5474deadbeef0";
+      const branch = "worktree-agent-5474aaaa-t2-qa_target";
+      writeState(tmp.state, {
+        slots: {
+          qa_target: {
+            skill: "hydra-target-qa",
+            started_epoch: Math.floor(Date.now() / 1000) - 120,
+            task_id: taskId,
+            anchor: "issue-5474",
+            branch,
+          },
+        },
+      });
+
+      const r = await runCompletion(["qa_target", taskId, "90000", "hydra-target-qa"], tmp, cap.origin, {
+        HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",
+        GH_TOKEN: "invalid-test-token",
+      });
+      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
+      const body = await Promise.race([
+        cap.bodyPromise,
+        new Promise<null>((res) => setTimeout(() => res(null), 1000)),
+      ]);
+      assert.ok(body, "a hydra-target-qa completion must fire a cycle-record POST");
+      assert.equal(body!.anchorType, "qa-review");
+      assert.equal(body!.anchorReference, "issue-5474");
+      assert.equal(body!.tokens, 90000);
+    } finally {
+      cap.close();
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+});

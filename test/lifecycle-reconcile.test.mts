@@ -355,14 +355,14 @@ describe("qa-passed exits (INV-3, INV-4, INV-13)", () => {
     assert.equal(w.edits.length, 0);
   });
 
-  test("INV-13: only the three qa-passed rows flip to the qa-exit gate; the other reconcile rows stay unimplemented", () => {
+  test("INV-13: only the three qa-passed rows flip to the qa-exit gate; the three caller reconcile rows carry real gates; only needs-dev-resume -> ready-for-agent stays unimplemented", () => {
     for (const to of ["needs-dev-resume", "needs-qa", "ready-for-agent"] as const) {
       assert.equal(findTransition("qa-passed", to)?.gate, "qa-exit", to);
     }
     assert.equal(findTransition("qa-passed", "closed")?.gate, "close");
-    assert.equal(findTransition("blocked", "ready-for-agent")?.gate, "not-yet-implemented");
-    assert.equal(findTransition("in-progress", "needs-dev-resume")?.gate, "not-yet-implemented");
-    assert.equal(findTransition("in-progress", "ready-for-agent")?.gate, "not-yet-implemented");
+    assert.equal(findTransition("blocked", "ready-for-agent")?.gate, "unblocked");
+    assert.equal(findTransition("in-progress", "needs-dev-resume")?.gate, "claim-released");
+    assert.equal(findTransition("in-progress", "ready-for-agent")?.gate, "claim-released");
     assert.equal(findTransition("needs-dev-resume", "ready-for-agent")?.gate, "not-yet-implemented");
   });
 });

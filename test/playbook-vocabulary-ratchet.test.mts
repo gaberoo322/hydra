@@ -103,6 +103,12 @@ describe("playbook-vocabulary-ratchet: the Historical: exemption", () => {
   test("the exemption covers only its own line", () => {
     assert.deepEqual(hits("Historical: formerly a cron job.\nIt currently runs hourly."), ["2 status currently"]);
   });
+
+  test("the continuation line of a hard-wrapped Historical: note is counted (QA round 1)", () => {
+    const wrapped = "> Historical: this was formerly a cron job that\n> used to run hourly.";
+    assert.deepEqual(hits(wrapped), ["2 status used to"]);
+    assert.deepEqual(hits("> Historical: this was formerly a cron job that used to run hourly."), []);
+  });
 });
 
 describe("playbook-vocabulary-ratchet: the Avoid list comes from CONTEXT.md", () => {

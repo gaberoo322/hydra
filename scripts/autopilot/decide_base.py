@@ -60,39 +60,13 @@ def _normalize_target_risk_surface(raw) -> dict:
     return {"ok": True, "surface": surface}
 
 
-# qa_orch per-issue stall cap (issue #3829, design-concept issue-3829,
-# artifact d11fbcf45ed0...). This is a decide.py POLICY CONSTANT, not a
-# classes.json field (design-concept invariant 2) — mirrors how
-# ESCALATION_POLICY / ESCALATION_DEFAULT_MAX_ATTEMPTS already keep cap values
-# out of classes.json, which stays the alphabet only (its own doc-field
-# contract: "POLICY stays in decide.py").
-#
-# qa_orch has `cooldownSeconds: null` and is deliberately ABSENT from
-# ESCALATION_POLICY (invariant 3, pinned by
-# test/decide-cascade-escalation.test.mts's invariant 5) — this stall cap is a
-# STRUCTURALLY SEPARATE mechanism (a cross-turn, per-issue counter) from the
-# single-dispatch model-tier escalation cascade and must never be conflated
-# with it: ESCALATION_POLICY governs a one-time stronger-tier retry
-# immediately after a subagent STOP within one cascade, keyed on that
-# dispatch's own `attempt` field — it has no concept of "this GitHub issue has
-# been reviewed N times across many separate autopilot turns", and the
-# motivating failure (a lost-reviewer race, docs/operator-playbooks/
-# hydra-qa.md step 7.5) may not even set a `subagent_failure` stop status,
-# since hydra-qa completes cleanly and just declines to emit a verdict.
-# Without this SEPARATE, persistent per-issue counter, an issue that
-# repeatably cannot reach a QA verdict (the motivating case: the hourly
-# worktree-orphan-prune reaping the parent + reviewer worktrees mid-review)
-# keeps `needs_qa_orch` true forever and qa_orch re-dispatches every turn at
-# 30-65k tokens/turn (issue #3829 mechanism section).
-#
-# 3 bounds worst-case spend for one stuck issue to roughly 3 x 30-65k =~
-# 90-195k tokens (versus unbounded today) while still tolerating one truly
-# transient failure (#3789 is intended to make the motivating race rarer) that
-# self-heals on a plain retry — the upper end of the issue's own suggested 2-3
-# range, since unlike the escalation cascade a capped qa_orch retry has no
-# stronger model to try, so slightly more slack before giving up is
-# reasonable.
-QA_STALL_MAX_ATTEMPTS = 3
+# The qa_orch per-issue stall cap (#3829) and the red-CI forward-fix cap (#5058)
+# are NOT decide.py policy constants any more (issue #5318, ADR-0047 D6): both
+# are Live Caps in the lifecycle seam (`qa-stall`, `red-ci-forward-fix`), counted
+# from the claim journal and parked by the seam, so no per-run counter lives in
+# state.json. qa_orch still has `cooldownSeconds: null` and stays ABSENT from
+# ESCALATION_POLICY (the single-dispatch model-tier cascade is a different
+# mechanism, pinned by test/decide-cascade-escalation.test.mts's invariant 5).
 
 
 # ---------------------------------------------------------------------------
@@ -732,17 +706,6 @@ def signal_dark_past_floor(
     return (now - last_i) >= floor_sec
 
 
-# Cap on pinned RED-CI forward-fix dispatches per PR (issue #5058, ex-#4460
-# INV-6/8, now provenance-agnostic): a PR the unified resume pick names ONLY
-# because a required check is red (its closing issue is NOT `needs-dev-resume`
-# — the Turn Snapshot's `orch_prs_red_resume` set) gets at most two
-# autopilot-funded attempts before the operator owns it via `surface-pr`. The
-# `needs-dev-resume` arm stays uncapped (#4518: the label is its idempotency
-# key). In-run state (`state.red_forward_fix_attempts`), NOT persisted to the
-# board — a new run re-arms the cap exactly like every other in-run tracker.
-RED_FORWARD_FIX_CAP = 2
-
-
 def _dev_resume_pick_signal(
     state: dict, events: list[dict]
 ) -> tuple[int, int, str] | None:
@@ -820,7 +783,7 @@ def _dirty_fix_fail_pr(state: dict, events: list[dict]) -> int | None:
 
 def _red_resume_prs(state: dict, events: list[dict]) -> set[int]:
     """The `orch_prs_red_resume` set (issue #5058): resume-pick candidates that
-    qualified ONLY through the red-CI arm — the scope of RED_FORWARD_FIX_CAP.
+    qualified ONLY through the red-CI arm (different dispatch reason than the label arm).
     Absent / malformed -> empty (fail toward the uncapped label arm, never a
     phantom exhausted cap). Pure."""
     return set(ts.pr_numbers(state, events, "orch_prs_red_resume"))
@@ -861,26 +824,6 @@ def _issue_pr_branch_signal(
     string a signal EVENT carries).
     """
     return ts.pin(state, events, name)
-
-
-def _red_forward_fix_attempt_count(state: dict, pr_number: int) -> int:
-    """Red-CI forward-fix attempts already spent on one PR (issue #5058).
-
-    `state.red_forward_fix_attempts` maps the PR number (string key — JSON
-    round-trips collapse int keys) to the count of pinned red-arm dispatches
-    the dev_orch selector has already burned on it. Missing map, missing key,
-    or a non-int value → 0 (a malformed tracker must never strand a PR by
-    masquerading as an exhausted cap).
-
-    Pure: reads the passed-in dict only.
-    """
-    tracker = state.get("red_forward_fix_attempts")
-    if not isinstance(tracker, dict):
-        return 0
-    try:
-        return int(tracker.get(str(pr_number), 0))
-    except (TypeError, ValueError):
-        return 0
 
 
 def _orch_anchor_signal(state: dict | None, key: str) -> str | None:

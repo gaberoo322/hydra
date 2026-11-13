@@ -258,10 +258,29 @@ describe("lifecycle-seam-check: evasion forms (#5367)", () => {
     assert.deepEqual(ts('run("gh", [\r\n  "issue",\r\n  "create",\r\n  "-l", "needs-triage",\r\n]);'), [4]);
     assert.deepEqual(md("gh issue create --title t --body-file - <<'EOF'\nbody line\nEOF\n  -l needs-triage"), [4]);
     assert.deepEqual(md("gh issue create --title t \\\r\n  -l needs-triage"), [1]);
+    // a heredoc after a command boundary does not extend the earlier command's reach (INV-3)
+    assert.deepEqual(md("gh pr edit 5; cat <<EOF\nbody\nEOF\nx --add-label needs-qa"), [4]);
+    assert.deepEqual(md("gh issue create --title t; cat <<EOF\nbody\nEOF\nx -l needs-triage"), []);
     // sibling shapes keep their verdict: a later command on a new line or after a boundary is not create context
     assert.deepEqual(md("gh issue create --title t\nwc -l $f"), []);
     assert.deepEqual(md("gh issue create --title t; wc -l $f"), []);
     assert.deepEqual(md("gh issue create --title t && ls -l $f"), []);
+  });
+
+  test("gh pr: a heredoc exempts only its own command; a quoted << is not a heredoc (INV-3, #5428)", () => {
+    // flag on a later command after the heredoc terminator is NOT in the gh pr command
+    assert.deepEqual(md("gh pr edit 5 --body-file - <<EOF\nbody\nEOF\nx --add-label needs-qa"), [4]);
+    // a quoted `<<` (and a `<<<` here-string) is not a heredoc marker
+    assert.deepEqual(md('gh pr edit 5 --body "a<<b"; x --add-label needs-qa'), [1]);
+    assert.deepEqual(md("gh pr edit 5 --body-file - <<< x; y --add-label needs-qa"), [1]);
+    // boundary on the marker line itself ends the command
+    assert.deepEqual(md("gh pr edit 5 <<EOF; x --add-label needs-qa\nbody\nEOF"), [1]);
+    // sibling shapes keep their exemption: flag inside the heredoc body, and a plain gh pr flag
+    assert.deepEqual(md("gh pr edit 5 --body-file - <<EOF\n--add-label needs-qa\nEOF"), []);
+    assert.deepEqual(md("gh pr edit 5 --add-label needs-qa"), []);
+    // create side: a quoted << is not a heredoc, so the later `-l` is outside the create command
+    assert.deepEqual(md('gh issue create --title "a<<b"; x -l needs-triage'), []);
+    assert.deepEqual(md("gh issue create --title t -l needs-triage"), [1]);
   });
 
   test("short -l: a `;` / `&&` / `|` inside a quoted title or body is not a command boundary", () => {
@@ -401,6 +420,82 @@ describe("lifecycle-seam-check: evasion forms (#5367)", () => {
 
   test("documented non-count: .github/workflows is not a scan surface", () => {
     assert.equal(isSurface(".github/workflows/x.yml"), false);
+  });
+});
+
+describe("lifecycle-seam-check: PR-context carve-out (#5428)", () => {
+  const md = (text: string) => scanFileSites("docs/operator-playbooks/hydra-x.md", text);
+  const ts = (text: string) => scanFileSites("src/x.ts", text);
+
+  test("gh pr edit --add-label of a state is not a site", () => {
+    assert.deepEqual(md("gh pr edit 5 --add-label ready-for-human"), []);
+    assert.deepEqual(md('gh pr edit "${PR_NUMBER}" --repo o/r --add-label ready-for-human'), []);
+  });
+
+  test("gh pr create --label and -l are not sites", () => {
+    assert.deepEqual(md("gh pr create --label needs-qa --title t"), []);
+    assert.deepEqual(md("gh pr create -l needs-qa --title t"), []);
+  });
+
+  test("PR context is command-bounded: a following gh issue write is still a site", () => {
+    assert.deepEqual(md("gh pr edit 5 --add-label x && gh issue edit 5 --add-label needs-qa"), [1]);
+  });
+
+  test("argv form gh pr edit is not a site", () => {
+    assert.deepEqual(ts('run("gh", ["pr", "edit", "--add-label", "ready-for-human"]);'), []);
+  });
+
+  test("gh api on a PR-identifier label path is not a site", () => {
+    assert.deepEqual(md('gh api -X DELETE "repos/o/r/issues/$PR/labels/$L"'), []);
+    assert.deepEqual(md("gh api -X DELETE repos/o/r/issues/${PR_NUMBER}/labels/ready-for-human"), []);
+  });
+
+  test("gh api on an issue identifier or literal number stays a site", () => {
+    assert.deepEqual(md('gh api -X DELETE "repos/o/r/issues/$ISSUE/labels/$L"'), [1]);
+    assert.deepEqual(md("gh api -X DELETE repos/o/r/issues/42/labels/needs-qa"), [1]);
+  });
+
+  test("PR-path allowlist is exact: PR-prefixed issue identifiers stay sites", () => {
+    assert.deepEqual(md('gh api -X DELETE "repos/o/r/issues/$PRD_ISSUE/labels/needs-qa"'), [1]);
+    assert.deepEqual(md("gh api -X DELETE repos/o/r/issues/${PRIORITY_ISSUE}/labels/needs-qa"), [1]);
+    assert.deepEqual(md("gh api -X DELETE repos/o/r/issues/$PROJECT_NUMBER/labels/needs-qa"), [1]);
+    assert.deepEqual(md("gh api -X DELETE repos/o/r/issues/${PR_NUM}/labels/ready-for-human"), []);
+  });
+
+  test("a gh pr nested in a gh issue command does not exempt the issue write", () => {
+    assert.deepEqual(md('gh issue edit "$(gh pr view 5 --json number -q .number)" --add-label needs-qa'), [1]);
+    assert.deepEqual(md("gh pr edit 5 --add-label ready-for-human"), []);
+  });
+
+  test("gh global flags (-R/--repo) before the subcommand do not hide the issue command", () => {
+    assert.deepEqual(md("gh -R o/r issue edit $(gh pr view 5 -q .number) --add-label needs-qa"), [1]);
+    assert.deepEqual(md("gh --repo o/r issue edit $(gh pr view 5 -q .number) --add-label needs-qa"), [1]);
+    // sibling: a -R prefixed gh pr command keeps its PR-flag exemption
+    assert.deepEqual(md("gh -R o/r pr edit 5 --add-label ready-for-human"), []);
+  });
+
+  test("a >2000-char body gh issue with a nested gh pr still counts (no fixed lookback)", () => {
+    const body = "x".repeat(3000);
+    assert.deepEqual(md(`gh issue edit 5 --body "${body} $(gh pr view 5 -q .number)" --add-label needs-qa`), [1]);
+    // sibling: a >2000-char gh pr command keeps its PR-flag exemption
+    assert.deepEqual(md(`gh pr edit 5 --body "${body}" --add-label ready-for-human`), []);
+  });
+
+  test("chained gh api calls are judged per invocation", () => {
+    assert.deepEqual(
+      md('gh api -X DELETE repos/o/r/issues/$PR/labels/x && gh api -X DELETE repos/o/r/issues/$ISSUE/labels/needs-qa'),
+      [1],
+    );
+    assert.deepEqual(md("gh api -X DELETE repos/o/r/issues/$PR/labels/x && gh api -X DELETE repos/o/r/issues/${PR_NUMBER}/labels/y"), []);
+  });
+
+  test("documented non-count: PR aliased from an issue number", () => {
+    assert.deepEqual(md("PR=$ISSUE; gh api -X DELETE repos/o/r/issues/$PR/labels/needs-qa"), []);
+  });
+
+  test("hydra-review and hydra-pr-rebase remain scan surfaces", () => {
+    assert.deepEqual(scanFileSites("docs/operator-playbooks/hydra-review.md", "gh issue edit 5 --add-label needs-qa"), [1]);
+    assert.deepEqual(scanFileSites("docs/operator-playbooks/hydra-pr-rebase.md", "gh issue edit 5 --add-label needs-qa"), [1]);
   });
 });
 

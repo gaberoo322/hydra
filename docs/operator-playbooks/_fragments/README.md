@@ -63,7 +63,9 @@ cites, hardcoded Target names, and the retired terms `CONTEXT.md` lists under
 `_Avoid_`. A count above its baseline fails and names the file, line and phrase;
 rewrite the sentence, never raise the baseline. A count below its baseline fails
 too, until `npx tsx scripts/ci/playbook-vocabulary-ratchet.ts --write-baseline`
-lowers it. A provenance note that starts its line with `Historical:` is exempt.
+lowers it. A provenance note that starts its line with `Historical:` is exempt on
+that line only: write the note on one line, because the continuation lines of a
+hard-wrapped note are counted.
 
 ## Reference check (issue #5499)
 

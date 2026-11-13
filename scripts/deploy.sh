@@ -133,6 +133,18 @@ install -D -m 0644 scripts/systemd/hydra-test-proc-reaper.timer "$HOME/.config/s
 systemctl --user daemon-reload
 systemctl --user enable --now hydra-test-proc-reaper.timer
 
+echo "==> Installing stale temp-dir reaper timer (2026-10-31 /tmp inode exhaustion)..."
+# Leaked test temp dirs filled the shared /tmp tmpfs's inode cap and failed
+# every process that writes a temp file, with nothing alarming. The OS's own
+# systemd-tmpfiles-clean only ages /tmp out at 10 days, longer than the cap
+# lasts at the observed leak rates. Deploy-installed and enabled for the same
+# reason as the test-proc-reaper above: a hand-installed timer is one stop
+# away from silently off forever.
+install -D -m 0644 scripts/systemd/hydra-tmp-reaper.service "$HOME/.config/systemd/user/hydra-tmp-reaper.service"
+install -D -m 0644 scripts/systemd/hydra-tmp-reaper.timer "$HOME/.config/systemd/user/hydra-tmp-reaper.timer"
+systemctl --user daemon-reload
+systemctl --user enable --now hydra-tmp-reaper.timer
+
 echo "==> Installing GLM dev-drainer timer (ADR-0032, issue #3689)..."
 # The GLM dev-drainer (scripts/glm/drainer-loop.sh) drains dev_orch-shaped
 # authoring work onto the operator's independent z.ai quota instead of

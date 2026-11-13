@@ -293,7 +293,7 @@ heredoc so the `<<'EOF'` injection-safety quoting is preserved:
 
 ```bash
 . ~/hydra/scripts/hydra/footer.sh
-gh issue create --repo gaberoo322/hydra --title "..." --label "needs-triage" --body "$(cat <<'EOF'
+gh issue create --repo gaberoo322/hydra --title "..." --body "$(cat <<'EOF'
 ## Summary
 <1-2 sentences>
 
@@ -318,6 +318,8 @@ EOF
 )
 $(hydra_issue_footer hydra-research)"
 ```
+
+**State label (HARD):** `gh issue create` carries FLAG labels only, never a state. Immediately after it returns the issue URL, write the first state through the lifecycle seam: `npx tsx scripts/lifecycle.ts advance <N> needs-triage --actor hydra-research` (from none, gate-free). If it returns `illegal-transition` with observed state `needs-triage` (the reconcile zero-state backstop raced it), carry on. A non-zero exit is otherwise final — never fall back to a direct label write (ADR-0047 D3/D4).
 
 Issues MUST have acceptance criteria — `/hydra-dev` requires them.
 

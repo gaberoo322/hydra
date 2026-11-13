@@ -20,7 +20,9 @@
  *               list is parsed from CONTEXT.md at run time, never restated here
  *
  * A line that starts with `Historical:` (the existing playbook provenance
- * convention, HISTORICAL_EXEMPT_RE) is exempt from every shape.
+ * convention, HISTORICAL_EXEMPT_RE) is exempt from every shape. The exemption
+ * covers that physical line only: the continuation lines of a hard-wrapped note
+ * are counted, so a provenance note is written on one line.
  *
  * The baseline (scripts/ci/playbook-vocabulary-baseline.json) holds one count
  * per file per shape. A count above its baseline fails; a count below it fails
@@ -227,7 +229,7 @@ export function formatReport(cmp: Comparison): string {
     }
     out.push(
       `Fix: rewrite the sentence so it states current behaviour and points at the fact's home (${STANDARD_REL}, STD-PLAYBOOK-*). ` +
-        "A provenance note may start its line with `Historical:`. Do not raise the baseline.",
+        "A provenance note kept on one line may start it with `Historical:`; a wrapped continuation line is counted. Do not raise the baseline.",
     );
   }
   if (cmp.stale.length > 0) {

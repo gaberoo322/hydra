@@ -31,17 +31,13 @@ above, because each is actively wrong for an AFK dispatch:
 - **Base step 5, "Publish…"** — upstream publishes prose bodies itself and says
   to apply `ready-for-agent` to every ticket. Both are wrong here (below).
 
-## Why the publish step must be superseded, not layered on
+## Child labelling rule: follow the renderer, not upstream
 
-**Hydra's autopilot is dependency-blind.** Anchor selection does not read
-blocking edges, so a `ready-for-agent` label on a *blocked* slice makes autopilot
-grab work whose prerequisites are unmet. Upstream's "apply `ready-for-agent`
-unless instructed otherwise" is therefore a defect in this context.
-
-**Label only the slices that are actually unblocked** — in practice slice 1. Every
-slice with a `dependsOn` edge is filed WITHOUT `ready-for-agent`; the operator (or
-a future epic-driver) promotes each as its blocker merges. This is the label-gated
-cadence epic #3988 itself uses.
+**Child labelling rule.** Upstream's "apply `ready-for-agent` to every ticket" is
+right for the Orchestrator board (orch children are born `ready-for-agent`), but
+Target children with dependencies are filed `blocked`. The authoritative rule is
+`childInitialState(slice, scope)` in `scripts/ci/hydra-prd-render.ts`: follow the
+renderer rather than applying upstream's blanket label.
 
 ## Publish through the renderer
 
@@ -63,8 +59,16 @@ deterministic and unit-tested (`test/hydra-prd-template.test.mts`).
    `renderChildBody()`, resolving `dependsOn` indices to the real issue numbers;
    then re-render the parent with the real numbers and update it. The two passes
    are what keep cross-references resolvable without a back-edit per child.
-4. **Labels** — `parentLabels()` for the epic, `childLabels(slice)` for each
-   child, plus `ready-for-agent` on unblocked slices ONLY (above).
+4. **Labels and first state** — `gh issue create` carries FLAG labels only:
+   `parentLabels()` for the epic, `childLabels(slice)` for each child. The first
+   lifecycle state is data (`parentInitialState()` / `childInitialState(slice)`)
+   written in the same step through the seam — `npx tsx scripts/lifecycle.ts
+   advance <N> needs-triage --actor hydra-tickets` (from none, gate-free;
+   tolerate `illegal-transition` with observed state `needs-triage`), then for every
+   child, `advance <N> <childInitialState(slice, scope)> --reason scoped --rationale
+   "<epic title> slice <i>" --actor hydra-tickets` (`ready-for-agent` for orch
+   scope; see the child labelling rule above). A non-zero exit is otherwise
+   final; never a direct state-label write (ADR-0047 D3/D4).
 5. **Stamp the tier** — `Expected tier: N` per child from `GET /api/tier`, the
    single tier authority. Never self-classify by path.
 
@@ -91,12 +95,15 @@ on the **Target board** (issue #5168), and four things change:
    ladder is Orchestrator-only, and the Target derives its depth from the risk
    surface instead. `orch` scope keeps the default scope argument.
 3. **Publish on `$TARGET_GH_REPO`.** Every `gh issue create` / `gh issue edit`
-   carries `--repo "$TARGET_GH_REPO"`. The parent takes `enhancement` only, not
-   `parentLabels()`. On the Target board `needs-triage` is
+   carries `--repo "$TARGET_GH_REPO"` (the Target board is outside the
+   Orchestrator lifecycle seam, so the lifecycle CLI steps above are skipped and
+   the deny hook allows a non-Orchestrator `--repo`). The parent takes
+   `enhancement` only and no state. On the Target board `needs-triage` is
    `hydra-target-sweep`'s promote lane, so a triage label would queue the epic
    itself for a build.
-4. **Lane labels.** Apply `childLabels(slice, scope)` as returned: in Target
-   scope it already gives a slice with a `dependsOn` edge **`blocked`** instead
+4. **Lane labels (Target-only exception to INV-3).** On the Orchestrator board `gh issue create` carries FLAG labels only and the lane advance goes through the seam; the Target board is outside the seam (ADR-0047), so here — and only here — the lane label is a creation-time `--label`, which the deny hook permits solely because of `--repo "$TARGET_GH_REPO"`. Create each child with `childLabels(slice, scope)` (flags)
+   plus the lane `childInitialState(slice, scope)` as a `--label`: in Target
+   scope a slice with a `dependsOn` edge gets **`blocked`** instead
    of `ready-for-agent` (never bare). Its rendered
    `- Blocked by #N` lines are what `hydra-target-sweep` Step 3 reads to
    promote it to `ready-for-agent` once the blocker closes. The Target build

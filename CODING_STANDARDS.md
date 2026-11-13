@@ -24,9 +24,9 @@ enforced-by: scripts/ci/schema-seam-check.ts
 
 ### STD-VERIFY-NEVER-THROW
 
-Merge, grounding and verification code never throws. It returns result objects so callers decide how to report failure.
+Merge, grounding and verification code never throws. It returns result objects so callers decide how to report failure. A function whose own doc claims never-throw / returns a result object is the mechanically checked scope; the reviewer still owns which modules should make that claim.
 
-enforced-by: reviewer
+enforced-by: scripts/ci/never-throw-scan.ts, reviewer
 
 ### STD-GROUNDING-READONLY
 
@@ -128,7 +128,7 @@ enforced-by: reviewer
 
 ## Playbooks
 
-Authoring standard for `docs/operator-playbooks/` and its fragments, the source of every generated skill. The mechanical part is counted per file by a shrink-only baseline; a line starting `Historical:` is exempt.
+Authoring standard for `docs/operator-playbooks/` and its fragments, the source of every generated skill. The mechanical part is counted per file by a shrink-only baseline; a line starting `Historical:` is exempt (that line only, so keep the note on one line).
 
 ### STD-PLAYBOOK-POINT-DONT-RESTATE
 

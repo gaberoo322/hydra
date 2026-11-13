@@ -19,7 +19,6 @@
       "avoid-term": 1
     },
     "docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md": {
-      "status": 1,
       "target": 2
     },
     "docs/operator-playbooks/_fragments/hydra-qa-reference.md": {
@@ -75,7 +74,6 @@
       "status": 1
     },
     "docs/operator-playbooks/hydra-grill.md": {
-      "status": 1,
       "target": 7
     },
     "docs/operator-playbooks/hydra-incident.md": {
@@ -86,9 +84,8 @@
       "avoid-term": 1
     },
     "docs/operator-playbooks/hydra-qa.md": {
-      "status": 6,
-      "line-cite": 1,
-      "avoid-term": 1
+      "status": 5,
+      "line-cite": 1
     },
     "docs/operator-playbooks/hydra-research.md": {
       "status": 2,
@@ -109,16 +106,12 @@
     "docs/operator-playbooks/hydra-target-build.md": {
       "status": 3
     },
-    "docs/operator-playbooks/hydra-tickets.md": {
-      "avoid-term": 1
-    },
     "docs/operator-playbooks/hydra-tool-scout.md": {
       "status": 3,
       "avoid-term": 2
     },
     "docs/operator-playbooks/hydra-wayfinder.md": {
-      "status": 4,
-      "target": 1
+      "status": 4
     },
     "docs/operator-playbooks/hydra-wire-or-retire.md": {
       "status": 2

@@ -48,7 +48,6 @@ import {
 import {
   CLASSES_WITHOUT_CYCLE_RECORD,
   CLASSES_WITH_CYCLE_RECORD,
-  CYCLE_RECORD_SKILLS,
   DISPATCH_CLASSES,
   PIPELINE_SLOT_NAMES,
   PROVENANCE_LABELS,
@@ -72,6 +71,7 @@ const DECIDE_PY = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
 const TURN_SNAPSHOT_PY = join(REPO_ROOT, "scripts", "autopilot", "turn_snapshot.py");
 const RUN_LEDGER_PY = join(REPO_ROOT, "scripts", "autopilot", "run_ledger.py");
 const TAXONOMY_PY = join(REPO_ROOT, "scripts", "autopilot", "taxonomy.py");
+const ADMISSION_PY = join(REPO_ROOT, "scripts", "autopilot", "admission.py");
 const REAP_PY = join(REPO_ROOT, "scripts", "autopilot", "reap.py");
 
 // The exact alphabet decide.py embedded before slice #1670 — order matters
@@ -520,6 +520,8 @@ function copyBrainInto(dir: string) {
   copyFileSync(RUN_LEDGER_PY, join(dir, "run_ledger.py"));
   // The one classes.json loader (#5472) — decide.py, run_ledger.py import it.
   copyFileSync(TAXONOMY_PY, join(dir, "taxonomy.py"));
+  // The pure dispatch-admission verdict (#5478) — decide.py imports it.
+  copyFileSync(ADMISSION_PY, join(dir, "admission.py"));
 }
 
 /** Import decide.py from `dir` (a tempdir copy) and return the spawn result. */
@@ -1114,69 +1116,50 @@ describe("taxonomy: parseDispatchCycleId (cycleId → attribution triple, #2942)
 // 7. Cycle-record coverage mirror (issue #4392)
 // ---------------------------------------------------------------------------
 
-/**
- * Parse `CYCLE_RECORD_SKILLS = {"…", "…"}` out of reap.py — the policy set that
- * gates which completions fire a cycle-record (and thus which classes can EVER
- * appear in a cycle-derived ledger: metrics trend rows, `anchorDistribution`,
- * dispatch-outcome records). The TS mirror in src/taxonomy/classes.ts exists so
- * read surfaces can label that blind spot (`coverage.classesNotRecorded`); this
- * pin makes the two definitions structurally impossible to drift apart — the
- * same cross-file parity discipline as the decide.py tuple tests above.
- */
-function reapCycleRecordSkills(): Set<string> {
-  const text = readFileSync(REAP_PY, "utf-8");
-  const m = text.match(/CYCLE_RECORD_SKILLS\s*=\s*\{([^}]*)\}/);
-  assert.ok(m, "reap.py must define CYCLE_RECORD_SKILLS as a set literal");
-  const members = Array.from(m[1].matchAll(/"([^"]+)"/g), (x) => x[1]);
-  assert.ok(members.length > 0, "CYCLE_RECORD_SKILLS literal has no members");
-  return new Set(members);
-}
+describe("taxonomy: cycle-record coverage from the cycleRecord column (issues #4392, #5473)", () => {
+  // #5473: the obligations are per-SKILL facts in classes.json; the hand-kept
+  // TS mirror and its reap.py parity test are gone.
+  test("the three obligation columns reproduce the pre-#5473 sets exactly", () => {
+    const pick = (col: "cycleRecord" | "worktreeGc" | "reflectionDeposit") =>
+      [...new Set(DISPATCH_CLASSES.filter((r) => r[col]).map((r) => r.skill))].sort();
+    assert.deepEqual(pick("cycleRecord"), ["hydra-dev", "hydra-grill", "hydra-qa", "hydra-target-build", "hydra-target-qa"]);
+    assert.deepEqual(pick("worktreeGc"), ["hydra-dev", "hydra-qa", "hydra-target-build", "hydra-target-qa"]);
+    assert.deepEqual(pick("reflectionDeposit"), ["hydra-dev", "hydra-target-build"]);
+  });
 
-describe("taxonomy: cycle-record coverage mirror (issue #4392)", () => {
-  test("TS CYCLE_RECORD_SKILLS equals reap.py's set literal (drift pin)", () => {
-    const fromReap = reapCycleRecordSkills();
-    assert.deepEqual(
-      [...CYCLE_RECORD_SKILLS].sort(),
-      [...fromReap].sort(),
-      "the TS mirror in src/taxonomy/classes.ts and reap.py's CYCLE_RECORD_SKILLS " +
-        "have drifted — edit both together (the mirror labels the cycle-ledger " +
-        "blind spot on /api/metrics + crossRunTrend)",
-    );
+  test("qa_target (hydra-target-qa) is cycle-recorded and swept, no reflection deposit (#5474)", () => {
+    const row = DISPATCH_CLASSES.find((r) => r.name === "qa_target");
+    assert.ok(row);
+    assert.deepEqual([row.cycleRecord, row.worktreeGc, row.reflectionDeposit], [true, true, false]);
   });
 
   // Issue #4730: hydra-qa is cycle-recorded (so qa_orch lands in the
-  // dispatch-outcome ledger and the class scoreboard) but it must NOT join
-  // reap.py's REFLECTION_DEPOSIT_SKILLS — hydra-qa never runs the planning-time
-  // reflection-source deposit recipe, so listing it would emit a false
+  // dispatch-outcome ledger and the class scoreboard) but runs no
+  // planning-time reflection-source deposit, so listing it would emit a false
   // refl_deposit_broken WARN on QA completions.
   test("hydra-qa is cycle-recorded but NOT a reflection-deposit skill (issue #4730)", () => {
-    assert.ok(CYCLE_RECORD_SKILLS.has("hydra-qa"), "hydra-qa must be in CYCLE_RECORD_SKILLS");
+    const qa = DISPATCH_CLASSES.find((r) => r.name === "qa_orch");
+    assert.ok(qa);
+    assert.equal(qa.cycleRecord, true);
+    assert.equal(qa.reflectionDeposit, false);
     assert.ok(CLASSES_WITH_CYCLE_RECORD.includes("qa_orch"), "qa_orch must be a recorded class");
-    const text = readFileSync(REAP_PY, "utf-8");
-    const m = text.match(/REFLECTION_DEPOSIT_SKILLS[^=]*=\s*frozenset\(\{([^}]*)\}\)/);
-    assert.ok(m, "reap.py must define REFLECTION_DEPOSIT_SKILLS as a frozenset literal");
-    const members = Array.from(m[1].matchAll(/"([^"]+)"/g), (x) => x[1]);
-    assert.ok(members.length > 0, "REFLECTION_DEPOSIT_SKILLS literal has no members");
-    assert.equal(
-      members.includes("hydra-qa"),
-      false,
-      "hydra-qa must not be in REFLECTION_DEPOSIT_SKILLS (it runs no reflection deposit)",
-    );
   });
 
-  test("every CYCLE_RECORD_SKILLS member is a taxonomy skill", () => {
-    for (const skill of CYCLE_RECORD_SKILLS) {
-      assert.ok(
-        classBySkill(skill),
-        `CYCLE_RECORD_SKILLS member "${skill}" has no taxonomy row — a skill ` +
-          "outside the taxonomy can never be a class's dispatch skill",
-      );
+  test("parseClassTaxonomy rejects a row missing an obligation column or carrying a non-boolean", () => {
+    const rows = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "autopilot", "classes.json"), "utf-8"));
+    for (const col of ["cycleRecord", "worktreeGc", "reflectionDeposit"]) {
+      const missing = structuredClone(rows);
+      delete missing.classes[0][col];
+      assert.throws(() => parseClassTaxonomy(JSON.stringify(missing)), new RegExp(`lacks required column.*${col}`));
+      const wrongType = structuredClone(rows);
+      wrongType.classes[0][col] = "yes";
+      assert.throws(() => parseClassTaxonomy(JSON.stringify(wrongType)), new RegExp(`${col} must be a boolean`));
     }
   });
 
   test("CLASSES_WITHOUT_CYCLE_RECORD is the exact complement, in file order", () => {
     const expected = DISPATCH_CLASSES.filter(
-      (r) => !CYCLE_RECORD_SKILLS.has(r.skill),
+      (r) => !r.cycleRecord,
     ).map((r) => r.name);
     assert.deepEqual([...CLASSES_WITHOUT_CYCLE_RECORD], expected);
 
@@ -1198,7 +1181,6 @@ describe("taxonomy: cycle-record coverage mirror (issue #4392)", () => {
       "cleanup_orch",
       "scout_orch",
       "retro_orch",
-      "qa_target",
       "research_orch",
       "tickets_orch",
     ]) {
@@ -1209,16 +1191,19 @@ describe("taxonomy: cycle-record coverage mirror (issue #4392)", () => {
     }
   });
 
+  test("qa_target is in CLASSES_WITH_CYCLE_RECORD, not CLASSES_WITHOUT_CYCLE_RECORD (#5474)", () => {
+    assert.ok(CLASSES_WITH_CYCLE_RECORD.includes("qa_target"));
+    assert.ok(!CLASSES_WITHOUT_CYCLE_RECORD.includes("qa_target"));
+  });
+
   // Design-concept INV-3 (issue #4392): the two lists are a PARTITION of the
   // taxonomy — union == every row name, disjoint — so a class added to
   // classes.json can never land in neither list.
   test("recorded ∪ not-recorded partitions DISPATCH_CLASSES (INV-3)", () => {
     assert.deepEqual(
-      [...CLASSES_WITH_CYCLE_RECORD].sort(),
-      [...[...CYCLE_RECORD_SKILLS]
-        .map((s) => classBySkill(s)?.name)
-        .filter((n): n is string => Boolean(n))].sort(),
-      "recordedClasses is the taxonomy join of CYCLE_RECORD_SKILLS",
+      [...CLASSES_WITH_CYCLE_RECORD],
+      DISPATCH_CLASSES.filter((r) => r.cycleRecord).map((r) => r.name),
+      "recordedClasses is the cycleRecord column, in file order",
     );
     const union = [...CLASSES_WITH_CYCLE_RECORD, ...CLASSES_WITHOUT_CYCLE_RECORD];
     assert.deepEqual(
@@ -1411,5 +1396,129 @@ print(json.dumps([msg(pipes), msg(pipes + ["ghost"]), msg(pipes + [pipes[0]]), m
     assert.match(got[1], /order tuple T: unknown class 'ghost'/);
     assert.match(got[2], new RegExp(`order tuple T: duplicate class '${got[4]}'`));
     assert.match(got[3], new RegExp(`order tuple T: missing pipeline class '${got[4]}'`));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #5473 — completion obligations are taxonomy columns reap.py resolves by skill
+// ---------------------------------------------------------------------------
+
+describe("taxonomy.py: per-skill completion obligations (#5473)", () => {
+  test("every skill in the table plus an unknown skill resolves to the #5474 sets", () => {
+    const got = probeAutopilot(`
+import taxonomy
+rows = taxonomy.load_taxonomy()
+skills = sorted({r["skill"] for r in rows}) + ["hydra-nonexistent"]
+print(json.dumps({s: list(taxonomy.skill_obligations(s, rows)) for s in skills}))
+`);
+    const CR = new Set(["hydra-dev", "hydra-target-build", "hydra-grill", "hydra-qa", "hydra-target-qa"]);
+    const GC = new Set(["hydra-dev", "hydra-target-build", "hydra-qa", "hydra-target-qa"]);
+    const RD = new Set(["hydra-dev", "hydra-target-build"]);
+    assert.ok(Object.keys(got).length > 10);
+    for (const [skill, flags] of Object.entries(got)) {
+      assert.deepEqual(flags, [CR.has(skill), GC.has(skill), RD.has(skill)], skill);
+    }
+    assert.deepEqual(got["hydra-nonexistent"], [false, false, false]);
+  });
+
+  test("skill_obligations loads classes.json once per file state, and reloads when the file changes", () => {
+    const got = probeAutopilot(`
+import os, tempfile, taxonomy
+calls = []
+real = taxonomy.load_taxonomy
+taxonomy.load_taxonomy = lambda p=None: (calls.append(p), real(p))[1]
+taxonomy.skill_obligations("hydra-dev"); taxonomy.skill_obligations("hydra-qa"); taxonomy.skill_obligations("hydra-grill")
+first = len(calls)
+d = json.load(open(taxonomy.taxonomy_path()))
+f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False); json.dump(d, f); f.close()
+os.environ["HYDRA_CLASSES_JSON"] = f.name
+taxonomy.skill_obligations("hydra-dev")
+os.unlink(f.name)
+print(json.dumps([first, len(calls)]))
+`);
+    assert.deepEqual(got, [1, 2]);
+  });
+
+  test("reap.py: a corrupt classes.json logs and owes nothing instead of aborting; a valid one still resolves", () => {
+    const got = probeAutopilot(`
+import os, io, contextlib
+os.environ["HYDRA_CLASSES_JSON"] = "/nonexistent/classes.json"
+import reap
+err = io.StringIO()
+with contextlib.redirect_stderr(err):
+    bad = list(reap._obligations_for("hydra-dev"))
+del os.environ["HYDRA_CLASSES_JSON"]
+good = list(reap._obligations_for("hydra-dev"))
+print(json.dumps([bad, good, "taxonomy-unavailable" in err.getvalue()]))
+`);
+    assert.deepEqual(got, [[false, false, false], [true, true, true], true]);
+  });
+
+  test("reap.py: a non-UTF-8 classes.json (UnicodeDecodeError) also logs and owes nothing instead of aborting a reap", () => {
+    const got = probeAutopilot(`
+import os, io, tempfile, contextlib
+d = tempfile.mkdtemp()
+bad_path = os.path.join(d, "classes.json")
+open(bad_path, "wb").write(b"\\xff\\xfe\\x80not json")
+os.environ["HYDRA_CLASSES_JSON"] = bad_path
+import reap
+err = io.StringIO()
+with contextlib.redirect_stderr(err):
+    bad = list(reap._obligations_for("hydra-dev"))
+print(json.dumps([bad, "taxonomy-unavailable" in err.getvalue()]))
+`);
+    assert.deepEqual(got, [[false, false, false], true]);
+  });
+
+  test("reap.py no longer hand-keeps the three skill sets", () => {
+    const text = readFileSync(REAP_PY, "utf-8");
+    for (const name of ["CYCLE_RECORD_SKILLS", "WORKTREE_GC_SKILLS", "REFLECTION_DEPOSIT_SKILLS"]) {
+      assert.equal(text.includes(`${name} =`), false, `${name} must not be defined in reap.py`);
+      assert.equal(text.includes(`${name}:`), false, `${name} must not be defined in reap.py`);
+    }
+  });
+
+  test("a wayfinder_orch task ticket (skill hydra-dev) still fires the cycle record and worktree sweep", () => {
+    const got = probeAutopilot(`
+import taxonomy
+rows = taxonomy.load_taxonomy()
+wf = next(r for r in rows if r["name"] == "wayfinder_orch")
+routed = wf["skill_by_ticket_type"]["task"]
+o = taxonomy.skill_obligations(routed, rows)
+print(json.dumps([routed, o.cycle_record, o.worktree_gc, o.reflection_deposit]))
+`);
+    assert.deepEqual(got, ["hydra-dev", true, true, true]);
+  });
+
+  test("the loader rejects a row missing a column, a non-boolean, a skill disagreement and a routed skill no row defaults to", () => {
+    const got = probeAutopilot(`
+import copy, json, os, tempfile, taxonomy
+base = json.load(open(taxonomy.taxonomy_path()))
+def load(mut):
+    d = copy.deepcopy(base)
+    mut(d["classes"])
+    f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+    json.dump(d, f); f.close()
+    try:
+        taxonomy.load_taxonomy(f.name)
+        return None
+    except taxonomy.TaxonomyError as e:
+        return str(e)
+    finally:
+        os.unlink(f.name)
+def drop(rs): del rs[0]["cycleRecord"]
+def wrong(rs): rs[0]["worktreeGc"] = "yes"
+def disagree(rs):
+    twin = copy.deepcopy(rs[0]); twin["name"] = "dev_twin"; twin["cycleRecord"] = not twin["cycleRecord"]
+    rs.append(twin)
+def stray(rs):
+    next(r for r in rs if r["name"] == "wayfinder_orch")["skill_by_ticket_type"]["bogus"] = "hydra-ghost"
+print(json.dumps([load(drop), load(wrong), load(disagree), load(stray), load(lambda rs: None)]))
+`);
+    assert.match(got[0], /lacks required column\(s\): cycleRecord/);
+    assert.match(got[1], /worktreeGc must be a boolean/);
+    assert.match(got[2], /share skill 'hydra-dev' but disagree/);
+    assert.match(got[3], /'hydra-ghost' is not any row's default skill/);
+    assert.equal(got[4], null);
   });
 });
