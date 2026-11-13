@@ -1583,16 +1583,19 @@ describe("route: reviewer commit class A (issue #5415, executed-path order pins)
   test("pass 2a appends review-findings rows at the trailer's NEW sha and round; a plain FAIL round keeps its own sha/round (sibling)", async () => {
     const rows: unknown[][] = [];
     const trailer = `QA-Verdict: PASS-pending-CI pr=77 round=2 sha=${NEW12} blockers=0 max_severity=none`;
-    const h = harness({ ghHandler: rcGh(NEW_HEAD), phase: cannedPhase({ ...FAIL_CANNED, reviewerCommit: COMMIT_A, trailer }) });
-    await runRoute({ ...ROUTE_OPTS, reviewerFixed: NEW_HEAD }, readyPre(), h.ports, realDeps(rows));
+    const full = [{ severity: "medium", axis: "standards", location: "docs/guide.md:3", finding: "f", reviewers: ["reviewer-A-standards"] }] as unknown as Canned["blocking"];
+    const h = harness({ ghHandler: rcGh(NEW_HEAD), phase: cannedPhase({ ...FAIL_CANNED, blocking: full, reviewerCommit: COMMIT_A, trailer }) });
+    const r2a = await runRoute({ ...ROUTE_OPTS, reviewerFixed: NEW_HEAD }, readyPre(), h.ports, realDeps(rows));
+    assert.ok(!r2a.degraded.includes("review-findings"));
     assert.equal(rows.length, 1);
-    const appended = rows[0] as Array<{ sha: string; round: number }>;
+    const appended = rows[0] as Array<{ row: { sha: string; round: number } }>;
     assert.ok(appended.length > 0);
-    assert.ok(appended.every((r) => r.sha === NEW12 && r.round === 2), "rows carry the NEW head sha and trailer round");
+    assert.ok(appended.every((r) => r.row.sha === NEW12 && r.row.round === 2), "rows carry the NEW head sha and trailer round");
     const rows1: unknown[][] = [];
     const plain = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "medium" }) });
     await runRoute(ROUTE_OPTS, readyPre(), plain.ports, realDeps(rows1));
-    assert.ok((rows1[0] as Array<{ sha: string }>).every((r) => r.sha === "0123456789ab"));
+    assert.equal(rows1.length, 1);
+    assert.equal(rows1[0]?.length, 0, "a fold with no findings appends an empty row set at its own round");
   });
 
   test("pass 2a: a verified reviewer commit yields PASS-pending-CI at the new head; the trailer input carries headSha and qaFixes; bare PASS is unreachable", async () => {
