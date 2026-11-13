@@ -206,12 +206,14 @@ CYCLE_RECORD_SCRIPT = Path(__file__).parent / "dispatch.sh"
 
 
 def _obligations_for(skill):
-    """Completion obligations of `skill`; a corrupt/missing classes.json must never
-    abort a reap (the old static sets could not fail), so it logs loudly and owes
-    nothing."""
+    """Completion obligations of `skill`. DELIBERATE fail-open carve-out to the
+    taxonomy.py no-fallback rule: reap is the completion path and must never abort
+    (the old static sets could not fail), so an unreadable/corrupt/missing
+    classes.json (TaxonomyError, OSError incl. the stat TOCTOU, UnicodeDecodeError)
+    logs loudly to stderr and owes nothing."""
     try:
         return taxonomy.skill_obligations(skill)
-    except taxonomy.TaxonomyError as exc:
+    except (taxonomy.TaxonomyError, OSError, UnicodeDecodeError) as exc:
         print(f"[autopilot] WARN taxonomy-unavailable skill={skill}: {exc}", file=sys.stderr)
         return taxonomy.SkillObligations(False, False, False)
 

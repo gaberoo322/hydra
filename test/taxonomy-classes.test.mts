@@ -1447,6 +1447,22 @@ print(json.dumps([bad, good, "taxonomy-unavailable" in err.getvalue()]))
     assert.deepEqual(got, [[false, false, false], [true, true, true], true]);
   });
 
+  test("reap.py: a non-UTF-8 classes.json (UnicodeDecodeError) also logs and owes nothing instead of aborting a reap", () => {
+    const got = probeAutopilot(`
+import os, io, tempfile, contextlib
+d = tempfile.mkdtemp()
+bad_path = os.path.join(d, "classes.json")
+open(bad_path, "wb").write(b"\\xff\\xfe\\x80not json")
+os.environ["HYDRA_CLASSES_JSON"] = bad_path
+import reap
+err = io.StringIO()
+with contextlib.redirect_stderr(err):
+    bad = list(reap._obligations_for("hydra-dev"))
+print(json.dumps([bad, "taxonomy-unavailable" in err.getvalue()]))
+`);
+    assert.deepEqual(got, [[false, false, false], true]);
+  });
+
   test("reap.py no longer hand-keeps the three skill sets", () => {
     const text = readFileSync(REAP_PY, "utf-8");
     for (const name of ["CYCLE_RECORD_SKILLS", "WORKTREE_GC_SKILLS", "REFLECTION_DEPOSIT_SKILLS"]) {

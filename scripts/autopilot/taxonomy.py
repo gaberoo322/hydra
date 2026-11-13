@@ -16,7 +16,8 @@ Stdlib only. Imports neither `decide` nor `decide_base` (leaf module): decide
 imports this, never the reverse.
 
 TaxonomyError subclasses RuntimeError (NOT SystemExit) and is NEVER caught
-internally to fall back to embedded tuples.
+internally to fall back to embedded tuples. The one carve-out is reap.py's
+`_obligations_for`, which fails open (logged) so a bad file cannot abort a reap.
 """
 
 from __future__ import annotations
