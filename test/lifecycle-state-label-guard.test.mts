@@ -426,6 +426,24 @@ describe("lifecycle-state-label-guard: -R ordering and documented gaps (PR #5426
   test("gh -R this repo api graphql with no state word stays allowed (sibling pin)", () => {
     assertAllow(`gh -R gaberoo322/hydra api graphql -f query='mutation { addLabelsToLabelable(input:{labelIds:["x"]}) } bug'`);
   });
+  test("REST labels write with --jq graphql flag value is denied (round-8)", () => {
+    assertDeny(`${GH_API} repos/gaberoo322/hydra/issues/1/labels -f 'labels[]=needs-qa' --jq graphql`);
+  });
+  test("REST labels write with --jq graphql and no state word stays allowed (sibling pin)", () => {
+    assertAllow(`${GH_API} repos/gaberoo322/hydra/issues/1/labels -f 'labels[]=bug' --jq graphql`);
+  });
+  test("attached -f body flag naming a state is denied (round-8)", () => {
+    assertDeny(`${GH_API} repos/gaberoo322/hydra/issues/5/labels -f'labels[]=needs-qa'`);
+  });
+  test("attached -f body flag with a non-state label stays allowed (sibling pin)", () => {
+    assertAllow(`${GH_API} repos/gaberoo322/hydra/issues/5/labels -f'labels[]=bug'`);
+  });
+  test("piped body into --input - naming a state is denied (round-8)", () => {
+    assertDeny(`echo '{"labels":["needs-qa"]}' | ${GH_API} repos/gaberoo322/hydra/issues/5/labels --input -`);
+  });
+  test("piped body into --input - with a non-state label stays allowed (sibling pin)", () => {
+    assertAllow(`echo '{"labels":["bug"]}' | ${GH_API} repos/gaberoo322/hydra/issues/5/labels --input -`);
+  });
   test("known gaps are pinned as currently allowed", () => {
     assertAllow(`${GH_EDIT} 5 ${ADD} $'needs-qa'`);
     assertAllow(`${GH_EDIT} 5 ${ADD} $(echo needs-qa)`);

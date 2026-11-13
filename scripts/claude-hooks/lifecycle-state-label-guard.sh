@@ -529,6 +529,8 @@ def _label_fields(args, payload):
             for f in ("--field=", "--raw-field="):
                 if tok.startswith(f):
                     kv = tok[len(f):]
+            if re.match(r"^-[fF].", tok):
+                kv = tok[2:]  # attached form, e.g. -flabels[]=x
         if kv and "=" in kv:
             key, val = kv.split("=", 1)
             if key.lower().startswith("labels"):
@@ -539,13 +541,34 @@ def _label_fields(args, payload):
     return out
 
 
-def _api_label_state(args, npre=0):
+# gh api flags that consume the NEXT token (so it is not the endpoint).
+API_VALUE_FLAGS = ("-X", "--method", "--request", "-H", "--header", "-f", "-F",
+                   "--field", "--raw-field", "-q", "--jq", "-t", "--template",
+                   "--input", "--hostname", "--cache", "-R", "--repo", "-p", "--preview")
+
+
+def _api_endpoint(args):
+    # First positional (non-flag) token of a `gh api` call: the endpoint.
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok in API_VALUE_FLAGS:
+            i += 2
+        elif tok.startswith("-"):
+            i += 1
+        else:
+            return tok
+    return None
+
+
+def _api_label_state(args, extra_payload=()):
     # `gh api`: mutating call that writes labels on an issue: either
     # issues/<n>/labels[/<name>] or a PATCH/POST of issues/<n> carrying labels.
-    # npre: leading global-flag tokens (-R <repo>) prepended by the caller.
+    # extra_payload: the preceding pipeline segment's tokens, a body piped in
+    # through `--input -`.
     # The endpoint may follow any gh api flag (-X POST graphql, -H x graphql),
-    # so match the bare token anywhere rather than at a fixed offset.
-    if "graphql" in args:
+    # but a flag VALUE that merely says graphql (--jq graphql) is not it.
+    if _api_endpoint(args) == "graphql":
         # A label mutation through GraphQL (addLabelsToLabelable /
         # removeLabelsFromLabelable / updateIssue labelIds) carries opaque
         # ids, but deny it when the same command names a lifecycle state.
@@ -581,6 +604,8 @@ def _api_label_state(args, npre=0):
             method = tok[2:].upper()
         elif tok in BODY_FLAGS or any(tok.startswith(f + "=") for f in BODY_FLAGS if f.startswith("--")):
             implicit_post = True
+        elif re.match(r"^-[fF].", tok):
+            implicit_post = True  # attached short body flag, e.g. -flabels[]=x
     if method is None:
         method = "POST" if implicit_post else "GET"
     if method not in MUTATING:
@@ -592,6 +617,10 @@ def _api_label_state(args, npre=0):
         if name in STATES:
             return name
     payload = [tok for tok in args if tok is not path] + list(API_BODIES)
+    if any(t == "--input=-" or (t == "--input" and i + 1 < len(args) and args[i + 1] == "-")
+           for i, t in enumerate(args)):
+        # `echo '{"labels":[..]}' | gh api ... --input -`: the piped producer is the body.
+        payload.extend(extra_payload)
     # `--input FILE`: the payload lives in a file; read it when readable.
     for i, tok in enumerate(args):
         fpath = None
@@ -731,7 +760,7 @@ def _subst_bodies(text):
 EXEC_FLAGS = ("-exec", "-execdir", "-ok", "-okdir")
 
 
-def _scan_segment(seg, depth):
+def _scan_segment(seg, depth, prev=()):
     g = _gh_args(seg)
     if g is None:
         if depth < 3:
@@ -758,7 +787,7 @@ def _scan_segment(seg, depth):
     if toks[0] == "issue" and toks[1] in ("edit", "create"):
         return _issue_label_state(pre + toks[2:])
     if toks[0] == "api":
-        return _api_label_state(pre + toks[1:], len(pre))
+        return _api_label_state(pre + toks[1:], list(prev))
     return None
 
 
@@ -770,10 +799,12 @@ def _scan(text, depth=0):
             hit = _scan(body, depth + 1)
             if hit:
                 return hit
+    prev = ()
     for seg in _segments(text):
-        hit = _scan_segment(seg, depth)
+        hit = _scan_segment(seg, depth, prev)
         if hit:
             return hit
+        prev = seg
     return None
 
 
