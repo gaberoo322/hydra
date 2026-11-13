@@ -1054,6 +1054,49 @@ describe("decide.py — usage-shed parity for the escalation re-dispatch path (i
     assert.equal(blockedEvents(plan).length, 0);
   });
 });
+
+describe("decide.py — escalation honours the whole admission verdict (#5479)", () => {
+  const blocked = (plan: any): any[] =>
+    (plan.events ?? []).filter((e: any) => e && e.event === "cascade_routing_blocked");
+  const devOrchDispatches = (plan: any): any[] =>
+    (plan.actions ?? []).filter((a: any) => a.type === "dispatch" && a.slot === "dev_orch");
+
+  test("a burned class is not escalated; block_reason=burned", () => {
+    const state = baseState({ slotEvents: [stopEvent("dev_orch", "failure", "tBURN", "npm test failed")] });
+    state.burned_classes = ["dev_orch"];
+    const plan = runDecide(state);
+    assert.equal(devOrchDispatches(plan).length, 0);
+    assert.equal(eventOf(plan, "cascade_routing_escalation"), undefined);
+    assert.deepEqual(blocked(plan).map((e: any) => e.block_reason), ["burned"]);
+  });
+
+  test("a scope-excluded class is not escalated; block_reason=scope_excluded", () => {
+    const state = baseState({
+      scope: "target-only",
+      slotEvents: [stopEvent("dev_orch", "failure", "tSCOPE", "npm test failed")],
+    });
+    const plan = runDecide(state);
+    assert.equal(devOrchDispatches(plan).length, 0);
+    assert.deepEqual(blocked(plan).map((e: any) => e.block_reason), ["scope_excluded"]);
+  });
+
+  test("an occupied slot is not escalated into; block_reason=slot_busy", () => {
+    const state = baseState({
+      slotEvents: [stopEvent("dev_orch", "failure", "tBUSY", "npm test failed")],
+      slots: {
+        dev_orch: { skill: "hydra-dev", task_id: "other", started: "t0", started_epoch: 1, attempt: 1 },
+        qa_orch: null, research_orch: null, dev_target: null, qa_target: null,
+        research_target: null, design_concept_orch: null,
+      },
+    });
+    const plan = runDecide(state);
+    assert.equal(
+      devOrchDispatches(plan).filter((a: any) => a.prompt_args?.escalate_model).length,
+      0,
+    );
+    assert.deepEqual(blocked(plan).map((e: any) => e.block_reason), ["slot_busy"]);
+  });
+});
 }
 
 // ===========================================================================

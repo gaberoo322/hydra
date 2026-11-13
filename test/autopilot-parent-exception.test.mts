@@ -185,6 +185,22 @@ describe("decide.py - Fable instant-death replay (#5323)", () => {
     assert.ok(plan.reasons.includes("instant-death-replay-suppressed:dev_target:usage_dispatch_blocked"), plan.reasons.join());
   });
 
+  test("a burned class is not replayed; the skip names the burned gate and the reap survives (#5479)", () => {
+    const { plan } = decide(baseState({ burned_classes: ["dev_target"] }), [death()]);
+    assert.equal(replays(plan).length, 0);
+    assert.ok(plan.reasons.includes("instant-death-replay-suppressed:dev_target:burned"), plan.reasons.join());
+    assert.ok(plan.actions.some((a: any) => a.type === "reap" && a.slot === "dev_target"), "the reap is still emitted");
+  });
+
+  test("a scope-excluded class is not replayed; the skip names the scope_excluded gate (#5479)", () => {
+    const st = baseState();
+    st.limits.scope = "orch-only";
+    const { plan } = decide(st, [death()]);
+    assert.equal(replays(plan).length, 0);
+    assert.ok(plan.reasons.includes("instant-death-replay-suppressed:dev_target:scope_excluded"), plan.reasons.join());
+    assert.ok(plan.actions.some((a: any) => a.type === "reap" && a.slot === "dev_target"), "the reap is still emitted");
+  });
+
   test("an `inherit` class has no dispatch_model on the reap action", () => {
     const st = baseState({
       slots: { dev_target: null },
