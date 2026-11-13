@@ -115,6 +115,7 @@ export const TRANSITIONS: readonly Transition[] = [
   { from: "ready-for-agent", to: "in-progress", firedBy: "dispatcher", gate: "dispatch" },
   ...rows("ready-for-agent", "agent", "judgment", ["blocked", "needs-triage", "parked"]),
   { from: "ready-for-agent", to: "ready-for-human", firedBy: "agent", gate: "adr5" },
+  { from: "ready-for-agent", to: "needs-qa", firedBy: "reconcile", gate: "pr-open" },
   { from: "ready-for-agent", to: "closed", firedBy: "agent", gate: "close" },
   { from: "blocked", to: "ready-for-agent", firedBy: "reconcile", gate: "unblocked" },
   ...rows("blocked", "agent", "judgment", ["needs-triage", "parked"]),

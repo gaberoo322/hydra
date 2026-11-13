@@ -14,6 +14,7 @@ import {
   MAX_TIMELINE_FETCHES,
   isZeroStateExempt,
   resolveQaPr,
+  singleClosingPr,
   runReconcile,
   type OpenPrRef,
   type ReconcileDeps,
@@ -614,5 +615,96 @@ describe("report counts only written effects and surfaces failed writes (QA roun
     w.closedRows = [116];
     const report = await runReconcile(w.deps);
     assert.equal(report.seamTransitions, 1);
+  });
+});
+
+describe("PR-covered ready-for-agent promotion (#5489)", () => {
+  const closing = (n: number, over: Partial<OpenPrRef> = {}): OpenPrRef => ({ number: 900 + n, body: `Closes #${n}`, ...over });
+
+  test("a ready-for-agent issue with one open non-draft closing PR routes to needs-qa through the seam with actor reconcile and evidence.pr", async () => {
+    const { w, add, journal } = world();
+    add(500, ["ready-for-agent"]);
+    w.prs = [closing(500)];
+    const report = await runReconcile(w.deps);
+    assert.deepEqual(w.edits, [{ issue: 500, remove: ["ready-for-agent"], add: ["needs-qa"] }]);
+    assert.deepEqual(report.prCovered, { promoted: 1, ambiguous: 0, claimHeld: 0, refused: 0 });
+    const entry = journal(500).find((e) => e.to === "needs-qa");
+    assert.equal(entry?.actor, "reconcile");
+    assert.equal(entry?.evidence?.pr, "1400");
+  });
+
+  test("a draft PR is not a candidate: no write", async () => {
+    const { w, add } = world();
+    add(501, ["ready-for-agent"]);
+    w.prs = [closing(501, { isDraft: true })];
+    const report = await runReconcile(w.deps);
+    assert.equal(w.edits.length, 0);
+    assert.deepEqual(report.prCovered, { promoted: 0, ambiguous: 0, claimHeld: 0, refused: 0 });
+  });
+
+  test("2+ closing PRs are ambiguous: counted, no write", async () => {
+    const { w, add } = world();
+    add(502, ["ready-for-agent"]);
+    w.prs = [closing(502), { number: 7777, body: "Fixes #502" }];
+    const report = await runReconcile(w.deps);
+    assert.equal(w.edits.length, 0);
+    assert.equal(report.prCovered.ambiguous, 1);
+  });
+
+  test("a held dispatch claim skips the promotion; a failed claim read is an error with no write", async () => {
+    const { w, add } = world();
+    add(503, ["ready-for-agent"]);
+    add(504, ["ready-for-agent"]);
+    w.prs = [closing(503), closing(504)];
+    w.deps.seam.journal.readClaim = async (_r, n) =>
+      n === 503
+        ? { ok: true, claim: { dispatchId: "d", class: "dev_orch", run: "r", artifactHash: null, openedAt: NOW } as never }
+        : { ok: false, error: "x" };
+    const report = await runReconcile(w.deps);
+    assert.equal(w.edits.length, 0);
+    assert.equal(report.prCovered.claimHeld, 1);
+    assert.ok(report.errors.includes("claim-read-failed:#504"));
+  });
+
+  test("promotions are bounded per pass", async () => {
+    const { w, add } = world();
+    for (const n of [510, 511, 512]) {
+      add(n, ["ready-for-agent"]);
+      w.prs.push(closing(n));
+    }
+    const report = await runReconcile(w.deps, { maxPrCoveredPromotions: 2 });
+    assert.equal(report.prCovered.promoted, 2);
+    assert.equal(w.edits.length, 2);
+  });
+
+  test("needs-dev-resume and in-progress rows with an open closing PR get no write from this arm", async () => {
+    const { w, add } = world();
+    add(520, ["needs-dev-resume"]);
+    add(521, ["in-progress"]);
+    w.prs = [closing(520), closing(521)];
+    const report = await runReconcile(w.deps);
+    assert.equal(w.edits.length, 0);
+    assert.equal(report.prCovered.promoted, 0);
+  });
+
+  test("a failed open-PR read does nothing; dry-run counts a would-promote and writes nothing", async () => {
+    const { w, add } = world();
+    add(530, ["ready-for-agent"]);
+    w.prs = [closing(530)];
+    const dry = await runReconcile(w.deps, { dryRun: true });
+    assert.equal(dry.prCovered.promoted, 1);
+    assert.equal(w.edits.length, 0);
+    w.deps.listOpenPrs = async () => ({ ok: false });
+    const failed = await runReconcile(w.deps);
+    assert.equal(failed.prCovered.promoted, 0);
+    assert.equal(w.edits.length, 0);
+  });
+
+  test("singleClosingPr: one closing PR, drafts removed, ambiguity and null read", () => {
+    const prs: OpenPrRef[] = [{ number: 1, body: "Closes #9" }, { number: 2, body: "Closes #9", isDraft: true }];
+    assert.equal(singleClosingPr(prs, 9), 1);
+    assert.equal(singleClosingPr([...prs, { number: 3, body: "Closes #9" }], 9), null);
+    assert.equal(singleClosingPr(prs, 10), null);
+    assert.equal(singleClosingPr(null, 9), null);
   });
 });

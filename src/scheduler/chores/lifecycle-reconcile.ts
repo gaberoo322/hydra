@@ -33,9 +33,9 @@ export function defaultReconcileDeps(repoRoot: string = REPO_ROOT): ReconcileDep
     seam,
     listOpenIssues: () => listOpenIssues({ repo: seam.repo, limit: 500, timeout: 60_000 }),
     listOpenPrs: async () => {
-      const res = await listOpenPrs({ repo: seam.repo, limit: 200, fields: "number,body", timeout: 60_000 });
+      const res = await listOpenPrs({ repo: seam.repo, limit: 200, fields: "number,body,isDraft", timeout: 60_000 });
       if (res.ok === false) return { ok: false };
-      return { ok: true, value: res.rows.map((p) => ({ number: p.number, body: p.body ?? "" })) };
+      return { ok: true, value: res.rows.map((p) => ({ number: p.number, body: p.body ?? "", isDraft: p.isDraft === true })) };
     },
     listRecentlyClosed: (sinceIso) =>
       listIssuesBySearch(`closed:>=${sinceIso}`, { repo: seam.repo, state: "closed", limit: RECENTLY_CLOSED_LIMIT }),
