@@ -62,10 +62,8 @@ worktree.
 ```bash
 hydra health
 systemctl --user status "$TARGET_SERVICE" 2>&1 | head -5
-TEST_CMD=$(jq -r '.verify.test' "$TARGET_WS/.hydra/manifest.json")
-TYPECHECK_CMD=$(jq -r '.verify.typecheck' "$TARGET_WS/.hydra/manifest.json")
-# Read-only CI state of main (REST, never GraphQL). The verify commands above run
-# ONLY inside a remediation worktree (Phase 3), never in $TARGET_WS / $TARGET_APP_DIR.
+# Read-only CI state of main (REST, never GraphQL). The manifest verify commands
+# run ONLY inside a remediation worktree (Phase 3), never in $TARGET_WS / $TARGET_APP_DIR.
 gh api -X GET "repos/$TARGET_GH_REPO/actions/runs" -f branch=main -f per_page=5 \
   --jq '.workflow_runs[] | "\(.id) \(.conclusion // .status) \(.head_sha[0:8]) \(.name)"'
 
@@ -165,10 +163,14 @@ cd "${TARGET_WT:?unset - create the worktree per hydra-target-build Step 0.6}"
 git fetch --quiet origin main
 git checkout -b "fix/incident-$(date -u +%Y-%m-%d-%H%M)" origin/main
 # fix
-eval "$TYPECHECK_CMD" && eval "$TEST_CMD"     # inside the worktree only
+# Verify commands are app-dir relative: cd to the app-dir equivalent INSIDE the worktree.
+APP_REL="${TARGET_APP_DIR#"$TARGET_WS"}"
+TEST_CMD=$(jq -r '.verify.test' "$TARGET_WS/.hydra/manifest.json")
+TYPECHECK_CMD=$(jq -r '.verify.typecheck' "$TARGET_WS/.hydra/manifest.json")
+( cd "$TARGET_WT$APP_REL" && eval "$TYPECHECK_CMD" && eval "$TEST_CMD" )     # worktree only
 git add <files> && git commit -m "fix: <description>"
 git push -u origin HEAD
-gh pr create --repo "$TARGET_GH_REPO" --base main --title "fix: <description>" --body "Incident auto-fix. Closes #<post-mortem issue>"
+gh pr create --repo "$TARGET_GH_REPO" --base main --title "fix: <description>" --body "Incident auto-fix. Refs #<post-mortem issue>"
 ```
 
 #### Revert
@@ -177,7 +179,9 @@ Reuse the revert-PR recipe in the merge-flow reference, Step 8
 off `origin/main` in `$TARGET_WT`, `git revert --no-edit <breaking_sha>`, pushed
 and opened with `gh pr create --repo "$TARGET_GH_REPO" --base main`. The revert
 PR goes through the same required CI + automerge + CI-owned deploy as any other
-change.
+change. Verify the revert before pushing: after the revert, run the same
+app-dir verify block as Auto-fix (`cd "$TARGET_WT$APP_REL"`, then the manifest's
+`verify.typecheck` and `verify.test`).
 
 #### Escalate
 Create an issue on the Target board (`--repo "$TARGET_GH_REPO"`) with all
@@ -245,6 +249,7 @@ EOF
 4. **Always create a post-mortem** — even for auto-fixed incidents.
 5. **Never build, test, check out, or restart in `$TARGET_WS`** — it is the
    serving tree; investigate from CI state, git log, journal and health only.
-6. **Stay single-realm** — every command targets `$TARGET_WS`; never `cd`
+6. **Stay single-realm** — every command targets the Target (read-only on
+   `$TARGET_WS`, writes only in a remediation worktree); never `cd`
    into `~/hydra` source, and never write Orchestrator memory. Cross-realm
    incident handling is forbidden by ADR-0025.

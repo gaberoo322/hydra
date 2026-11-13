@@ -22,6 +22,8 @@ const FORBIDDEN = [
   "git push origin main",
   "systemctl --user restart",
   "/merge/lock",
+  "/merge/unlock",
+  "git merge ",
   "target-backlog",
   "config/feedback/",
   "reframe-queue",
@@ -35,8 +37,7 @@ for (const f of FILES) {
   test(`${f} carries no forbidden retired or direct-ship literal`, () => {
     const body = read(f);
     for (const lit of FORBIDDEN) {
-      // The build playbook and merge-flow fragment may NAME the restart ban
-      // in prose ("never restarts"), but not as a command.
+      // The literal is forbidden everywhere; prose bans use other wording.
       assert.ok(!body.includes(lit), `${f} must not contain "${lit}"`);
     }
   });
@@ -53,4 +54,13 @@ for (const f of ["hydra-target-incident.md", "hydra-target-retro.md"]) {
 test("incident remediation ends in a PR against the Target main", () => {
   const body = read("hydra-target-incident.md");
   assert.ok(body.includes('gh pr create --repo "$TARGET_GH_REPO" --base main'));
+});
+
+test("retro reads its failure signal from the reframe label board", () => {
+  assert.ok(read("hydra-target-retro.md").includes("labels=reframe"));
+});
+
+test("incident verify commands run from the app-dir equivalent in the worktree", () => {
+  const body = read("hydra-target-incident.md");
+  assert.ok(body.includes('cd "$TARGET_WT$APP_REL"'));
 });
