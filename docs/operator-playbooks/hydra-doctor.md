@@ -403,7 +403,7 @@ grep -n "hydra-postgres\|grep -v" ~/.local/bin/hydra-docker-cleanup.sh 2>/dev/nu
 
 Only report issues actually present — don't speculate.
 
-- **Cycle health**: Merge rate, fix:feat ratio trend, rollback clusters, repeated task titles
+- **Cycle health**: Merge rate, fix:feat ratio trend, repeated task titles
 - **Deployed-build drift**: Is the drift verdict `drift`? Prod is running STALE code — deploy-on-merge did not restart the service (the "uptime 22h, status ok" trap). NEVER report a `drift` verdict as healthy. `settling` is a mid-flight deploy (re-check next run). `unknown` is information-only (service unreachable / detached origin). If a dirty-tree probable-cause is shown, that tracked modification is what blocked deploy.sh.
 - **Blockers**: Dirty working tree blocking deploy.sh? Stale cycles?
 - **External access**: Did the external health check return non-200? Tunnel down?

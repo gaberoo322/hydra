@@ -362,7 +362,7 @@ Otherwise log in summary, don't create.
 Tier 3:
 ```
 [hydra-discover] Tier 1+2+3 (iteration N). Deep dive triggered by: high empty rate.
-  Explored: anchor-selection.ts, planner-prompt.ts, codex-runner.ts
+  Explored: <files explored>
   Research: classifier cascade techniques (3 sources)
   Findings: 1 arch (planner context missing anchor-type-specific enrichment)
   Created: #48. Skipped: 0.
