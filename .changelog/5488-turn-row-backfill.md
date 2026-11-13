@@ -1,0 +1,1 @@
+- fix: back-fill skipped autopilot turn rows from turn.sh and silence the bootstrap heartbeat 404 (#5488)

@@ -309,7 +309,10 @@ def _mirrored_parent_exceptions(state: dict, turn_n: int) -> list:
     ]
 
 
-def post_turn(state: dict, plan: dict, now: int) -> None:
+BACKFILL_REASON = "heartbeat-backfilled-by-turn.sh"
+
+
+def post_turn(state: dict, plan: dict, now: int, extra_reasons: list | None = None) -> None:
     """Issue #498 — POST one immutable turn record to /api/autopilot/turn.
 
     Idempotent on (run_id, turn_n): re-POST at the same turn_n is a no-op
@@ -352,6 +355,9 @@ def post_turn(state: dict, plan: dict, now: int) -> None:
         print(f"[autopilot] heartbeat: stale plan skipped ({stale_reason})", file=sys.stderr)
         actions = []
         reasons = [f"plan-stale-skipped: {stale_reason}"]
+
+    if extra_reasons:
+        reasons = list(reasons) + list(extra_reasons)
 
     body = {
         "run_id": run_id,
@@ -409,7 +415,38 @@ def post_turn(state: dict, plan: dict, now: int) -> None:
         print(f"[autopilot] heartbeat: turn POST failed ({exc})", file=sys.stderr)
 
 
-def write_heartbeat(last_action: str = "(none)", *, now: int | None = None) -> int:
+def backfill_prior_turn(*, now: int | None = None) -> int:
+    """Issue #5488 -- POST-only back-fill of the PRIOR turn's row.
+
+    turn.sh calls this before decide.py's bump, so state.turn is the prior
+    turn and the on-disk plan is stamped for it. Idempotent server-side on
+    (run_id, turn_n): a turn the parent already heartbeated is a no-op. Never
+    writes the heartbeat file or state.json. Silent no-op (no HTTP) when
+    run_id is missing or turn == 0 (bootstrap is not an Autopilot Turn).
+    Never raises; always returns 0.
+    """
+    ts = int(time.time()) if now is None else int(now)
+    try:
+        state = run_ledger.load(STATE_PATH, fill_defaults=False)
+    except run_ledger.LedgerTypeError:
+        state = run_ledger.read_prior(STATE_PATH)
+    except (FileNotFoundError, ValueError, OSError):
+        return 0
+    if not isinstance(state, dict):
+        return 0
+    if not state.get("run_id"):
+        return 0
+    try:
+        turn_n = int(state.get("turn", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+    if turn_n <= 0:
+        return 0
+    post_turn(state, _read_plan(), ts, extra_reasons=[BACKFILL_REASON])
+    return 0
+
+
+def write_heartbeat(last_action: str = "(none)", *, now: int | None = None, post: bool = True) -> int:
     """Read state.json, build the one-line update, overwrite the
     heartbeat file. Returns 0 on success, non-zero (but never raises)
     on failure — heartbeat is observability, not correctness.
@@ -448,16 +485,24 @@ def write_heartbeat(last_action: str = "(none)", *, now: int | None = None) -> i
     # Issue #498 — POST per-turn record to the orchestrator AFTER the file
     # write so a slow/failed POST never delays the file mtime update (which
     # is what wedge-detection grep's on).
-    post_turn(state, _read_plan(), ts)
+    if post:
+        post_turn(state, _read_plan(), ts)
     return 0
 
 
 def main(argv: list[str]) -> int:
     # Tiny CLI: `heartbeat.py [--last-action <type>]`
     last_action = "(none)"
+    post = True
     i = 1
     while i < len(argv):
         arg = argv[i]
+        if arg == "--backfill-prior-turn":
+            return backfill_prior_turn()
+        if arg == "--no-turn-post":
+            post = False
+            i += 1
+            continue
         if arg in ("--last-action", "-a") and i + 1 < len(argv):
             last_action = argv[i + 1]
             i += 2
@@ -468,7 +513,7 @@ def main(argv: list[str]) -> int:
             continue
         if arg in ("-h", "--help"):
             print(
-                "usage: heartbeat.py [--last-action <type>]\n"
+                "usage: heartbeat.py [--last-action <type>] [--no-turn-post] | --backfill-prior-turn\n"
                 "Writes one line to $HYDRA_AUTOPILOT_HEARTBEAT (default /tmp/hydra-autopilot-heartbeat.txt).\n"
                 "Reads $HYDRA_AUTOPILOT_STATE (default /tmp/hydra-autopilot-state.json)."
             )
@@ -476,7 +521,7 @@ def main(argv: list[str]) -> int:
         # Unknown arg — warn and continue (heartbeat is best-effort).
         print(f"[autopilot] heartbeat: ignoring unknown arg {arg!r}", file=sys.stderr)
         i += 1
-    return write_heartbeat(last_action)
+    return write_heartbeat(last_action, post=post)
 
 
 if __name__ == "__main__":

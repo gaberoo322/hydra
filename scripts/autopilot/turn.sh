@@ -96,6 +96,13 @@ if [ ! -s "$STATE" ]; then
   exit 2
 fi
 
+# --- Phase 0.5: back-fill the PRIOR turn's row (#5488) ------------------------
+# The parent sometimes skips heartbeat.py after a reap-only turn, losing that
+# turn's row. POST-only and idempotent on (run_id, turn_n); runs BEFORE the
+# snapshot apply and decide.py's bump so state.turn is still the prior turn.
+# Fail-open: never changes this script's exit code.
+python3 "$SCRIPT_DIR/heartbeat.py" --backfill-prior-turn >/dev/null || true
+
 # --- Phase 1: collect ------------------------------------------------------
 # The cursor lives on state (bootstrap seeds it; the snapshot apply advances
 # it) — pass it so the slot-events read resumes where the last turn ended.
