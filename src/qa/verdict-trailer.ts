@@ -291,6 +291,8 @@ export function buildQaVerdictTrailer(input: {
   blockers: number;
   maxSeverity: QaSeverity;
   priorBodies: ReadonlyArray<string | null | undefined>;
+  /** Reviewer-commit shas (issue #5267); rendered as the optional `qa-fixes=` field. */
+  qaFixes?: readonly string[];
 }): string {
   return renderQaVerdictTrailer({
     verdict: input.verdict,
@@ -299,6 +301,7 @@ export function buildQaVerdictTrailer(input: {
     sha: input.headSha,
     blockers: input.blockers,
     maxSeverity: input.maxSeverity,
+    qaFixes: input.qaFixes,
   });
 }
 

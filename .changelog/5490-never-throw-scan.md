@@ -1,0 +1,1 @@
+- chore: add advisory never-throw scanner for STD-VERIFY-NEVER-THROW (#5490)

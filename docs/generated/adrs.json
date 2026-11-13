@@ -205,8 +205,8 @@
         "docs/operations/glm-lane.md",
         "docs/operator-playbooks/hydra-branch-prune.md",
         "docs/operator-playbooks/hydra-cleanup.md",
+        "docs/operator-playbooks/hydra-grill.md",
         "docs/operator-playbooks/hydra-sweep.md",
-        "docs/operator-playbooks/hydra-target-qa.md",
         "docs/operator-playbooks/hydra-tool-scout.md",
         "docs/operator-playbooks/hydra-wire-or-retire.md",
         "docs/operator-playbooks/thermo-nuclear-code-quality-review.md",
@@ -260,9 +260,7 @@
         "docs/operator-playbooks/hydra-qa.md",
         "docs/operator-playbooks/hydra-research.md",
         "docs/operator-playbooks/hydra-target-build.md",
-        "docs/operator-playbooks/hydra-target-incident.md",
         "docs/operator-playbooks/hydra-target-research.md",
-        "docs/operator-playbooks/hydra-target-retro.md",
         "docs/quality-gates.md",
         "docs/reference.md",
         "src/autopilot/CONTEXT.md"
@@ -652,6 +650,7 @@
         "CONTEXT.md",
         "config/orchestrator/vision.md",
         "docs/adr/0005-operator-escalation-is-narrow.md",
+        "docs/operator-playbooks/hydra-qa.md",
         "docs/reference.md"
       ],
       "source": {
@@ -925,6 +924,7 @@
         "docs/operator-playbooks/hydra-target-build.md",
         "docs/operator-playbooks/hydra-target-cleanup.md",
         "docs/operator-playbooks/hydra-target-discover.md",
+        "docs/operator-playbooks/hydra-target-incident.md",
         "docs/operator-playbooks/hydra-target-qa.md",
         "docs/operator-playbooks/hydra-target-research.md",
         "docs/operator-playbooks/hydra-target-retro.md",
@@ -1040,7 +1040,8 @@
         "CONTEXT-MAP.md",
         "CONTEXT.md",
         "docs/adr/0030-one-pocock-skill-lineage-replaces-forks.md",
-        "docs/operator-playbooks/hydra-autopilot.md"
+        "docs/operator-playbooks/hydra-autopilot.md",
+        "docs/operator-playbooks/hydra-wayfinder.md"
       ],
       "source": {
         "path": "docs/adr/0035-spec-stage-stays-hydra-owned.md"
@@ -1313,12 +1314,19 @@
         "CONTEXT-MAP.md",
         "CONTEXT.md",
         "docs/adr/0034-orchestrator-dashboard-page-inventory.md",
+        "docs/agents/issue-tracker.md",
         "docs/agents/triage-labels.md",
         "docs/operator-playbooks/hydra-autopilot.md",
+        "docs/operator-playbooks/hydra-discover.md",
+        "docs/operator-playbooks/hydra-grill.md",
+        "docs/operator-playbooks/hydra-incident.md",
         "docs/operator-playbooks/hydra-issue-research.md",
         "docs/operator-playbooks/hydra-qa.md",
+        "docs/operator-playbooks/hydra-research.md",
+        "docs/operator-playbooks/hydra-retro.md",
         "docs/operator-playbooks/hydra-review.md",
         "docs/operator-playbooks/hydra-sweep.md",
+        "docs/operator-playbooks/hydra-tickets.md",
         "docs/reference.md"
       ],
       "source": {

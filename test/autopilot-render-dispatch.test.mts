@@ -833,6 +833,15 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
     const sweep = render("sweep_orch", action("sweep_orch", "hydra-sweep", { prompt_args: { scope: "orch", anchor: "issue-4823" } }));
     assert.match(sweep.prompt, /match by closing ref, not by title/);
     assert.match(sweep.prompt, /put its name in the URL PATH \(`DELETE \.\.\.\/labels\/<name>`\)/);
+    assert.match(sweep.prompt, /scripts\/lifecycle\.ts advance <N> <to>/);
+    assert.match(retro.prompt, /Issue STATE labels .* move only through `npx tsx scripts\/lifecycle\.ts advance <N> <to> \.\.\.`/);
+    assert.match(retro.prompt, /refusal exits non-zero and is final/);
+    // QA round 2: a Target sweep keeps the flag-label mechanics but NOT the
+    // orchestrator-seam state rule (the Target board is outside the seam).
+    const tsweep = render("sweep_target", action("sweep_target", "hydra-target-sweep"));
+    assert.match(tsweep.prompt, /put its name in the URL PATH \(`DELETE \.\.\.\/labels\/<name>`\)/);
+    assert.match(tsweep.prompt, /wipes ALL labels/);
+    assert.doesNotMatch(tsweep.prompt, /Issue STATE labels/);
     const health = render("health", action("health", "hydra-doctor"));
     assert.doesNotMatch(health.prompt, /Admission rule/);
     assert.match(health.prompt, /Invoke the `hydra-doctor` skill \(via the Skill tool\) and follow it end to end/);

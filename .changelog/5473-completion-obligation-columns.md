@@ -1,0 +1,1 @@
+- refactor: completion obligations (cycle record, worktree sweep, reflection deposit) are Dispatch-Class Taxonomy columns instead of hand-kept skill sets in reap.py (#5473)

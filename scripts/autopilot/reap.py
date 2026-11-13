@@ -115,6 +115,7 @@ from reap_state import (
     mirror_cross_run_state_to_redis,
     redis_cli,
 )
+import taxonomy  # noqa: E402  (per-skill completion obligations, #5473)
 import reap_state  # noqa: E402  (attribute access: STATE_PATH is the persist target)
 import run_ledger  # noqa: E402  (the ONE state-document writer, #5075)
 
@@ -189,38 +190,33 @@ REFL_SOURCES_DIR = Path(os.environ.get("HYDRA_AUTOPILOT_REFL_DIR", "/tmp"))
 # completion outcome; the counters are incremented by saveDesignConcept()
 # / grill-artifact.sh at write time.
 #
-# Issue #4730 adds `hydra-qa`. Like grilling, QA is not code-writing, but its
-# per-dispatch cost is exactly what "tokens per review" / "tokens per caught
-# defect" need, and before this it was answerable only by hand from run
-# digests (qa_orch sat in coverage.classesNotRecorded and the class scoreboard
-# read it as `insufficient-sample`). A reaped hydra-qa completion now writes a
-# `status=completed` cycle-record (anchorType `qa-review`) whose durable
-# dispatch-outcome record carries class `qa_orch`, the anchor ref and tokens.
-# QA has no "merged" outcome — it never opens a PR, so no merge-watch /
-# reconcile enrichment ever upgrades it — and the class scoreboard scores it as
-# a non-merging `other`-role class (`not-scored`, like design_concept_orch),
-# never on merge rate. It is deliberately NOT in REFLECTION_DEPOSIT_SKILLS:
-# hydra-qa never runs the planning-time reflection-source deposit recipe.
-CYCLE_RECORD_SKILLS = {"hydra-dev", "hydra-target-build", "hydra-grill", "hydra-qa"}
-# Issue #4392: this set is the POLICY that shapes every cycle-derived ledger —
-# metrics-trend rows, /api/metrics stats.anchorDistribution, and the durable
-# dispatch-outcome records (#2942) the retro crossRunTrend folds — so classes
-# dispatched by any OTHER skill (the whole producer family: discover/
-# architecture/cleanup/scout/retro, plus research) can never appear in those
-# views however often they fire. Reading such a view as class liveness produced
-# three false "producers dark" alarms (#3752, #4302, #4388). The set is
-# MIRRORED in src/taxonomy/classes.ts (CYCLE_RECORD_SKILLS, whose derived
-# CLASSES_WITHOUT_CYCLE_RECORD is emitted as coverage.classesNotRecorded by
-# /api/metrics and crossRunTrend so consumers read "not in this ledger" instead
-# of a confident 0). test/taxonomy-classes.test.mts pins the two definitions
-# together — edit both or the suite reddens.
+# Completion obligations (cycle-record, worktree sweep, reflection-deposit
+# diagnostic) are per-SKILL facts held in the Dispatch-Class Taxonomy
+# (classes.json `cycleRecord` / `worktreeGc` / `reflectionDeposit`, #5473) and
+# resolved here BY THE SKILL THAT RAN via `taxonomy.skill_obligations` -- a
+# wayfinder_orch `task` ticket dispatches hydra-dev, so it keeps all three.
+# Issue #4392: the cycleRecord column shapes every cycle-derived ledger
+# (metrics-trend rows, /api/metrics stats.anchorDistribution, the durable
+# dispatch-outcome records the retro crossRunTrend folds), so classes dispatched
+# by any other skill can never appear in those views however often they fire;
+# src/taxonomy/classes.ts derives CLASSES_WITHOUT_CYCLE_RECORD from the same
+# column so consumers read "not in this ledger" instead of a confident 0.
+# hydra-grill writes a design-concept artifact (no reflection deposit);
+# hydra-qa never opens a PR and runs no planning-time deposit recipe.
 CYCLE_RECORD_SCRIPT = Path(__file__).parent / "dispatch.sh"
 
-# Issue #2450: subset of CYCLE_RECORD_SKILLS that actually run the planning-time
-# reflection-source deposit recipe. hydra-grill writes a design-concept artifact,
-# not a reflection-source deposit, so it is NOT in this set — adding it would
-# produce a false-positive WARN on every grill completion.
-REFLECTION_DEPOSIT_SKILLS: frozenset[str] = frozenset({"hydra-dev", "hydra-target-build"})
+
+def _obligations_for(skill):
+    """Completion obligations of `skill`. DELIBERATE fail-open carve-out to the
+    taxonomy.py no-fallback rule: reap is the completion path and must never abort
+    (the old static sets could not fail), so an unreadable/corrupt/missing
+    classes.json (TaxonomyError, OSError incl. the stat TOCTOU, UnicodeDecodeError)
+    logs loudly to stderr and owes nothing."""
+    try:
+        return taxonomy.skill_obligations(skill)
+    except (taxonomy.TaxonomyError, OSError, UnicodeDecodeError) as exc:
+        print(f"[autopilot] WARN taxonomy-unavailable skill={skill}: {exc}", file=sys.stderr)
+        return taxonomy.SkillObligations(False, False, False)
 
 # Worktree-orphan GC trigger (issue #911).
 #
@@ -240,7 +236,6 @@ REFLECTION_DEPOSIT_SKILLS: frozenset[str] = frozenset({"hydra-dev", "hydra-targe
 # and swallowed — exactly like `_fire_cycle_record`. Skipped entirely unless
 # the dispatch was a worktree-bearing class, and suppressible via
 # HYDRA_REAP_WORKTREE_GC=0 for operators who prefer the timer alone.
-WORKTREE_GC_SKILLS = {"hydra-dev", "hydra-target-build", "hydra-qa"}
 WORKTREE_GC_SCRIPT = Path(__file__).resolve().parents[1] / "branch-prune.sh"
 
 # Issue #2020: a reflection-deposit presence diagnostic. `_read_reflection_sources`
@@ -713,29 +708,29 @@ def _fire_cycle_record(
     tokens (invariant 7) and report postEscalationMergeRate (invariant 8). Empty
     (the non-escalation majority) → dispatch.sh omits both fields (truthful null).
 
-    Cycle-record fire gate (issue #3284): normally only CYCLE_RECORD_SKILLS
-    (code-writing classes) trip a cycle-record write. But the ONLY class that
+    Cycle-record fire gate (issue #3284): normally only skills whose taxonomy
+    `cycleRecord` column is true trip a cycle-record write. But the ONLY class that
     cascade-escalates today is `cleanup_orch` (skill `hydra-cleanup`), a SIGNAL
-    class NOT in CYCLE_RECORD_SKILLS — so without an escalation-scoped exception,
+    class whose skill has `cycleRecord: false` — so without an escalation-scoped exception,
     an escalated cleanup dispatch would deposit its provenance, reap would read
     it, and then `_fire_cycle_record` would early-return and DISCARD it, leaving
     the outcome record (and thus the whole cascade rollup, which filters on a
     non-null `escalationAttempt`) permanently empty. So when a non-empty
     `escalation` blob is present we STILL fire the cycle-record write even for a
-    non-CYCLE_RECORD skill — the escalated attempt's durable outcome record is
+    `cycleRecord: false` skill — the escalated attempt's durable outcome record is
     exactly what the cascade metrics need. Non-escalated signal completions are
-    unaffected (empty escalation → the original CYCLE_RECORD_SKILLS-only gate).
+    unaffected (empty escalation → the original cycleRecord-column-only gate).
     """
     if not CYCLE_RECORD_SCRIPT.exists():
         return
     # Fire for code-writing classes (the #430 semantic) OR whenever a cascade
     # escalation provenance blob rode in (issue #3284) — the escalating class
     # (`cleanup_orch`/`hydra-cleanup`) is a signal class outside
-    # CYCLE_RECORD_SKILLS, so gating purely on the skill would silently drop the
+    # the cycleRecord column, so gating purely on the skill would silently drop the
     # escalated attempt's outcome record and structurally zero the cascade fold.
     if not skill:
         return
-    if skill not in CYCLE_RECORD_SKILLS and not escalation:
+    if not _obligations_for(skill).cycle_record and not escalation:
         return
     # Issue #3391: key the cycle-record on the synthesised worktree branch when
     # one is known, so the test-count-bearing write lands on the SAME indexed
@@ -819,7 +814,7 @@ def _fire_worktree_gc(skill: str | None) -> None:
     branch is gone), so overlapping invocations across rapid reaps converge
     harmlessly on the same reclaimed set.
     """
-    if not skill or skill not in WORKTREE_GC_SKILLS:
+    if not skill or not _obligations_for(skill).worktree_gc:
         return
     if os.environ.get("HYDRA_REAP_WORKTREE_GC", "1") == "0":
         return
@@ -1535,6 +1530,8 @@ def _fire_reflection_for_completion(
 # is now a data dependency: run_completion's fire steps take this record —
 # never the mutable slot — and nothing between the #3895 mismatch probe and
 # the release reads `s["slots"][cls]` at all.
+
+
 @dataclass(frozen=True)
 class CompletionSnapshot:
     """Immutable copy of every slot-derived field a completion's fire steps need.
@@ -2042,7 +2039,7 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # hydra-grill is excluded regardless: it writes a design-concept artifact,
     # not a reflection-source deposit, so it never runs this recipe at all.
     # Best-effort: print to stderr (operator-visible) AND append to the run log.
-    if (skill in REFLECTION_DEPOSIT_SKILLS and
+    if (_obligations_for(skill).reflection_deposit and
             reflection_presence in (
                 REFL_PRESENCE_EMPTY, REFL_PRESENCE_READ_ERROR, REFL_PRESENCE_NO_TASK_ID,
             )):

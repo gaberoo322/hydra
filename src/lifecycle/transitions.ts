@@ -60,6 +60,8 @@ export type GateId =
   | "research-exit"
   | "qa-exit"
   | "qa-verdict"
+  | "unblocked"
+  | "claim-released"
   | "not-yet-implemented";
 
 export interface Transition {
@@ -114,15 +116,15 @@ export const TRANSITIONS: readonly Transition[] = [
   ...rows("ready-for-agent", "agent", "judgment", ["blocked", "needs-triage", "parked"]),
   { from: "ready-for-agent", to: "ready-for-human", firedBy: "agent", gate: "adr5" },
   { from: "ready-for-agent", to: "closed", firedBy: "agent", gate: "close" },
-  { from: "blocked", to: "ready-for-agent", firedBy: "reconcile", gate: "not-yet-implemented" },
+  { from: "blocked", to: "ready-for-agent", firedBy: "reconcile", gate: "unblocked" },
   // A stale blocked issue with an open PR goes straight to review (#4806, #5318 INV-10).
   { from: "blocked", to: "needs-qa", firedBy: "reconcile", gate: "pr-open" },
   ...rows("blocked", "agent", "judgment", ["needs-triage", "parked"]),
   { from: "blocked", to: "closed", firedBy: "agent", gate: "close" },
   // Work in flight.
   { from: "in-progress", to: "needs-qa", firedBy: "reconcile", gate: "pr-open" },
-  { from: "in-progress", to: "needs-dev-resume", firedBy: "reconcile", gate: "not-yet-implemented" },
-  { from: "in-progress", to: "ready-for-agent", firedBy: "reconcile", gate: "not-yet-implemented", cap: "requeue" },
+  { from: "in-progress", to: "needs-dev-resume", firedBy: "reconcile", gate: "claim-released" },
+  { from: "in-progress", to: "ready-for-agent", firedBy: "reconcile", gate: "claim-released", cap: "requeue" },
   { from: "in-progress", to: "parked", firedBy: "cap", gate: "judgment" },
   { from: "in-progress", to: "ready-for-human", firedBy: "agent", gate: "adr5" },
   { from: "in-progress", to: "blocked", firedBy: "agent", gate: "judgment" },

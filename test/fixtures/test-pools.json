@@ -1,5 +1,6 @@
 {
   "parallel": [
+    "test/autopilot-admission.test.mts",
     "test/autopilot-auto-merge-no-self-approve.test.mts",
     "test/autopilot-dev-target-forbidden-ending-preamble.test.mts",
     "test/autopilot-dev-target-preamble.test.mts",
@@ -23,6 +24,7 @@
     "test/hydra-hitl-grill-option-table.test.mts",
     "test/hydra-pr-rebase.test.mts",
     "test/hydra-target-build-fence-skip-steps.test.mts",
+    "test/hydra-target-playbooks-pr-only.test.mts",
     "test/issue-dedup.test.mts",
     "test/logger.test.mts",
     "test/now-console-format.test.mts",
@@ -36,6 +38,7 @@
     "test/playbook-seam-var-guard.test.mts",
     "test/post-commit-status.test.mts",
     "test/qa-change-shape.test.mts",
+    "test/reap-stale-tmp.test.mts",
     "test/reflection-injection.test.mts",
     "test/relative-time-format.test.mts",
     "test/schemas-common.test.mts",
