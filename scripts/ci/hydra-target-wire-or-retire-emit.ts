@@ -59,7 +59,12 @@
 import { existsSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { collectTargetFacts, toRepoRelative } from "../target/print-target-facts.ts";
-import { probeTargetCapabilities, type TargetCapabilities } from "../target/target-capabilities.ts";
+import {
+  LEDGER_GENERATOR_SCRIPT,
+  LEDGER_RELATIVE_PATH,
+  probeTargetCapabilities,
+  type TargetCapabilities,
+} from "../target/target-capabilities.ts";
 import {
   runEmitShell,
   tallyDropReasons,
@@ -84,11 +89,9 @@ export const WIRE_OR_RETIRE_LABEL = "wire-or-retire";
  */
 export const WIRE_OR_RETIRE_TRIAGE_LABEL = "needs-triage";
 
-/** Fixed convention path of the wiring-status ledger, relative to the Target workspace. */
-export const LEDGER_RELATIVE_PATH = "docs/agents/wiring-status.md";
-
-/** The Target-side package.json script that generates the ledger. */
-export const LEDGER_GENERATOR_SCRIPT = "deadcode:ledger";
+// Ledger convention names are owned by target-capabilities.ts (one place for
+// convention names, INV-1); re-exported so existing importers keep working.
+export { LEDGER_RELATIVE_PATH, LEDGER_GENERATOR_SCRIPT };
 
 /** One parsed ledger row. */
 export interface LedgerRow {

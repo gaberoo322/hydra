@@ -43,8 +43,12 @@ journalctl --user -u "$TARGET_SERVICE" --since "30 min ago" --no-pager 2>&1 \
 
 # Database / execution / data-freshness health — TARGET-SPECIFIC (issue #4411,
 # INV-8). This playbook carries no target-specific schema knowledge by design:
-# read the Target's own context docs ($TARGET_CAP_CONTEXT_DOC / $TARGET_CAP_DOMAIN_DOCS,
-# each relative to $TARGET_WS; skip explicitly when empty) for the
+# read the Target's own context docs — guarded, each skip explicit:
+#   if [ -n "$TARGET_CAP_CONTEXT_DOC" ]; then cat "$TARGET_WS/$TARGET_CAP_CONTEXT_DOC"
+#   else echo "context-doc: skipped (Target carries no CONTEXT.md)"; fi
+#   if [ -n "$TARGET_CAP_DOMAIN_DOCS" ]; then cat "$TARGET_WS/$TARGET_CAP_DOMAIN_DOCS"
+#   else echo "domain-docs: skipped (Target carries no docs/agents/domain.md)"; fi
+# for the
 # concrete tables/queries that matter for THIS target (ingestion tables,
 # execution/run tables, connection-pool limits, staleness windows) and run the
 # equivalent of the checks below against them:
@@ -55,7 +59,11 @@ journalctl --user -u "$TARGET_SERVICE" --since "30 min ago" --no-pager 2>&1 \
 # If the target exposes these via its own health endpoint instead of direct DB
 # queries, prefer that — the health route in $TARGET_CAP_HEALTH_ROUTE, when the Target serves one.
 if [ -n "$TARGET_CAP_HEALTH_ROUTE" ]; then
-  curl -s --max-time 10 "$TARGET_WEB_URL$TARGET_CAP_HEALTH_ROUTE" || echo "health route UNREACHABLE"
+  hbody="$(mktemp)"
+  hcode="$(curl -s --max-time 10 -o "$hbody" -w '%{http_code}' "$TARGET_WEB_URL$TARGET_CAP_HEALTH_ROUTE")" || hcode="000"
+  echo "health-route: $TARGET_CAP_HEALTH_ROUTE -> HTTP $hcode"
+  case "$hcode" in 2??) cat "$hbody" ;; *) echo "health route FAILED (HTTP $hcode) — finding" ;; esac
+  rm -f "$hbody"
 else
   echo "health-route probe: skipped (Target serves no discoverable health route)"
 fi

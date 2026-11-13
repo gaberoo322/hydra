@@ -73,7 +73,11 @@ git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" log --
 
 # Per-service post-merge health — the same signal that fired the watcher.
 if [ -n "$TARGET_CAP_HEALTH_ROUTE" ]; then
-  curl -s --max-time 10 "$TARGET_WEB_URL$TARGET_CAP_HEALTH_ROUTE" | python3 -m json.tool | head -40
+  hbody="$(mktemp)"
+  hcode="$(curl -s --max-time 10 -o "$hbody" -w '%{http_code}' "$TARGET_WEB_URL$TARGET_CAP_HEALTH_ROUTE")" || hcode="000"
+  echo "health-route: $TARGET_CAP_HEALTH_ROUTE -> HTTP $hcode"
+  case "$hcode" in 2??) python3 -m json.tool < "$hbody" | head -40 ;; *) echo "health route FAILED (HTTP $hcode)" ;; esac
+  rm -f "$hbody"
 else
   echo "health probe: skipped (Target serves no discoverable health route)"
 fi
@@ -135,14 +139,25 @@ gh run view <run_id> --repo "$TARGET_GH_REPO" --log-failed 2>&1 | grep -iE "erro
 # Target-specific root-cause families (external API contract drift, domain-data
 # inconsistency, ingestion freshness-window races) — read the Target's context doc ($TARGET_CAP_CONTEXT_DOC, skip explicitly when empty)
 # for what these mean concretely on this target before grepping for them.
+if [ -n "$TARGET_CAP_CONTEXT_DOC" ]; then sed -n '1,80p' "$TARGET_WS/$TARGET_CAP_CONTEXT_DOC"
+else echo "context-doc: skipped (Target carries no CONTEXT.md)"; fi
 if [ -n "$TARGET_CAP_HEALTH_ROUTE" ]; then
-  curl -s --max-time 10 "$TARGET_WEB_URL$TARGET_CAP_HEALTH_ROUTE" | python3 -c "
+  hbody="$(mktemp)"
+  hcode="$(curl -s --max-time 10 -o "$hbody" -w '%{http_code}' "$TARGET_WEB_URL$TARGET_CAP_HEALTH_ROUTE")" || hcode="000"
+  echo "health-route: $TARGET_CAP_HEALTH_ROUTE -> HTTP $hcode"
+  case "$hcode" in
+    2??) python3 -c "
 import json,sys
-d=json.load(sys.stdin)
-for name,svc in (d.get('services') or {}).items():
+d=json.load(open(sys.argv[1]))
+svcs=d.get('services') or {}
+if not svcs: print('no per-service map on '+sys.argv[2])
+for name,svc in svcs.items():
     st=svc.get('status','?')
     if st!='ok': print(f'{name}: {st} — {svc.get(\"detail\",\"\")[:80]}')
-"
+" "$hbody" "$TARGET_CAP_HEALTH_ROUTE" ;;
+    *) echo "service-health drilldown: health route FAILED (HTTP $hcode)" ;;
+  esac
+  rm -f "$hbody"
 else
   echo "service-health drilldown: skipped (Target serves no discoverable health route)"
 fi

@@ -26,15 +26,22 @@ relative to `$TARGET_WS`) and, for the wire-or-retire phase,
 branches on its own capability and prints an explicit skip when it is absent:
 
 ```bash
+DEMOTE_PHASE=1; WIRE_PHASE=1
 if [ -z "$TARGET_CAP_DEADCODE_CHECK" ] || [ -z "$TARGET_CAP_DEADCODE_UPDATE" ]; then
+  DEMOTE_PHASE=0
   echo "demote-emit phase: skipped (Target declares no dead-code check/baseline-update script)"
 fi
+if [ -z "$TARGET_CAP_KNIP_CONFIG" ]; then
+  DEMOTE_PHASE=0
+  echo "knip: skipped (Target carries no knip config)"
+fi
 if [ -z "$TARGET_CAP_WIRING_LEDGER" ] && [ -z "$TARGET_CAP_WIRING_LEDGER_GENERATOR" ]; then
+  WIRE_PHASE=0
   echo "wire-or-retire phase: skipped (Target declares no wiring ledger or generator)"
 fi
 ```
 
-A skipped phase files nothing and the run continues with the other phase; when
+Run Steps 1-2 only when `DEMOTE_PHASE=1` and section 3.5 only when `WIRE_PHASE=1`. A skipped phase files nothing and the run continues with the other phase; when
 both are skipped the run reports both lines and exits cleanly.
 
 ## How this differs from `/hydra-cleanup` (the orch sweep)
@@ -93,14 +100,18 @@ git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" merge-
   || { echo "hydra-target-cleanup: working tree not fast-forwardable onto origin/main — aborting (stale/diverged base)"; exit 1; }
 ```
 
-Then run knip in the Target's app workspace (knip is a Target devDependency; `knip.json` in `$TARGET_APP_DIR` is the committed config):
+Then run knip in the Target's app workspace (knip is a Target devDependency; its committed config is `$TARGET_CAP_KNIP_CONFIG`, relative to `$TARGET_WS` — when empty the knip step is a real skip, not a run against defaults):
 
 ```bash
 _target_seam_sh="$(cd "$HOME/hydra" && npx tsx scripts/target/print-target-facts.ts --sh)" \
   || { echo "hydra-target-cleanup: target seam unresolved — aborting" >&2; exit 1; }
 eval "$_target_seam_sh"; unset _target_seam_sh
-cd "${TARGET_APP_DIR:?unset - re-run the seam preamble in this Bash call}" \
-  && npx knip --reporter json --no-exit-code > /tmp/knip-target-report.json 2>/dev/null || true
+if [ -n "$TARGET_CAP_KNIP_CONFIG" ]; then
+  cd "${TARGET_APP_DIR:?unset - re-run the seam preamble in this Bash call}" \
+    && npx knip --reporter json --no-exit-code > /tmp/knip-target-report.json 2>/dev/null || true
+else
+  echo "knip: skipped (Target carries no knip config) — demote-emit phase files nothing"
+fi
 ```
 
 If knip is not installed, print a one-line hint (`npm ci` in `$TARGET_APP_DIR`) and exit cleanly — do NOT fall back to a heuristic scan.
@@ -181,7 +192,7 @@ dropped 180: within the 45-day wiring grace period (...)
 /hydra-target-cleanup --apply    # files ready-for-agent backlog items
 ```
 
-Expected: demote-class findings batch one-item-per-file with the symbol-led title; delete-class/whole-file/young/unknown findings appear only in the drop summary; re-running `--apply` files nothing new for paths already open (file-keyed dedup, plus `addToBacklog`'s exact-title dedup as belt-and-braces); a saturated board (>10 open `cleanup-scan` items) emits nothing. Pinned in `test/hydra-target-cleanup-emit.test.mts`.
+Expected: demote-class findings batch one-item-per-file with the symbol-led title; delete-class/whole-file/young/unknown findings appear only in the drop summary; re-running `--apply` files nothing new for paths already open (file-keyed dedup); a saturated board (>10 open `cleanup-scan` items) emits nothing. Pinned in `test/hydra-target-cleanup-emit.test.mts`.
 
 ## Files
 

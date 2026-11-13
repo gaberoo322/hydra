@@ -170,6 +170,7 @@ screenshot path. Capture **before** (base = `origin/main`) and **after**
 ```bash
 # In the PR's Target worktree. Non-UI PRs never reach this block.
 AFFECTED=$(...)   # routes from the mapping above (or the full nav set for a cross-cutting change)
+[ -n "$TARGET_CAP_E2E_SMOKE" ] || { echo "visual-qa: skipped (Target declares no end-to-end smoke script)"; exit 0; }
 
 # BEFORE — base state
 git stash --include-untracked >/dev/null 2>&1 || true   # or check out origin/main in a scratch worktree

@@ -39,6 +39,8 @@ export interface ProbeRoots {
 interface ProbeContext extends ProbeRoots {
   /** The app package.json `scripts` map, or `null` when unreadable/malformed. */
   scripts: Record<string, unknown> | null;
+  /** True when the app package.json carries a top-level `knip` key. */
+  knipKey: boolean;
 }
 
 interface CapabilityProbe {
@@ -77,13 +79,32 @@ function relTo(base: string, abs: string): string {
   return abs.startsWith(base + "/") ? abs.slice(base.length + 1) : abs;
 }
 
-/** Health route candidates, most specific first: [route file, served route]. */
+/** Fixed convention path of the wiring-status ledger, relative to the Target workspace. */
+export const LEDGER_RELATIVE_PATH = "docs/agents/wiring-status.md";
+
+/** The Target-side package.json script that generates the ledger. */
+export const LEDGER_GENERATOR_SCRIPT = "deadcode:ledger";
+
+/** Health route candidates, most specific first: [route directory, served route]. */
 const HEALTH_ROUTES: Array<[string, string]> = [
-  ["src/app/api/health/full/route.ts", "/api/health/full"],
-  ["app/api/health/full/route.ts", "/api/health/full"],
-  ["src/app/api/health/route.ts", "/api/health"],
-  ["app/api/health/route.ts", "/api/health"],
+  ["src/app/api/health/full", "/api/health/full"],
+  ["app/api/health/full", "/api/health/full"],
+  ["src/app/api/health", "/api/health"],
+  ["app/api/health", "/api/health"],
 ];
+
+/** A `route.<ext>` handler file directly inside `dir` (any JS/TS extension). */
+function hasRouteHandler(dir: string): boolean {
+  try {
+    return readdirSync(dir).some((f) => /^route\.[cm]?[jt]sx?$/.test(f));
+  } catch {
+    /* intentional: an unreadable route directory is "no positive evidence" */
+    return false;
+  }
+}
+
+/** Knip config file names (a `knip` key in package.json also counts). */
+const KNIP_CONFIG_FILES = ["knip.json", "knip.jsonc", ".knip.json", ".knip.jsonc", "knip.ts", "knip.config.ts"];
 
 /**
  * THE probe table — the only place convention names are spelled. Order is the
@@ -123,6 +144,15 @@ export const CAPABILITY_PROBES: readonly CapabilityProbe[] = [
     probe: scriptProbe("deadcode:check", "dead-code check"),
   },
   {
+    key: "knipConfig",
+    shVar: "TARGET_CAP_KNIP_CONFIG",
+    probe: (ctx) => {
+      const hit = firstExisting([ctx.appDir, ctx.workspace], KNIP_CONFIG_FILES);
+      if (hit) return present(relTo(ctx.workspace, hit));
+      return ctx.knipKey ? present("package.json") : absent("Target carries no knip config");
+    },
+  },
+  {
     key: "deadcodeUpdate",
     shVar: "TARGET_CAP_DEADCODE_UPDATE",
     probe: scriptProbe("deadcode:update-baseline", "dead-code baseline-update"),
@@ -139,21 +169,22 @@ export const CAPABILITY_PROBES: readonly CapabilityProbe[] = [
     key: "wiringLedger",
     shVar: "TARGET_CAP_WIRING_LEDGER",
     probe: (ctx) => {
-      const path = join(ctx.workspace, "docs", "agents", "wiring-status.md");
-      return existsSync(path) ? present("docs/agents/wiring-status.md") : absent("Target has no wiring-status ledger");
+      return existsSync(join(ctx.workspace, LEDGER_RELATIVE_PATH))
+        ? present(LEDGER_RELATIVE_PATH)
+        : absent("Target has no wiring-status ledger");
     },
   },
   {
     key: "wiringLedgerGenerator",
     shVar: "TARGET_CAP_WIRING_LEDGER_GENERATOR",
-    probe: scriptProbe("deadcode:ledger", "wiring-ledger generator"),
+    probe: scriptProbe(LEDGER_GENERATOR_SCRIPT, "wiring-ledger generator"),
   },
   {
     key: "healthRoute",
     shVar: "TARGET_CAP_HEALTH_ROUTE",
     probe: (ctx) => {
-      for (const [file, route] of HEALTH_ROUTES) {
-        if (existsSync(join(ctx.appDir, file))) return present(route);
+      for (const [dir, route] of HEALTH_ROUTES) {
+        if (hasRouteHandler(join(ctx.appDir, dir))) return present(route);
       }
       return absent("Target serves no discoverable health route");
     },
@@ -187,21 +218,25 @@ export const CAPABILITY_PROBES: readonly CapabilityProbe[] = [
 /** The `capabilities` object: one {@link Capability} per probe key. */
 export type TargetCapabilities = Record<string, Capability>;
 
-function readScripts(appDir: string): Record<string, unknown> | null {
+function readManifest(appDir: string): { scripts: Record<string, unknown> | null; knipKey: boolean } {
   try {
     const pkg = JSON.parse(readFileSync(join(appDir, "package.json"), "utf8")) as {
       scripts?: Record<string, unknown>;
+      knip?: unknown;
     };
-    return pkg && typeof pkg.scripts === "object" && pkg.scripts ? pkg.scripts : null;
+    return {
+      scripts: pkg && typeof pkg.scripts === "object" && pkg.scripts ? pkg.scripts : null,
+      knipKey: !!pkg && typeof pkg.knip === "object" && pkg.knip !== null,
+    };
   } catch {
     /* intentional: a missing/malformed package.json is "no positive evidence" for every script probe */
-    return null;
+    return { scripts: null, knipKey: false };
   }
 }
 
 /** Probe every capability against the Target roots. Never throws. */
 export function probeTargetCapabilities(roots: ProbeRoots): TargetCapabilities {
-  const ctx: ProbeContext = { ...roots, scripts: readScripts(roots.appDir) };
+  const ctx: ProbeContext = { ...roots, ...readManifest(roots.appDir) };
   const out: TargetCapabilities = {};
   for (const p of CAPABILITY_PROBES) {
     try {
@@ -215,7 +250,7 @@ export function probeTargetCapabilities(roots: ProbeRoots): TargetCapabilities {
 }
 
 /** POSIX-safe single-quote shell escaping. */
-function shQuote(value: string): string {
+export function shQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 

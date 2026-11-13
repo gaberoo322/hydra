@@ -48,6 +48,7 @@ an explicit, logged skip, never a silent `2>/dev/null || true`:
 
 - `$TARGET_CAP_E2E_SMOKE` / `$TARGET_CAP_ROUTE_SMOKE_SPEC` / `$TARGET_CAP_DESIGN_LANGUAGE_ADR` — end-to-end smoke script name, route-smoke spec path, design-language ADR path (visual QA needs all three)
 - `$TARGET_CAP_DEADCODE_CHECK` / `$TARGET_CAP_DEADCODE_UPDATE` — the Target's dead-code check / baseline-update npm script names; `$TARGET_CAP_DEADCODE_BASELINE` — the baseline file path, relative to `$TARGET_WS`
+- `$TARGET_CAP_KNIP_CONFIG` — the Target's knip config (file or `package.json` key), relative to `$TARGET_WS`; the dead-code scan needs it
 - `$TARGET_CAP_WIRING_LEDGER` / `$TARGET_CAP_WIRING_LEDGER_GENERATOR` — wiring-status ledger path (relative to `$TARGET_WS`) and its generator script name
 - `$TARGET_CAP_HEALTH_ROUTE` — the health route the Target serves (probe `$TARGET_WEB_URL$TARGET_CAP_HEALTH_ROUTE`)
 - `$TARGET_CAP_AGENT_INSTRUCTIONS` / `$TARGET_CAP_DOMAIN_DOCS` / `$TARGET_CAP_CONTEXT_DOC` — the Target's own agent-instruction file, domain doc, and glossary (relative to `$TARGET_WS`)

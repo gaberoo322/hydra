@@ -47,6 +47,7 @@ before(() => {
     }),
   );
   write(full, "e2e/route-smoke.spec.ts");
+  write(full, "knip.json", "{}");
   write(full, "docs/adr/0005-design-language.md");
   write(full, "deadcode-baseline.json");
   write(full, "docs/agents/wiring-status.md");
@@ -83,6 +84,52 @@ describe("probeTargetCapabilities", () => {
   test("probing a nonexistent workspace never throws and reports everything absent", () => {
     const caps = probeTargetCapabilities({ workspace: join(tmp, "nope"), appDir: join(tmp, "nope") });
     assert.ok(Object.values(caps).every((c) => c.ok === false));
+  });
+
+  test("knip config: a config file or a package.json knip key counts; neither is absent", () => {
+    const viaFile = join(tmp, "knip-file");
+    write(viaFile, "package.json", "{}");
+    write(viaFile, "knip.json", "{}");
+    assert.deepEqual(probeTargetCapabilities({ workspace: viaFile, appDir: viaFile }).knipConfig, {
+      ok: true,
+      value: "knip.json",
+    });
+    const viaKey = join(tmp, "knip-key");
+    write(viaKey, "package.json", JSON.stringify({ knip: { entry: [] } }));
+    assert.deepEqual(probeTargetCapabilities({ workspace: viaKey, appDir: viaKey }).knipConfig, {
+      ok: true,
+      value: "package.json",
+    });
+    // Sibling shape: a bare Target (no file, no key) must keep reporting absent.
+    assert.equal(probeTargetCapabilities({ workspace: bare, appDir: bare }).knipConfig.ok, false);
+  });
+
+  test("health route: any route.<ext> handler counts and the most specific route wins", () => {
+    const tsx = join(tmp, "health-tsx");
+    write(tsx, "package.json", "{}");
+    write(tsx, "app/api/health/route.js");
+    assert.deepEqual(probeTargetCapabilities({ workspace: tsx, appDir: tsx }).healthRoute, {
+      ok: true,
+      value: "/api/health",
+    });
+    write(tsx, "src/app/api/health/full/route.tsx");
+    assert.deepEqual(probeTargetCapabilities({ workspace: tsx, appDir: tsx }).healthRoute, {
+      ok: true,
+      value: "/api/health/full",
+    });
+    // Sibling shape: a non-route file in the health dir is not a served route.
+    const noRoute = join(tmp, "health-none");
+    write(noRoute, "package.json", "{}");
+    write(noRoute, "src/app/api/health/README.md");
+    assert.equal(probeTargetCapabilities({ workspace: noRoute, appDir: noRoute }).healthRoute.ok, false);
+  });
+
+  test("malformed package.json reports every script probe absent without throwing", () => {
+    const bad = join(tmp, "malformed");
+    write(bad, "package.json", "{ not json");
+    const caps = probeTargetCapabilities({ workspace: bad, appDir: bad });
+    assert.equal(caps.e2eSmoke.ok, false);
+    assert.equal(caps.deadcodeCheck.ok, false);
   });
 
   test("a nested appSubdir resolves package scripts and the baseline against the app dir", () => {

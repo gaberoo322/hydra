@@ -78,6 +78,7 @@ import { loadRiskSurface, resolveManifestRoot } from "./target-risk-surface.ts";
 import {
   probeTargetCapabilities,
   renderCapabilityShell,
+  shQuote,
   type TargetCapabilities,
 } from "./target-capabilities.ts";
 
@@ -134,11 +135,6 @@ export function collectTargetFacts(manifestRoot: string = resolveManifestRoot())
   };
 }
 
-/** POSIX-safe single-quote shell escaping: `it's` → `'it'\''s'`. */
-function shQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
 /**
  * Render the `--sh` mode output: one `export` statement per fact, plus
  * `TARGET_APP_DIR` (workspace joined with appSubdir) and
@@ -167,14 +163,12 @@ export function renderShell(facts: TargetFacts): string | null {
 async function main(): Promise<number> {
   const shMode = process.argv.slice(2).includes("--sh");
   const facts = collectTargetFacts();
-  const capabilities: TargetCapabilities | null = facts.manifest.ok
-    ? probeTargetCapabilities({
-        workspace: facts.workspace,
-        appDir: facts.manifest.appSubdir
-          ? `${facts.workspace}/${facts.manifest.appSubdir}`
-          : facts.workspace,
-      })
-    : null;
+  const appDir =
+    facts.manifest.ok && facts.manifest.appSubdir
+      ? `${facts.workspace}/${facts.manifest.appSubdir}`
+      : facts.workspace;
+  // Manifest failure degrades to probing the bare workspace (positive-evidence-only).
+  const capabilities: TargetCapabilities = probeTargetCapabilities({ workspace: facts.workspace, appDir });
 
   if (shMode) {
     const rendered = renderShell(facts);
@@ -185,12 +179,12 @@ async function main(): Promise<number> {
       );
       return 1;
     }
-    const capShell = capabilities ? "\n" + renderCapabilityShell(capabilities) : "";
+    const capShell = "\n" + renderCapabilityShell(capabilities);
     process.stdout.write(rendered + capShell + "\n");
     return 0;
   }
 
-  process.stdout.write(JSON.stringify(capabilities ? { ...facts, capabilities } : facts) + "\n");
+  process.stdout.write(JSON.stringify({ ...facts, capabilities }) + "\n");
   return facts.manifest.ok ? 0 : 1;
 }
 
