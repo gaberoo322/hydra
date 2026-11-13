@@ -22,6 +22,10 @@ If a co-located `CONTEXT.md` doesn't exist yet, **proceed silently** — don't f
 
 When your output names a domain concept (issue title, refactor proposal, hypothesis, test name), use the term exactly as the glossary defines it; don't drift to the synonyms each entry's `_Avoid_` line lists. If the concept isn't in any glossary, that's a signal — either you're inventing language the project doesn't use (reconsider), or there's a real gap (resolve with `/grill-with-docs`).
 
+## Writing or editing a playbook
+
+Follow the `STD-PLAYBOOK-*` rules in [`../../CODING_STANDARDS.md`](../../CODING_STANDARDS.md): point at a fact's home and do not restate it, keep logic in tested scripts, describe only current behaviour, give a shared rule one fragment, and read the Target's shape from the Target facts seam.
+
 ## Flag ADR conflicts
 
 If your output contradicts an existing ADR, surface it explicitly rather than silently overriding:

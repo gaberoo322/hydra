@@ -53,6 +53,20 @@ Edit the fragment here, then run `scripts/sync-skills.sh` (or let the deploy /
 post-merge hook do it). **Never hand-edit a generated `SKILL.md`** — it carries
 a DO-NOT-EDIT banner and will be overwritten on the next sync.
 
+## Authoring standard and vocabulary ratchet (issue #5500)
+
+The rules for writing a playbook or fragment are the `STD-PLAYBOOK-*` entries in
+[`CODING_STANDARDS.md`](../../../CODING_STANDARDS.md). Their mechanical part is
+counted by `test/playbook-vocabulary-ratchet.test.mts` in the required `npm test`
+suite, per file and per shape: status and history phrases, file-and-line-number
+cites, hardcoded Target names, and the retired terms `CONTEXT.md` lists under
+`_Avoid_`. A count above its baseline fails and names the file, line and phrase;
+rewrite the sentence, never raise the baseline. A count below its baseline fails
+too, until `npx tsx scripts/ci/playbook-vocabulary-ratchet.ts --write-baseline`
+lowers it. A provenance note that starts its line with `Historical:` is exempt on
+that line only: write the note on one line, because the continuation lines of a
+hard-wrapped note are counted.
+
 ## Reference check (issue #5499)
 
 Every playbook and fragment is scanned by `test/playbook-reference-check.test.mts`,

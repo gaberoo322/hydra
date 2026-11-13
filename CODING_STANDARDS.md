@@ -125,3 +125,37 @@ enforced-by: reviewer
 Grow an existing module behind its current interface before adding a sibling module or new exports.
 
 enforced-by: reviewer
+
+## Playbooks
+
+Authoring standard for `docs/operator-playbooks/` and its fragments, the source of every generated skill. The mechanical part is counted per file by a shrink-only baseline; a line starting `Historical:` is exempt (that line only, so keep the note on one line).
+
+### STD-PLAYBOOK-POINT-DONT-RESTATE
+
+Name where a fact lives (the dispatch-class taxonomy, a script's help output, the tier endpoint) and read it at run time. Do not copy numbers, enums, key shapes, symbol names or line-number cites into prose.
+
+enforced-by: reviewer, scripts/ci/playbook-vocabulary-ratchet.ts
+
+### STD-PLAYBOOK-LOGIC-IN-SCRIPTS
+
+Executable logic lives in a tested script. The playbook says when and why to run it.
+
+enforced-by: reviewer
+
+### STD-PLAYBOOK-CURRENT-BEHAVIOUR
+
+Describe only what happens now: no rollout phase, no status or history phrase, no retired glossary term, no "retired" note on a step that still runs. History belongs in git and the ADRs.
+
+enforced-by: scripts/ci/playbook-vocabulary-ratchet.ts
+
+### STD-PLAYBOOK-ONE-HOME
+
+A rule two playbooks share lives in one fragment.
+
+enforced-by: reviewer
+
+### STD-PLAYBOOK-TARGET-SEAM
+
+Never assume the Target's name, checkout path or service. Read them from the Target facts seam.
+
+enforced-by: scripts/ci/playbook-vocabulary-ratchet.ts
