@@ -40,6 +40,7 @@ gh issue list --repo gaberoo322/hydra --state open --limit 200 \
 docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:work-queue
 
 # Target commits -- resolved via the Target seam, never a literal checkout path.
+unset TARGET_WS TARGET_APP_DIR
 eval "$(cd ~/hydra && npx tsx scripts/target/print-target-facts.ts --sh)"
 if [ -n "${TARGET_WS:-}" ]; then git -C "${TARGET_WS:?}" log --oneline --since="24 hours ago"; else echo "Target unresolved -- skipping Target commits"; fi
 cd ~/hydra && git log --oneline --since="24 hours ago"

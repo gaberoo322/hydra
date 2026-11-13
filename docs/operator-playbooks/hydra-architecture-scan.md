@@ -103,7 +103,7 @@ Name the deepened module after a real domain concept from `CONTEXT.md`, not a co
 
 Drop or re-route a candidate before it becomes an issue when ANY of:
 
-- It touches the **Verifier Core** (the six `VERIFIER_CORE_PATHS` files in `src/untouchable.ts`, ADR-0015) as its *primary* change — **re-route to the park tier, do NOT drop** (#4027). Those are on ADR-0005's operator-escalation list (T4 / Verifier-Core changes) and an architecture-scan issue must not steer an agent at them — but that is precisely an idea only the operator can action, so the candidate parks as `hitl-grill` (step 4c) instead of vanishing into a friction note nothing reads. The reasoning for not filing it as agent work is unchanged; only the disposal changed. A candidate that was **already dropped as `Speculative`** never reaches this re-route: the strength routing in step 4 evaluates the Speculative drop BEFORE the Verifier-Core park rule, so a park never rescues an idea the model itself rated not-worth-pursuing.
+- It touches the **Verifier Core** (the `VERIFIER_CORE_PATHS` files in `src/untouchable.ts`, ADR-0015) as its *primary* change — **re-route to the park tier, do NOT drop** (#4027). Those are on ADR-0005's operator-escalation list (T4 / Verifier-Core changes) and an architecture-scan issue must not steer an agent at them — but that is precisely an idea only the operator can action, so the candidate parks as `hitl-grill` (step 4c) instead of vanishing into a friction note nothing reads. The reasoning for not filing it as agent work is unchanged; only the disposal changed. A candidate that was **already dropped as `Speculative`** never reaches this re-route: the strength routing in step 4 evaluates the Speculative drop BEFORE the Verifier-Core park rule, so a park never rescues an idea the model itself rated not-worth-pursuing.
 - It duplicates an already-tracked issue in the **shared backfill dedup baseline** (open issues across EVERY backfill label set + issues closed within the last 7 days — NOT just open `architecture-scan` issues). Re-filing the same deepening candidate every idle tick is the exact failure `hydra-tool-scout`'s seen-list guards against; here the lightweight equivalent is the deterministic title/scope-overlap helper below. **This is the load-bearing collision guard for issue #2554:** `hydra-discover` and `hydra-architecture-scan` BOTH fire on the unified `orch_backfill_idle` signal (both in `BACKFILL_SIGNAL_CLASSES`, decide.py:329). The one-per-turn stagger stops same-turn co-fire, but their independent 1h cooldowns + the `BACKFILL_STARVATION_FLOOR` let both dispatch within the same idle HOUR — so an architecture-scan candidate MUST dedup against discover's just-filed `needs-triage` issues (and cleanup's `cleanup-scan` issues), not only against other `architecture-scan` issues, or the same underlying gap gets double-filed.
 
   ```bash
@@ -252,7 +252,7 @@ will run.>
 - src/tier-classifier.ts
 - src/untouchable.ts
 
-<the Verifier Core (the six VERIFIER_CORE_PATHS files in src/untouchable.ts) + anything this
+<the Verifier Core (the VERIFIER_CORE_PATHS files in src/untouchable.ts) + anything this
 candidate must not touch — one repo-relative path per bullet line, never a
 comma-separated list or prose; see the scope-format rule below>
 
@@ -291,7 +291,7 @@ This is the recovery the gamma slice (#961) adds: dead code the architecture pas
 Not every surviving candidate should become agent-steering work. Two feeders route here — both already exist inside the skill and were previously **discarded**; neither requires new model judgment:
 
 1. **`Worth exploring` candidates** (the strength routing above) — real enough to keep, too soft to file as `needs-triage` agent work without the operator's judgment. The vendored base already computes this rating; the overlay had been throwing it away with the excised HTML report.
-2. **Verifier-Core-primary candidates** (the step-3 re-route) — `Strong` or `Worth exploring` ideas whose *primary* change touches the six `VERIFIER_CORE_PATHS` files in `src/untouchable.ts` (ADR-0015). An architecture-scan issue must never steer an agent at the Verifier Core (ADR-0005 operator-escalation list), but the idea is exactly the kind only the operator can action — so it parks instead of vanishing into a friction note. A candidate already dropped as `Speculative`, a duplicate, or a pass-through never reaches this rule (those drops are terminal and evaluated first).
+2. **Verifier-Core-primary candidates** (the step-3 re-route) — `Strong` or `Worth exploring` ideas whose *primary* change touches the `VERIFIER_CORE_PATHS` files in `src/untouchable.ts` (ADR-0015). An architecture-scan issue must never steer an agent at the Verifier Core (ADR-0005 operator-escalation list), but the idea is exactly the kind only the operator can action — so it parks instead of vanishing into a friction note. A candidate already dropped as `Speculative`, a duplicate, or a pass-through never reaches this rule (those drops are terminal and evaluated first).
 
 This is the pilot feeder for the `hitl-grill` inbox (issue #4025): **one** producer, to prove the inbox gets consumed before six other skill contracts are amended.
 
@@ -323,7 +323,7 @@ On success, **append the parked title to `$BASELINE_TITLES`** so later candidate
 # hitl-grill: <candidate title>
 
 > Parked by `/hydra-architecture-scan` on <ISO date> against the Orchestrator (~/hydra).
-> Reason: <Worth exploring | primary change touches the Verifier Core (the six VERIFIER_CORE_PATHS files in src/untouchable.ts)>.
+> Reason: <Worth exploring | primary change touches the Verifier Core (the VERIFIER_CORE_PATHS files in src/untouchable.ts)>.
 > `hitl-grill` is a terminal park state: no agent actions this — the operator grills it into real work or dismisses it.
 
 ## Problem
