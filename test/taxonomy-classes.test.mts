@@ -71,6 +71,7 @@ const DECIDE_PY = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
 const TURN_SNAPSHOT_PY = join(REPO_ROOT, "scripts", "autopilot", "turn_snapshot.py");
 const RUN_LEDGER_PY = join(REPO_ROOT, "scripts", "autopilot", "run_ledger.py");
 const TAXONOMY_PY = join(REPO_ROOT, "scripts", "autopilot", "taxonomy.py");
+const ADMISSION_PY = join(REPO_ROOT, "scripts", "autopilot", "admission.py");
 const REAP_PY = join(REPO_ROOT, "scripts", "autopilot", "reap.py");
 
 // The exact alphabet decide.py embedded before slice #1670 — order matters
@@ -519,6 +520,8 @@ function copyBrainInto(dir: string) {
   copyFileSync(RUN_LEDGER_PY, join(dir, "run_ledger.py"));
   // The one classes.json loader (#5472) — decide.py, run_ledger.py import it.
   copyFileSync(TAXONOMY_PY, join(dir, "taxonomy.py"));
+  // The pure dispatch-admission verdict (#5478) — decide.py imports it.
+  copyFileSync(ADMISSION_PY, join(dir, "admission.py"));
 }
 
 /** Import decide.py from `dir` (a tempdir copy) and return the spawn result. */
