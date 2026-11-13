@@ -31,17 +31,13 @@ above, because each is actively wrong for an AFK dispatch:
 - **Base step 5, "Publish…"** — upstream publishes prose bodies itself and says
   to apply `ready-for-agent` to every ticket. Both are wrong here (below).
 
-## Why the publish step must be superseded, not layered on
+## Child labelling rule: follow the renderer, not upstream
 
-**Hydra's autopilot is dependency-blind.** Anchor selection does not read
-blocking edges, so a `ready-for-agent` label on a *blocked* slice makes autopilot
-grab work whose prerequisites are unmet. Upstream's "apply `ready-for-agent`
-unless instructed otherwise" is therefore a defect in this context.
-
-**Label only the slices that are actually unblocked** — in practice slice 1. Every
-slice with a `dependsOn` edge is filed WITHOUT `ready-for-agent`; the operator (or
-a future epic-driver) promotes each as its blocker merges. This is the label-gated
-cadence epic #3988 itself uses.
+**Child labelling rule.** Upstream's "apply `ready-for-agent` to every ticket" is
+right for the Orchestrator board (orch children are born `ready-for-agent`), but
+Target children with dependencies are filed `blocked`. The authoritative rule is
+`childInitialState(slice, scope)` in `scripts/ci/hydra-prd-render.ts`: follow the
+renderer rather than applying upstream's blanket label.
 
 ## Publish through the renderer
 
@@ -68,9 +64,10 @@ deterministic and unit-tested (`test/hydra-prd-template.test.mts`).
    lifecycle state is data (`parentInitialState()` / `childInitialState(slice)`)
    written in the same step through the seam — `npx tsx scripts/lifecycle.ts
    advance <N> needs-triage --actor hydra-tickets` (from none, gate-free;
-   tolerate `illegal-transition` with observed state `needs-triage`), then for an
-   unblocked child ONLY `advance <N> ready-for-agent --reason scoped --rationale
-   "<epic title> slice <i>" --actor hydra-tickets`. A non-zero exit is otherwise
+   tolerate `illegal-transition` with observed state `needs-triage`), then for every
+   child, `advance <N> <childInitialState(slice, scope)> --reason scoped --rationale
+   "<epic title> slice <i>" --actor hydra-tickets` (`ready-for-agent` for orch
+   scope; see the child labelling rule above). A non-zero exit is otherwise
    final; never a direct state-label write (ADR-0047 D3/D4).
 5. **Stamp the tier** — `Expected tier: N` per child from `GET /api/tier`, the
    single tier authority. Never self-classify by path.

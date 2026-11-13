@@ -24,6 +24,7 @@
     "test/hydra-hitl-grill-option-table.test.mts",
     "test/hydra-pr-rebase.test.mts",
     "test/hydra-target-build-fence-skip-steps.test.mts",
+    "test/hydra-target-playbooks-pr-only.test.mts",
     "test/issue-dedup.test.mts",
     "test/logger.test.mts",
     "test/now-console-format.test.mts",
@@ -50,7 +51,6 @@
   ],
   "serialPinned": {
     "test/agent-dispatch-prompt-guard.test.mts": "uses a fixed /tmp path (clobbers under concurrency)",
-    "test/autopilot-recover-stale.test.mts": "names a script (gh-stub.py) the scan cannot resolve - treated as unsafe",
     "test/build-spritesheet.test.mts": "runs `git worktree` operations against a shared repo (index.lock contention)",
     "test/dashboard-routes.test.mts": "names a script (../dashboard/scripts/parse-control-plane.mjs) the scan cannot resolve - treated as unsafe",
     "test/derive-version-bump.test.mts": "binds or dials a fixed port",
@@ -63,7 +63,6 @@
     "test/hydra-review-stalled-pr-bucket.test.mts": "binds or dials a fixed port",
     "test/process-probe.test.mts": "runs `git worktree` operations against a shared repo (index.lock contention)",
     "test/reap-stale-test-procs.test.mts": "binds or dials a fixed port",
-    "test/recover-stale.test.mts": "names a script (gh-stub.py) the scan cannot resolve - treated as unsafe",
     "test/schemas-dispatches.test.mts": "uses /dev/shm (shared between concurrent pools)",
     "test/skill-prune-contract-token-parity.test.mts": "runs `git worktree` operations against a shared repo (index.lock contention)",
     "test/target-config.test.mts": "binds or dials a fixed port",

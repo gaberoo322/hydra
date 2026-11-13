@@ -452,3 +452,50 @@ describe("github/pr-refs (issue #4683)", () => {
     );
   });
 });
+
+describe("pr-refs.py --pairs (issue #5318 INV-10)", () => {
+  function pyPairs(prs: ReadonlyArray<Record<string, unknown>>): string {
+    const r = spawnSync("python3", [PY_SCRIPT, "--pairs"], { input: JSON.stringify(prs), encoding: "utf-8" });
+    assert.equal(r.status, 0, `pr-refs.py --pairs exited non-zero: ${r.stderr}`);
+    return r.stdout;
+  }
+
+  test("emits one `<issue> <pr>` line per referenced issue, sorted by issue, first PR wins", () => {
+    const out = pyPairs([
+      { number: 9, headRefName: "issue-5-x", body: "Closes #7" },
+      { number: 10, headRefName: "z", body: "Refs #5" },
+    ]);
+    assert.equal(out, "5 9\n7 9\n");
+  });
+
+  test("uses the SAME union predicate as the zero-arg form (branch, closing and Refs refs all pair)", () => {
+    const prs = [
+      { number: 1, headRefName: "issue-11-a", body: "" },
+      { number: 2, headRefName: "b", body: "Fixes #12" },
+      { number: 3, headRefName: "c", body: "Refs #13" },
+    ];
+    const issues = spawnSync("python3", [PY_SCRIPT], { input: JSON.stringify(prs), encoding: "utf-8" }).stdout.trim().split(" ");
+    const pairIssues = pyPairs(prs).trim().split("\n").map((l) => l.split(" ")[0]);
+    assert.deepEqual(pairIssues, issues);
+  });
+
+  test("a row without an integer number is skipped; unparsable input prints nothing and exits 0", () => {
+    assert.equal(pyPairs([{ headRefName: "issue-5-x", body: "" }]), "");
+    const r = spawnSync("python3", [PY_SCRIPT, "--pairs"], { input: "not json", encoding: "utf-8" });
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout, "");
+  });
+
+  test("closing_pr_number is negation-aware and returns the first closing PR", () => {
+    const code = [
+      "import importlib.util, json, sys",
+      `spec = importlib.util.spec_from_file_location('pr_refs', ${JSON.stringify(PY_SCRIPT)})`,
+      "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)",
+      "prs = json.dumps([{'number': 1, 'body': 'Does not close #5'}, {'number': 2, 'body': 'Closes #5'}, {'number': 3, 'body': 'Closes #5'}])",
+      "print(m.closing_pr_number(prs, 5), m.closing_pr_number(prs, 6))",
+    ].join("\n");
+    const r = spawnSync("python3", ["-I", "-c", code], { encoding: "utf-8" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout.trim(), "2 None");
+  });
+});

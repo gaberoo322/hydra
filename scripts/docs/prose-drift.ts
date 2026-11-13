@@ -4,7 +4,7 @@
  *
  * The generated inventories (docs/generated/*.json) are drift-guarded by
  * test/generated-inventories-drift.test.mts; this module guards the PROSE
- * AROUND them. Four checks over the hand-written docs, one extraction truth:
+ * AROUND them. Five checks over the hand-written docs, one extraction truth:
  *
  *   1. identifier existence — every backticked repo path / API route / Redis
  *      key family / hydra-* skill / UPPER_SNAKE env var in a pinned doc must
@@ -17,7 +17,11 @@
  *      count the counts fold (inventories/counts.ts) derives from the family
  *      files for that family;
  *   4. links — relative markdown links in living docs must resolve to a
- *      tracked file (or a directory prefix of one).
+ *      tracked file (or a directory prefix of one);
+ *   5. dangling terms (#5491) — a term-shaped **Bold Phrase** in the root
+ *      CONTEXT.md or a module-map CONTEXT.md (src/<area>/CONTEXT.md) must be
+ *      a term DEFINED in the root CONTEXT.md (`**Term**:` entry lines); module
+ *      maps are "not a glossary" and mint no definitions.
  *
  * Scope is READ from docs/generated/corpus.json: tier `living` gets all four
  * checks; tier `playbook` plus every tracked .md under
@@ -58,10 +62,20 @@ export interface RetiredTerm {
 }
 
 /**
- * The nine offender kinds: five identifier kinds, three prose checks
- * (retired-term, count, link), and the unreadable-input sentinel.
+ * The ten offender kinds: five identifier kinds, four prose checks
+ * (retired-term, count, link, dangling-term), and the unreadable-input sentinel.
  */
-export type OffenderKind = "path" | "route" | "redis-key" | "skill" | "env-var" | "retired-term" | "count" | "link" | "unreadable-input";
+export type OffenderKind =
+  | "path"
+  | "route"
+  | "redis-key"
+  | "skill"
+  | "env-var"
+  | "retired-term"
+  | "count"
+  | "link"
+  | "dangling-term"
+  | "unreadable-input";
 
 /** One unresolved claim: where, what kind, the token, and the per-kind remedy. */
 export interface Offender {
@@ -489,6 +503,63 @@ const LINK_TARGET_RE = /\]\(([^)\n]+)\)/g;
 // The scan
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Dangling glossary terms (#5491)
+// ---------------------------------------------------------------------------
+
+const TERM_STOP_WORDS = new Set(["of", "the", "and", "a", "an", "in", "for", "to", "vs", "or", "on", "by", "per", "as", "is", "not"]);
+
+/** Strip backticks/underscores/asterisks and collapse whitespace (the display + lookup form of a bold phrase). */
+export function normaliseTermPhrase(phrase: string): string {
+  return phrase.replace(/[`_*]/g, "").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * The defined-term set of a glossary source: every `**Term**:` entry line
+ * (the only definition form CONTEXT.md uses), lowercased and normalised.
+ * Run over blankProse() output so a fenced example never defines a term.
+ */
+export function definedTermsIn(blanked: string): Set<string> {
+  const out = new Set<string>();
+  for (const m of blanked.matchAll(/^\*\*([^*\n]+)\*\*:[ \t]*$/gm)) out.add(normaliseTermPhrase(m[1]).toLowerCase());
+  return out;
+}
+
+/**
+ * Whether a bold phrase reads as a domain term rather than emphasis: no
+ * trailing sentence punctuation, not all-caps (STD-*, T1), and every word
+ * capitalised (or a small stop-word) with at least one capitalised word.
+ */
+export function termShaped(phrase: string): boolean {
+  const p = normaliseTermPhrase(phrase);
+  if (p === "" || /[.:;!?,]$/.test(p)) return false;
+  if (!/[a-z]/.test(p)) return false;
+  const words = p.split(" ");
+  let capitalised = 0;
+  for (const w of words) {
+    if (/^[A-Z0-9]/.test(w)) capitalised += 1;
+    else if (!TERM_STOP_WORDS.has(w)) return false;
+  }
+  return capitalised > 0;
+}
+
+/** Case-insensitive lookup with a trailing `'s` / `es` / `s` folded; nothing fuzzier. */
+export function termResolves(phrase: string, defined: Set<string>): boolean {
+  const p = normaliseTermPhrase(phrase).toLowerCase();
+  const candidates = [p, p.replace(/'s$/, ""), p.replace(/es$/, ""), p.replace(/s$/, "")];
+  return candidates.some((c) => defined.has(c));
+}
+
+/** Every term-shaped bold phrase of the blanked prose that no definition backs. */
+export function danglingTermClaims(blanked: string, defined: Set<string>): { phrase: string; index: number }[] {
+  const out: { phrase: string; index: number }[] = [];
+  for (const m of blanked.matchAll(/\*\*([^*\n]+?)\*\*/g)) {
+    if (!termShaped(m[1]) || termResolves(m[1], defined)) continue;
+    out.push({ phrase: normaliseTermPhrase(m[1]), index: m.index ?? 0 });
+  }
+  return out;
+}
+
 /**
  * The one exception class the scan treats as "an input could not be read"
  * (a missing/unparseable inventory or baseline, or a failed git listing).
@@ -539,6 +610,7 @@ const FIXES: Record<OffenderKind, string> = {
   "retired-term": "cite the retiring ADR/PR in the same paragraph or drop the term",
   count: "count disagrees with the family file row count",
   link: "relative link target not tracked",
+  "dangling-term": "define the term in CONTEXT.md (separate ubiquitous-language PR) or de-bold the phrase if it is emphasis",
   "unreadable-input": "a generated inventory, baseline, or git listing could not be read; regenerate (npm run docs:inventories) or fix the file",
 };
 
@@ -719,6 +791,28 @@ function scanProseDriftUnguarded(repoRoot: string, opts: ProseScanOptions): Offe
       });
     }
   };
+
+  // 5. Dangling terms — CONTEXT.md (living) plus every module-map row; the
+  // defined set comes from the root CONTEXT.md alone (#5491 INV-1/INV-2).
+  const glossaryScoped = corpusRows.filter((r) => r.path === "CONTEXT.md" || r.tier === "module-map").map((r) => r.path);
+  if (glossaryScoped.length > 0) {
+    const readDoc = (file: string): string => {
+      try {
+        return blankProse(readFileSync(join(repoRoot, file), "utf8"));
+      } catch (err) {
+        throw new ProseDriftInputError(
+          `[prose-drift] could not read glossary doc ${file} (regenerate docs/generated/corpus.json): ${(err as Error).message}`,
+        );
+      }
+    };
+    const defined = definedTermsIn(readDoc("CONTEXT.md"));
+    for (const file of new Set(glossaryScoped)) {
+      const blanked = readDoc(file);
+      for (const c of danglingTermClaims(blanked, defined)) {
+        offenders.push({ file, line: lineOf(blanked, c.index), kind: "dangling-term", token: c.phrase, fix: FIXES["dangling-term"] });
+      }
+    }
+  }
 
   for (const file of livingPaths) scanDoc(file, true);
   const living = new Set(livingPaths);

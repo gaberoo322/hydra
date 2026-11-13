@@ -34,6 +34,15 @@
  *              the playbook loudly instead of running with an empty/guessed
  *              carve-out (fail closed, mirrors decide.py's INV-3).
  *
+ * CAPABILITIES (issue #5498)
+ * ---------------------------
+ * The CLI additionally reports what the Target OFFERS (smoke script, dead-code
+ * scripts/baseline, wiring ledger, health route, agent/domain docs) via
+ * `target-capabilities.ts` — a `capabilities` key in JSON mode and additive
+ * `TARGET_CAP_*` + `TARGET_CAPABILITIES_JSON` exports in `--sh` mode (empty
+ * string = absent). `collectTargetFacts()` itself is unchanged; capabilities
+ * are composed only at the CLI boundary ({@link main}).
+ *
  * NORMALIZATION (decide.py Invariant 2)
  * --------------------------------------
  * The Target Manifest's `riskCritical.surface` entries are appSubdir-stripped
@@ -66,6 +75,12 @@ import {
   getTargetWebUrl,
 } from "../../src/target-config.ts";
 import { loadRiskSurface, resolveManifestRoot } from "./target-risk-surface.ts";
+import {
+  probeTargetCapabilities,
+  renderCapabilityShell,
+  shQuote,
+  type TargetCapabilities,
+} from "./target-capabilities.ts";
 
 /** The JSON shape this script emits in default (non-`--sh`) mode. */
 export type TargetFacts = {
@@ -120,11 +135,6 @@ export function collectTargetFacts(manifestRoot: string = resolveManifestRoot())
   };
 }
 
-/** POSIX-safe single-quote shell escaping: `it's` → `'it'\''s'`. */
-function shQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
 /**
  * Render the `--sh` mode output: one `export` statement per fact, plus
  * `TARGET_APP_DIR` (workspace joined with appSubdir) and
@@ -153,6 +163,12 @@ export function renderShell(facts: TargetFacts): string | null {
 async function main(): Promise<number> {
   const shMode = process.argv.slice(2).includes("--sh");
   const facts = collectTargetFacts();
+  const appDir =
+    facts.manifest.ok && facts.manifest.appSubdir
+      ? `${facts.workspace}/${facts.manifest.appSubdir}`
+      : facts.workspace;
+  // Manifest failure degrades to probing the bare workspace (positive-evidence-only).
+  const capabilities: TargetCapabilities = probeTargetCapabilities({ workspace: facts.workspace, appDir });
 
   if (shMode) {
     const rendered = renderShell(facts);
@@ -163,11 +179,12 @@ async function main(): Promise<number> {
       );
       return 1;
     }
-    process.stdout.write(rendered + "\n");
+    const capShell = "\n" + renderCapabilityShell(capabilities);
+    process.stdout.write(rendered + capShell + "\n");
     return 0;
   }
 
-  process.stdout.write(JSON.stringify(facts) + "\n");
+  process.stdout.write(JSON.stringify({ ...facts, capabilities }) + "\n");
   return facts.manifest.ok ? 0 : 1;
 }
 

@@ -620,10 +620,8 @@ test("the playbook names no retired `hydra memory` command or config/agents plan
   assert.doesNotMatch(PLAYBOOK, /config\/agents/);
 });
 
-test("every feedback-surface mention in the playbook is marked optional (if present)", () => {
-  const lines = PLAYBOOK.split("\n").filter((l) => /config\/feedback\/to-(planner|executor)\.md/.test(l));
-  assert.ok(lines.length > 0);
-  for (const l of lines) assert.match(l, /if present|optional/);
+test("the playbook no longer reads the retired feedback surface (#5497)", () => {
+  assert.doesNotMatch(PLAYBOOK, /config\/feedback\//);
 });
 
 test("the step 2.1 pipeline's stderr suppression carries an intentional fail-open annotation", () => {

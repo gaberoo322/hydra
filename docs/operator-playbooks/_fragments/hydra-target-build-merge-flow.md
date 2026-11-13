@@ -551,7 +551,7 @@ TASK_TITLE="${ANCHOR_SUBJECT:-<task title>}"
 - **No `pr-<n>` claimedBy PATCH marker.** The old inProgress `claimedBy":"pr-<n>"` PATCH to `/api/backlog/${ITEM_ID}/move` (the issue-#640 just-shipped-anchor suppression) is retired. On the GitHub board the in-flight signal is the `in-progress` label the claim stamped (Step 2), and the terminal signal is the issue-close on merge (`Closes #N`), performed explicitly by `automerge.yml` rather than by GitHub's native auto-close (ADR-0031 Decision 5 as amended by gaberoo322/hydra#3700) — the board read never re-surfaces a closed issue, so there is no window for decide.py to re-dispatch onto the same anchor.
 - **No work-queue `COMPLETED:`/`CLOSED:` marker.** The old `hydra queue add "COMPLETED: <task title>"` idiom is retired with the whole `hydra:anchors:work-queue` — completion is recorded by the issue-close plus the metrics record and `cycle:completed` event below.
 
-(The Redis backlog subsystem itself is NOT deleted by this change — that is the gated final step 5 of ADR-0031, blocked on no Orchestrator-self path depending on it. This step just stops the skill *writing* to it.)
+(The Redis backlog subsystem is deleted — ADR-0031 Decision 4/6; the label model on the Target board is the only backlog. There is nothing left for this step to write to.)
 
 ```bash
 # Board anchor: automerge.yml closes the `Closes #$ANCHOR_NUM` issue explicitly,
@@ -609,8 +609,8 @@ hydra raw POST /cycle/complete "{\"cycleId\":\"$CYCLE_ID\",\"source\":\"claude\"
 On failure — lesson capture for shared learning (issue #392).
 This is the only post-cycle writer to `hydra:memory:{agent}:patterns` (agent = executor) for
 Claude-driven builds after #383 deletes codex-runner (ADR-0006). The endpoint forwards
-to `recordPattern()` so the existing 3-hit auto-promotion to
-retired `config/feedback/to-executor.md` surface keeps working.
+to `recordPattern()` (the pattern store is live). There is no feedback-file
+promotion: that write was retired (#2962).
 ```bash
 # Pick the cue that matches the failure mode:
 #   verification-failure | no-diff | rollback

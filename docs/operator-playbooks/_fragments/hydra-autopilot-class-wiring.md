@@ -77,7 +77,7 @@ The authoritative sources for dispatch policy are `scripts/autopilot/classes.jso
 > a Turn Snapshot collector).
 
 > **Retrospective wiring (issue #920, parent #917):** `retro_orch` is the
-> daily per-run retrospective signal class. It dispatches the `/hydra-retro`
+> per-run retrospective signal class. It dispatches the `/hydra-retro`
 > skill (#919), which consumes the run-tree **retro bundle** (#918),
 > deep-reads only the flagged transcripts, and emits a **conservative,
 > recurrence-gated** set of improvement proposals (≤2 GitHub issues + ≤1
