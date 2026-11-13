@@ -157,7 +157,7 @@ After PR-3 (#383) deleted `codex-runner.ts` (the Codex CLI, retired by ADR-0006)
 that fed the retired daily-spend surrogate for code-writing work was removed.
 The autopilot now owns the daily-spend signal via a token surrogate. `reap.py` posts it on every reap that has authoritative `total_tokens` (the `wait_or_reap` / `reap` action-table rows in the main playbook) — the parent never hand-posts `/api/metrics/tokens`, which would double-count.
 
-This is best-effort and idempotent at the autopilot's `reaped_task_ids`
+`reap.py`'s token post is best-effort and idempotent at the autopilot's `reaped_task_ids`
 layer (the reaper already dedupes by `task_id` before firing follow-up
 writes, so the same `cycleId` never bumps the counter twice). The endpoint
 bumps three Redis keys:

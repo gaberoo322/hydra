@@ -610,11 +610,8 @@ SIGNAL_LOOP_ORDER = (
     # is met by being a real dispatch, NOT by editing the terminate path).
     "architecture_orch",
     # retro_orch (issue #920, parent #917) — daily per-run retrospective.
-    # Registered after the discover/scout/architecture classes (several
-    # classes follow it in this tuple, e.g. cleanup_orch, the target mirrors,
-    # skill_prune, wayfinder_orch): pipeline slots dispatch first (step 4),
-    # then the signal classes in this order.
-    # The 24h class cooldown (SIGNAL_COOLDOWNS) is honored by the shared
+    # Other signal classes follow it in this tuple. Its class cooldown
+    # (classes.json cooldownSeconds) is honored by the shared
     # signal_is_cooled guard inside _select_for_signal.
     "retro_orch",
     # cleanup_orch (issue #960, parent #958) — board-idle backfill that runs

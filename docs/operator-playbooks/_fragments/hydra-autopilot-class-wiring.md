@@ -4,9 +4,9 @@ Per-class wiring details for signal classes. Read when investigating a specific
 class's dispatch logic, cooldown configuration, scope, or saturation guards.
 The authoritative sources for dispatch policy are `scripts/autopilot/classes.json`
 (per-class `cooldownSeconds`, `scope`, `model`) and `scripts/autopilot/decide.py`
-(`SIGNAL_LOOP_ORDER`); this file cites them by pointer and restates no value.
+(`SIGNAL_LOOP_ORDER`); this file cites them by pointer rather than restating values. (Cooldown literals in sibling per-skill playbooks are tracked as a separate follow-up, not swept here.)
 
-> **Phase B wiring (issue #485, sub of #483):** `scout_orch` is a
+> **Wiring (issue #485, sub of #483):** `scout_orch` is a
 > calendar-driven signal class (its `cooldownSeconds` in `classes.json`).
 > The walk surface (categories from `docs/ai-leverage-categories.md`,
 > and nothing else — the `dep:<name>` package.json surface was removed
@@ -14,7 +14,7 @@ The authoritative sources for dispatch policy are `scripts/autopilot/classes.jso
 > procedure; dependency freshness/CVEs are covered by `npm run
 > deps:check` + the OSV scan) is built by
 > `src/scout/calendar-walk.ts:planWalk()`. Per-category cooldown
-> and per-tool cooldown (via the Phase A seen-list; values in
+> and per-tool cooldown (via the seen-list; values in
 > `src/scout/calendar-walk.ts`) stack on top of the per-class cooldown — all three must clear
 > before a category is dispatched. When the per-category cooldown says
 > "skip" but per-tool says "ready", the category-level skip wins
@@ -156,23 +156,20 @@ The authoritative sources for dispatch policy are `scripts/autopilot/classes.jso
 >   mirror is the `cleanup_target` class (its own `classes.json` row and
 >   `SIGNAL_LOOP_ORDER` entry).
 
-> **Phase B wiring (issue #466, sub of #437):** `design_concept_orch`
+> **Design-concept wiring (issue #466, sub of #437):** `design_concept_orch`
 > fires before `dev_orch` for an orch anchor when the artifact is
-> missing or stale. Phase B is **warn-only** — a draft artifact whose
+> missing or stale. The plan-level selector is **warn-only** — a draft artifact whose
 > `gateCheck()` returns `ok:false` is still treated as "fresh present"
 > and `dev_orch` proceeds. The plan-level
 > selector stays warn-only (INV-009 is a stderr WARN); the hard gate is
 > per-anchor at PR time (the `design-concept-reconcile` required check and
 > `hydra-qa` preflight, see `hydra-qa-reference.md`), not in this selector.
-> The `design_concept_target` mirror lands in Phase D.
->
 > Sequencing rule: when the best candidate carries a `designConcept`
 > block with `present:true` and `isFresh:true`, the
 > `design_concept_orch` selector returns None (no re-grill within 7
 > days) and `dev_orch` proceeds. When the block is absent (legacy
-> candidates API), Phase B is a no-op and `dev_orch` proceeds as
-> before — that lets B-1 (this PR) land before the candidates API is
-> extended to surface artifact metadata.
+> candidates API), the selector is a no-op and `dev_orch` proceeds as
+> before.
 >
 > Retry policy (per #466): grill timeout (case 1) and grill crash (case
 > 3) each retry up to `MAX_FAILURE_RETRIES=5` via `self_heal.py`. A

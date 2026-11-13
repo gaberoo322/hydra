@@ -99,7 +99,7 @@ verdict's ladder):
 2. **Consult `/api/usage/eligibility`** (the Pacing Curve, #857): skip when
    `.reasons.paused == true` (operator pause, #988), `.reasons.sessionBlockedUntil`
    is a future instant (session-limit hard block, #1089),
-   `.reasons.emergencyStop == true` (hard-stop threshold, `HYDRA_USAGE_EMERGENCY_STOP_PERCENT`) or `.paceState == "ahead"`
+   `.reasons.emergencyStop == true` (hard-stop threshold, `HYDRA_USAGE_EMERGENCY_STOP_PERCENT`, over whichever windows the meter reports — weekly only on this plan) or `.paceState == "ahead"`
    (above the curve); otherwise (`on`/`behind`, not emergency) launch via
    `systemctl --user start hydra-autopilot.service`.
 3. **Fail safe** — if the eligibility endpoint is unreachable, do NOT launch
