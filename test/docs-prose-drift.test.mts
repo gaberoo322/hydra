@@ -606,7 +606,7 @@ describe("prose-drift: dangling glossary terms (#5491)", () => {
 
   test("term-shape filter keeps term-shaped phrases and drops emphasis", () => {
     for (const yes of ["Run Ledger", "Turn Row", "Time of Day", "Builder-Health Scorecard"]) ok(termShaped(yes), yes);
-    for (const no of ["never", "Operator:", "STD-REDIS-SEAM", "T1", "Not A Term.", "a Lower Start", "(none)"]) {
+    for (const no of ["never", "Operator:", "STD-REDIS-SEAM", "T1", "Not A Term.", "lower Start", "(none)"]) {
       ok(!termShaped(no), no);
     }
   });
