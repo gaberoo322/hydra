@@ -45,7 +45,7 @@ The skill reads a `PrdInput` JSON object — from a file (`--input=/tmp/prd.json
       "whatToBuild": "End-to-end tracer bullet: the smallest thing that exercises every layer.",
       "acceptanceCriteria": ["foo endpoint responds 200", "npm test passes"],
       "filesInScope": ["src/foo.ts", "test/foo.test.mts"],
-      "filesOutOfScope": ["src/specs.ts"],
+      "filesOutOfScope": ["src/bar.ts"],
       "kind": "enhancement"
     },
     {

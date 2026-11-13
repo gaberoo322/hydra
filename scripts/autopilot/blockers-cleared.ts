@@ -14,7 +14,7 @@ import { ghJson } from "../../src/github/gh.ts";
 import {
   fetchOpenBlockerNumbers,
   findClearedBlockedIssues,
-  type BlockerRefState,
+  resolveBlockerRefState,
 } from "../../src/github/blockers.ts";
 import { hasScopeSection } from "../../src/scope-section.ts";
 import { resolveGithubRepo } from "../../src/github/issues.ts";
@@ -43,18 +43,7 @@ async function main(): Promise<number> {
       return res.ok ? (res.data.body ?? "") : null;
     },
     fetchOpen: (ns) => fetchOpenBlockerNumbers(ns, { githubRepo: repo }),
-    resolveRef: async (n): Promise<BlockerRefState> => {
-      const res = await ghJson<{
-        state?: string;
-        pull_request?: { merged_at?: string | null };
-      }>(["api", `repos/${repo}/issues/${n}`]);
-      if (!res.ok) return "unknown";
-      if (String(res.data.state).toLowerCase() !== "closed") return "open";
-      if (res.data.pull_request) {
-        return res.data.pull_request.merged_at ? "merged" : "unknown";
-      }
-      return "closed";
-    },
+    resolveRef: (n) => resolveBlockerRefState(repo, n),
     hasScope: hasScopeSection,
   });
 

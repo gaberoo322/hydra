@@ -104,8 +104,8 @@ now reads the actual diff.)
 # written to the real playbook path (Step 4 is what writes it to disk).
 mkdir -p evals/skill-prune/.staged
 git show "origin/master:docs/operator-playbooks/hydra-${SKILL}.md" \
-  > evals/skill-prune/.staged/before.md
-printf '%s' "$PRUNED_BODY" > evals/skill-prune/.staged/after.md
+  > evals/skill-prune/.staged/before.md  # ref-check: example
+printf '%s' "$PRUNED_BODY" > evals/skill-prune/.staged/after.md  # ref-check: example
 
 # Invoke the pinned promptfoo directly with -c against the REAL-PAIR config
 # (evals/skill-prune/parity.yaml — a subdirectory, deliberately outside the

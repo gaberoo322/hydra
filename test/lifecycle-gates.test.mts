@@ -10,6 +10,8 @@ import {
   operatorAdvance,
   operatorReopen,
   gateAdr5,
+  gateClaimReleased,
+  gateUnblocked,
   gateClose,
   gateDispatch,
   gateJudgment,
@@ -25,7 +27,10 @@ import {
   releaseClaim,
   resolveLifecycleMode,
   loadLifecycleMode,
+  type BlockerRecord,
+  type ClaimRecord,
   type CommentRecord,
+  type Fetched,
   type GateInput,
   type GateRecords,
   type SeamDeps,
@@ -815,7 +820,7 @@ describe("research-exit gate", () => {
   });
 
   test("recordsNeeded requests the comment + entry records only for research-exit", () => {
-    assert.deepEqual(recordsNeeded("research-exit"), { designConcept: false, pr: false, comment: true, stateEntry: true, qaLive: false });
+    assert.deepEqual(recordsNeeded("research-exit"), { designConcept: false, pr: false, comment: true, stateEntry: true, qaLive: false, claim: false, blockers: false });
     for (const g of ["none", "judgment", "adr5", "dispatch", "pr-open", "close", "not-yet-implemented"] as const) {
       const n = recordsNeeded(g);
       assert.equal(n.comment || n.stateEntry, false, g);
@@ -871,5 +876,121 @@ describe("research-exit gate", () => {
     assert.equal("code" in r1 ? r1.code : null, "scope-section-missing");
     const scoped = harness(["needs-research"], "enforce", { comment: rec, entry: 1000, body: SCOPED_BODY });
     assert.equal((await advance(adv, scoped.deps)).ok, true);
+  });
+});
+
+// Reconcile-edge gates (issue #5459)
+// ---------------------------------------------------------------------------
+
+const BLOCKED_BODY = "Blocked by #100 and #101\n\n## Files in scope\n\n- `src/a.ts`\n";
+
+function ub(over: Partial<GateInput> = {}): GateInput {
+  return { issue: 10, from: "blocked", to: "ready-for-agent", flags: [], evidence: {}, body: BLOCKED_BODY, ...over };
+}
+const blk = (...states: Array<[number, "open" | "closed" | "merged" | "unknown"]>): GateRecords => ({
+  blockers: { ok: true, value: states.map(([number, state]) => ({ number, state })) },
+});
+const clm = (held: string | null): GateRecords => ({ claim: { ok: true, value: { held: held === null ? null : { dispatchId: held } } } });
+
+describe("unblocked gate (#5459 INV-4)", () => {
+  const cleared = blk([100, "closed"], [101, "merged"]);
+  test("passes when every clearance ref is closed/merged and the body is scoped", () => {
+    assert.equal(gateUnblocked(ub(), cleared).ok, true);
+  });
+  test("refusal codes in predicate order", () => {
+    assert.equal(gateUnblocked(ub({ body: undefined }), cleared).code, "fetch-failed");
+    assert.equal(gateUnblocked(ub({ body: "Blocked by #5 and o/r#6\n## Files in scope\n- `a`\n" }), cleared).code, "blocker-cross-repo");
+    assert.equal(gateUnblocked(ub({ body: "waiting for a calendar date" }), cleared).code, "blocker-refs-missing");
+    assert.equal(gateUnblocked(ub(), {}).code, "fetch-failed");
+    assert.equal(gateUnblocked(ub(), { blockers: { ok: false } }).code, "fetch-failed");
+    assert.equal(gateUnblocked(ub(), blk([100, "closed"])).code, "record-binding-mismatch");
+    assert.equal(gateUnblocked(ub(), blk([100, "closed"], [101, "unknown"])).code, "fetch-failed");
+    assert.equal(gateUnblocked(ub(), blk([100, "closed"], [101, "open"])).code, "blockers-open");
+    assert.equal(gateUnblocked(ub({ body: "Blocked by #100 and #101" }), cleared).code, "scope-section-missing");
+  });
+});
+
+describe("claim-released gate (#5459 INV-5)", () => {
+  const ip = (over: Partial<GateInput> = {}) => gi({ to: "ready-for-agent", ...over });
+  test("no held claim passes; a held claim refuses unless the caller owns it", () => {
+    assert.equal(gateClaimReleased(ip(), clm(null)).ok, true);
+    assert.equal(gateClaimReleased(ip(), clm("d-1")).code, "claim-held");
+    assert.equal(gateClaimReleased(ip({ evidence: { dispatch: "d-2" } }), clm("d-1")).code, "claim-held");
+    assert.equal(gateClaimReleased(ip({ evidence: { dispatch: "d-1" } }), clm("d-1")).ok, true);
+  });
+  test("a missing or failed claim record fails closed", () => {
+    assert.equal(gateClaimReleased(ip(), {}).code, "fetch-failed");
+    assert.equal(gateClaimReleased(ip(), { claim: { ok: false } }).code, "fetch-failed");
+  });
+});
+
+describe("reconcile caller edges are really gated (#5459 INV-9)", () => {
+  const edges: Array<[string, string, GateRecords, Partial<GateInput>]> = [
+    ["blocked", "ready-for-agent", blk([100, "closed"], [101, "closed"]), { body: BLOCKED_BODY }],
+    ["in-progress", "ready-for-agent", clm(null), {}],
+    ["in-progress", "needs-dev-resume", clm(null), {}],
+    ["in-progress", "needs-qa", { pr: { ok: true, value: { number: 7, state: "OPEN", body: "Closes #10" } } }, { evidence: { pr: "7" } }],
+  ];
+  for (const [from, to, good, over] of edges) {
+    test(`${from} -> ${to} has a real gate that passes on good records`, () => {
+      const t = findTransition(from as never, to as never);
+      assert.ok(t, "row exists");
+      assert.notEqual(t.gate, "not-yet-implemented");
+      const input = gi({ from: from as never, to: to as never, ...over });
+      assert.equal(evaluateGate(t.gate, input, good).ok, true);
+      assert.notEqual(evaluateGate(t.gate, input, {}).code, "gate-unimplemented");
+    });
+  }
+  test("the fourth reconcile row stays unimplemented", () => {
+    assert.equal(findTransition("needs-dev-resume", "ready-for-agent")?.gate, "not-yet-implemented");
+  });
+  test("recordsNeeded flags claim and blockers only for their gates", () => {
+    assert.equal(recordsNeeded("claim-released").claim, true);
+    assert.equal(recordsNeeded("claim-released").blockers, false);
+    assert.equal(recordsNeeded("unblocked").blockers, true);
+    assert.equal(recordsNeeded("unblocked").claim, false);
+  });
+});
+
+describe("seam wiring for the reconcile-edge gates (#5459 INV-6)", () => {
+  test("claim-released reads the claim through journal.readClaim", async () => {
+    const h = harness(["in-progress"], "enforce");
+    let reads = 0;
+    h.deps.journal.readClaim = async () => {
+      reads++;
+      return { ok: true, claim: { dispatchId: "d-1", class: "dev_orch", run: "r", artifactHash: null, openedAt: 1 } };
+    };
+    const held = await advance({ issue: 10, to: "ready-for-agent" }, h.deps);
+    assert.equal("code" in held ? held.code : null, "claim-held");
+    assert.equal(h.edits.length, 0);
+    const owner = await advance({ issue: 10, to: "ready-for-agent", evidence: { dispatch: "d-1" } }, h.deps);
+    assert.equal(owner.ok, true);
+    assert.equal(reads, 2);
+  });
+  test("claim-released: a failed claim read fails closed", async () => {
+    const h = harness(["in-progress"], "enforce");
+    h.deps.journal.readClaim = async () => ({ ok: false, code: "redis-failed" }) as never;
+    const res = await advance({ issue: 10, to: "needs-dev-resume" }, h.deps);
+    assert.equal("code" in res ? res.code : null, "fetch-failed");
+  });
+  test("unblocked hands fetch.blockers exactly the body's clearance refs", async () => {
+    const h = harness(["blocked"], "enforce", { body: BLOCKED_BODY });
+    let seen: number[] = [];
+    h.deps.fetch.blockers = async (refs): Promise<Fetched<BlockerRecord[]>> => {
+      seen = refs;
+      return { ok: true, value: refs.map((number) => ({ number, state: "closed" as const })) };
+    };
+    const res = await advance({ issue: 10, to: "ready-for-agent" }, h.deps);
+    assert.equal(res.ok, true);
+    assert.deepEqual(seen, [100, 101]);
+  });
+  test("unblocked without a blockers fetcher fails closed (enforce) / would-refuse (shadow)", async () => {
+    const enf = harness(["blocked"], "enforce", { body: BLOCKED_BODY });
+    const r1 = await advance({ issue: 10, to: "ready-for-agent" }, enf.deps);
+    assert.equal("code" in r1 ? r1.code : null, "fetch-failed");
+    const sh = harness(["blocked"], "shadow", { body: BLOCKED_BODY });
+    const r2 = await advance({ issue: 10, to: "ready-for-agent" }, sh.deps);
+    assert.equal(r2.ok && r2.wouldRefuse, "fetch-failed");
+    assert.equal(sh.edits.length, 1);
   });
 });

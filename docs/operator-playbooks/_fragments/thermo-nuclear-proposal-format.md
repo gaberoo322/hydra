@@ -26,12 +26,14 @@ Good: "Retire `scripts/<watchdog>.sh` and fold its three health checks into the 
 
 Explicit list of files / services / abstractions / concepts the proposal removes. Bullet list. Include line counts where meaningful.
 
+<!-- ref-check: example-start -->
 ```
 - scripts/hydra-orchestrator-watchdog.sh (94 lines)
 - systemd unit: hydra-orchestrator-watchdog.timer + .service
 - The concept of "watchdog cadence" separate from "autopilot cadence"
 - The watchdog's deliberate-stop reconciliation flag (src/scheduler.ts:142-178)
 ```
+<!-- ref-check: example-end -->
 
 If this section comes up empty after grilling, the proposal is rearrangement, not deletion. The skill must surface this at the top of the document as a self-honest signal:
 
