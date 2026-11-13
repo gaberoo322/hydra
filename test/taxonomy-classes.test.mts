@@ -1119,15 +1119,15 @@ describe("taxonomy: cycle-record coverage from the cycleRecord column (issues #4
   test("the three obligation columns reproduce the pre-#5473 sets exactly", () => {
     const pick = (col: "cycleRecord" | "worktreeGc" | "reflectionDeposit") =>
       [...new Set(DISPATCH_CLASSES.filter((r) => r[col]).map((r) => r.skill))].sort();
-    assert.deepEqual(pick("cycleRecord"), ["hydra-dev", "hydra-grill", "hydra-qa", "hydra-target-build"]);
-    assert.deepEqual(pick("worktreeGc"), ["hydra-dev", "hydra-qa", "hydra-target-build"]);
+    assert.deepEqual(pick("cycleRecord"), ["hydra-dev", "hydra-grill", "hydra-qa", "hydra-target-build", "hydra-target-qa"]);
+    assert.deepEqual(pick("worktreeGc"), ["hydra-dev", "hydra-qa", "hydra-target-build", "hydra-target-qa"]);
     assert.deepEqual(pick("reflectionDeposit"), ["hydra-dev", "hydra-target-build"]);
   });
 
-  test("qa_target (hydra-target-qa) has all three columns false", () => {
+  test("qa_target (hydra-target-qa) is cycle-recorded and swept, no reflection deposit (#5474)", () => {
     const row = DISPATCH_CLASSES.find((r) => r.name === "qa_target");
     assert.ok(row);
-    assert.deepEqual([row.cycleRecord, row.worktreeGc, row.reflectionDeposit], [false, false, false]);
+    assert.deepEqual([row.cycleRecord, row.worktreeGc, row.reflectionDeposit], [true, true, false]);
   });
 
   // Issue #4730: hydra-qa is cycle-recorded (so qa_orch lands in the
@@ -1178,7 +1178,6 @@ describe("taxonomy: cycle-record coverage from the cycleRecord column (issues #4
       "cleanup_orch",
       "scout_orch",
       "retro_orch",
-      "qa_target",
       "research_orch",
       "tickets_orch",
     ]) {
@@ -1187,6 +1186,11 @@ describe("taxonomy: cycle-record coverage from the cycleRecord column (issues #4
         `${notRecorded} must be labelled not-recorded`,
       );
     }
+  });
+
+  test("qa_target is in CLASSES_WITH_CYCLE_RECORD, not CLASSES_WITHOUT_CYCLE_RECORD (#5474)", () => {
+    assert.ok(CLASSES_WITH_CYCLE_RECORD.includes("qa_target"));
+    assert.ok(!CLASSES_WITHOUT_CYCLE_RECORD.includes("qa_target"));
   });
 
   // Design-concept INV-3 (issue #4392): the two lists are a PARTITION of the
@@ -1397,15 +1401,15 @@ print(json.dumps([msg(pipes), msg(pipes + ["ghost"]), msg(pipes + [pipes[0]]), m
 // ---------------------------------------------------------------------------
 
 describe("taxonomy.py: per-skill completion obligations (#5473)", () => {
-  test("every skill in the table plus an unknown skill resolves to the pre-change sets", () => {
+  test("every skill in the table plus an unknown skill resolves to the #5474 sets", () => {
     const got = probeAutopilot(`
 import taxonomy
 rows = taxonomy.load_taxonomy()
 skills = sorted({r["skill"] for r in rows}) + ["hydra-nonexistent"]
 print(json.dumps({s: list(taxonomy.skill_obligations(s, rows)) for s in skills}))
 `);
-    const CR = new Set(["hydra-dev", "hydra-target-build", "hydra-grill", "hydra-qa"]);
-    const GC = new Set(["hydra-dev", "hydra-target-build", "hydra-qa"]);
+    const CR = new Set(["hydra-dev", "hydra-target-build", "hydra-grill", "hydra-qa", "hydra-target-qa"]);
+    const GC = new Set(["hydra-dev", "hydra-target-build", "hydra-qa", "hydra-target-qa"]);
     const RD = new Set(["hydra-dev", "hydra-target-build"]);
     assert.ok(Object.keys(got).length > 10);
     for (const [skill, flags] of Object.entries(got)) {
