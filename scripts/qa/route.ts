@@ -5,6 +5,7 @@
  *   node --experimental-strip-types scripts/qa/route.ts \
  *     --preflight <file> --findings <file> --summaries <file> \
  *     [--packet <file>] [--defer] [--dry-run] [--repo owner/name]
+ *     [--reviewer-fixed <sha40> | --reviewer-commit-aborted]
  *
  * One pass: fold -> trailer -> round-action through the qa-verdict engine
  * (`runQaVerdictPhase`, in-process; findings are bound RAW so a malformed file
@@ -15,6 +16,14 @@
  * action, the PASS/FAIL markers and the escalation label sets all come from the
  * engine's result; this file only spells the comment bodies (byte-for-byte the
  * playbook's old bash templates) and the gh calls, in a pinned order.
+ *
+ * Reviewer commit, class A (issue #5415, ADR-0046 Decision 2): on a reviewed FAIL the
+ * engine's `reviewer-commit` phase runs in-process between fold and trailer, with the
+ * stage read at the FIXED point (never the QA session tree, whose HEAD is the PR head).
+ * A `commit-a` decision pauses BEFORE any effect (pass 1: `nextStep: 'reviewer-commit'` +
+ * a plan); the agent runs the sidecar's step-9.4 block, then re-calls route with
+ * `--reviewer-fixed <sha40>` (verify the pushed commit, then PASS-pending-CI at the new
+ * head) or `--reviewer-commit-aborted` (the original FAIL, after a head-unchanged check).
  *
  * A non-zero fold / trailer / round-action result is a PRE-VERDICT EXIT: exit 1
  * with at most one best-effort `QA-Verdict-Error` comment and `needs-qa` untouched.
@@ -53,10 +62,12 @@ import {
   RouteResultSchema,
   SummariesSchema,
   type PreflightResult,
+  type ReviewerCommitPlan,
   type RouteEffect,
   type RouteResult,
 } from "../../src/schemas/qa-plumbing-cli.ts";
-import { QA_ADMISSION_SKIP_MARKER } from "../../src/qa/round-action.ts";
+import { QA_ADMISSION_SKIP_MARKER, annotateReviewerFixedReport } from "../../src/qa/round-action.ts";
+import { COHORT_BASELINE_PATH, QA_ROLLOUT_CONFIG_PATH, resolveRolloutSwitches, tripFromBaseline, type ReviewerCommitsValue } from "../../src/qa/rollout-switches.ts";
 import { parseQaVerdictTrailer } from "../../src/qa/verdict-trailer.ts";
 import { rowsFromFold } from "../../src/qa/review-findings-extract.ts";
 import type { StoredReviewFindingRow } from "../../src/redis/review-findings.ts";
@@ -70,6 +81,10 @@ export interface RouteOptions {
   findingsPath?: string;
   summariesPath?: string;
   packetPath?: string;
+  /** Pass 2a (#5415): the 40-hex sha the agent pushed as the `QA-Fix: A` commit. */
+  reviewerFixed?: string;
+  /** Pass 2b (#5415): the agent aborted the commit path; run the ordinary FAIL routing. */
+  reviewerCommitAborted?: boolean;
 }
 
 export interface RouteDeps {
@@ -126,6 +141,16 @@ export const SKIP_REVIEW_REPORT = `_${QA_ADMISSION_SKIP_MARKER} (issue #3815): a
 
 const ESC_FALLBACK_SUMMARY = "See the PR thread for the round-by-round findings.";
 
+/** A pre-verdict failure with its own `QA-Verdict-Error reason=` (default: `fold-phase-failed`). */
+class PreVerdictError extends Error {
+  readonly reason: string;
+  constructor(reason: string, message: string) {
+    super(message);
+    this.name = "PreVerdictError";
+    this.reason = reason;
+  }
+}
+
 /** Thrown by the advance helper when the PR merged under us: reconcile owns needs-qa -> closed, so stop with exit 0. */
 class PrMergedStop extends Error {
   constructor() {
@@ -180,7 +205,7 @@ export async function runRoute(
   } catch (err) {
     if (!(err instanceof UsageError) && !ctx.effectsStarted && !opts.dryRun && ctx.postPreVerdictError !== null) {
       try {
-        await ctx.postPreVerdictError("fold-phase-failed");
+        await ctx.postPreVerdictError(err instanceof PreVerdictError ? err.reason : "fold-phase-failed");
       } catch (postErr) {
         console.error("[hydra-qa] WARN: QA-Verdict-Error comment failed:", postErr);
       }
@@ -204,10 +229,19 @@ async function runRouteImpl(
   const degraded: string[] = [];
   const effects: RouteEffect[] = [];
 
+  if (opts.reviewerFixed !== undefined && opts.reviewerCommitAborted === true) {
+    throw new UsageError("--reviewer-fixed and --reviewer-commit-aborted are mutually exclusive");
+  }
+  if ((opts.reviewerFixed !== undefined || opts.reviewerCommitAborted === true) && (opts.defer || pre.gate.action === "defer")) {
+    throw new UsageError("--reviewer-fixed / --reviewer-commit-aborted cannot be combined with --defer");
+  }
   if (opts.defer && pre.gate.action !== "defer") {
     throw new UsageError(`--defer is only valid when preflight gate.action is 'defer' (got '${pre.gate.action}')`);
   }
   const deferring = pre.gate.action === "defer";
+  if (opts.reviewerFixed !== undefined && !/^[0-9a-f]{40}$/.test(opts.reviewerFixed)) {
+    throw new UsageError("--reviewer-fixed must be a full 40-hex commit sha");
+  }
 
   // One recorded effect. A failure is logged with context and never stops the
   // remaining effects (the old bash ran each call independently).
@@ -282,6 +316,31 @@ async function runRouteImpl(
     return state === "CLOSED" || state === "MERGED" ? "ready-for-agent" : "needs-dev-resume";
   };
 
+  /** The live PR head sha (`headRefOid`), or "" when unreadable. */
+  const liveHeadOid = async (): Promise<string> => {
+    const res = await ports.gh(["pr", "view", String(pr), "--repo", repo, "--json", "headRefOid", "--jq", ".headRefOid"]);
+    return res.ok ? res.stdout.trim() : "";
+  };
+
+  /**
+   * The `reviewer-commits` stage AT THE FIXED POINT (never process.cwd(): the QA session tree holds the
+   * PR head, so a PR could flip its own stage). Mirrors scripts/ci/qa-fix-proof.ts at --base. A null
+   * fixedSha or a failed `show` is stage `off` + degraded `rollout-stage`.
+   */
+  const readReviewerCommitsStage = async (): Promise<ReviewerCommitsValue> => {
+    if (pre.fixedSha === null) {
+      degraded.push("rollout-stage");
+      return "off";
+    }
+    const cfg = await ports.git(["show", `${pre.fixedSha}:${QA_ROLLOUT_CONFIG_PATH}`]);
+    const base = await ports.git(["show", `${pre.fixedSha}:${COHORT_BASELINE_PATH}`]);
+    if (!cfg.ok || !base.ok) {
+      degraded.push("rollout-stage");
+      return "off";
+    }
+    return resolveRolloutSwitches(tryParse(cfg.stdout), tripFromBaseline(base.stdout)).effective["reviewer-commits"];
+  };
+
   /** The result of a path that posted without a verdict (a stop comment or a defer). */
   const noVerdict = (reason: string): RouteResult => ({
     verdict: null,
@@ -338,7 +397,7 @@ async function runRouteImpl(
   // From here a throw is a fold-phase failure: arm the visible QA-Verdict-Error signal.
   ctx.postPreVerdictError = (reason) =>
     prComment(
-      `> *Automated QA — fold failed, no verdict emitted*\n\nQA-Verdict-Error: pr=${pr} reason=${reason}`,
+      `> *Automated QA — ${reason === "fold-phase-failed" ? "fold failed, " : ""}no verdict emitted*\n\nQA-Verdict-Error: pr=${pr} reason=${reason}`,
       "pre-verdict-error-comment",
     );
   let reviewVerdict: "PASS" | "FAIL";
@@ -402,7 +461,100 @@ async function runRouteImpl(
     if (packet?.mergeDanger.gapLine) report = `${report}\n\n${packet.mergeDanger.gapLine}`;
   }
 
-  const trailerOut = await ports.phase("trailer", { pr, verdict, blockers, maxSeverity });
+  // ---- Reviewer commit, class A (#5415): FAIL-gated, between fold and trailer. ----
+  let reviewerCommit: ReviewerCommitPlan | undefined;
+  let trailerExtra: { headSha: string; qaFixes: string[] } | null = null;
+  if (opts.reviewerFixed !== undefined && !(currentReviewed && reviewVerdict === "FAIL")) {
+    throw new PreVerdictError("reviewer-fixed-unverified", "--reviewer-fixed requires a reviewed FAIL fold");
+  }
+  if (opts.reviewerCommitAborted === true) {
+    // The abort path re-routes the ORIGINAL fold verdict, so it must still be the head that was reviewed.
+    const live = await liveHeadOid();
+    if (live !== pre.pr.headSha) {
+      throw new PreVerdictError("reviewer-commit-aborted-head-moved", `PR head moved (${live || "unreadable"}) since the review`);
+    }
+    reviewerCommit = { action: "none", reason: "reviewer-commit-aborted" };
+  } else if (currentReviewed && reviewVerdict === "FAIL" && foldResult !== null) {
+    const fold = isRecord(foldResult.fold) ? foldResult.fold : {};
+    const rows = (v: unknown): Array<{ location: string }> =>
+      Array.isArray(v) ? v.filter(isRecord).map((r) => ({ ...r, location: String(r.location ?? "") })) : [];
+    const blocking = rows(fold.blocking);
+    const stage = await readReviewerCommitsStage();
+    let rcOut: Record<string, unknown> | null = null;
+    try {
+      rcOut = await ports.phase("reviewer-commit", { pr, tier, blocking, followUps: rows(fold.followUps), stage });
+    } catch (err) {
+      // A failed OPTIONAL decision must never take the verdict down: fail closed to the ordinary FAIL routing.
+      console.error("[hydra-qa] WARN: reviewer-commit phase failed; routing the original FAIL:", err);
+      degraded.push("reviewer-commit");
+    }
+    if (rcOut !== null && Array.isArray(rcOut.degraded)) degraded.push(...rcOut.degraded.map(String));
+    const strList = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : []);
+    if (rcOut?.action !== "commit-a") {
+      reviewerCommit = { action: "none", reason: typeof rcOut?.reason === "string" ? rcOut.reason : "decision-error" };
+    } else {
+      const plan: ReviewerCommitPlan = {
+        action: "commit-a",
+        reason: String(rcOut.reason ?? "class-a-fixable"),
+        reviewedHead: pre.pr.headSha,
+        headRef: pre.pr.headRefName,
+        fixedSha: pre.fixedSha,
+        blockingPaths: strList(rcOut.blockingPaths),
+        followUpPaths: strList(rcOut.followUpPaths),
+        bodyFix: rcOut.bodyFix === true,
+        blockingLocations: blocking.map((b) => b.location),
+      };
+      reviewerCommit = plan;
+      if (opts.reviewerFixed === undefined) {
+        // Pass 1: pause BEFORE any effect so the agent can make the commit. Idempotent: nothing is written.
+        return {
+          verdict: null,
+          reason: `reviewer commit pending: ${plan.reason}`,
+          reviewVerdict: "FAIL",
+          blockers,
+          maxSeverity,
+          worstFinding,
+          trailer: "",
+          round: null,
+          deepQa: null,
+          effects,
+          nextStep: "reviewer-commit",
+          reviewerCommit: plan,
+          dryRun: opts.dryRun,
+          degraded,
+        };
+      }
+      // Pass 2a: verify the pushed commit BEFORE it can override a FAIL.
+      const sha40 = opts.reviewerFixed;
+      const sha12 = sha40.slice(0, 12);
+      const commitRes = await ports.gh(["api", `repos/${repo}/commits/${sha40}`]);
+      const parsed = commitRes.ok ? tryParse(commitRes.stdout) : undefined;
+      const parents = isRecord(parsed) && Array.isArray(parsed.parents) ? parsed.parents : [];
+      const firstParent = isRecord(parents[0]) ? parents[0].sha : undefined;
+      const message = isRecord(parsed) && isRecord(parsed.commit) && typeof parsed.commit.message === "string" ? parsed.commit.message : "";
+      const hasTrailer = /^QA-Fix: A\s*$/m.test(message);
+      const live = await liveHeadOid();
+      if (firstParent !== pre.pr.headSha || !hasTrailer || live !== sha40) {
+        throw new PreVerdictError(
+          "reviewer-fixed-unverified",
+          `reviewer commit ${sha12} not verified (parent=${String(firstParent)}, trailer=${hasTrailer}, live head=${live || "unreadable"})`,
+        );
+      }
+      reviewVerdict = "PASS"; // nominal, as the pre-wiring sidecar did: the round is a PASS-pending-CI at the new head
+      verdict = "PASS-pending-CI";
+      verdictReason = `reviewer fixed every blocking finding in ${sha12} (QA-Fix: A); awaiting CI at the new head`;
+      blockers = 0;
+      maxSeverity = "none";
+      worstFinding = "";
+      report = annotateReviewerFixedReport(report, plan.blockingLocations ?? [], sha12);
+      trailerExtra = { headSha: sha40, qaFixes: [sha12] };
+    }
+  }
+  if (opts.reviewerFixed !== undefined && trailerExtra === null) {
+    throw new PreVerdictError("reviewer-fixed-unverified", "no fresh commit-a decision for --reviewer-fixed");
+  }
+
+  const trailerOut = await ports.phase("trailer", { pr, verdict, blockers, maxSeverity, ...(trailerExtra ?? {}) });
   const trailer = requireField(trailerOut.trailer as string | undefined, "trailer");
   const roundOut = await ports.phase("round-action", {
     pr,
@@ -542,6 +694,7 @@ async function runRouteImpl(
     deepQa: roundOut.deepQa ?? null,
     effects,
     nextStep,
+    ...(reviewerCommit !== undefined ? { reviewerCommit } : {}),
     dryRun: opts.dryRun,
     degraded,
   };
@@ -556,7 +709,7 @@ if (isEntrypoint(import.meta.url)) {
     const preflightPath = flagValue(argv, "--preflight");
     if (preflightPath === undefined) {
       throw new UsageError(
-        "usage: route.ts --preflight <file> --findings <file> --summaries <file> [--packet <file>] [--defer] [--dry-run] [--repo owner/name]",
+        "usage: route.ts --preflight <file> --findings <file> --summaries <file> [--packet <file>] [--defer] [--dry-run] [--repo owner/name] [--reviewer-fixed <sha40> | --reviewer-commit-aborted]",
       );
     }
     const repo = flagValue(argv, "--repo") ?? DEFAULT_REPO;
@@ -570,6 +723,8 @@ if (isEntrypoint(import.meta.url)) {
         findingsPath: flagValue(argv, "--findings"),
         summariesPath: flagValue(argv, "--summaries"),
         packetPath: flagValue(argv, "--packet"),
+        reviewerFixed: flagValue(argv, "--reviewer-fixed"),
+        reviewerCommitAborted: hasFlag(argv, "--reviewer-commit-aborted"),
       },
       pre,
       ports,
