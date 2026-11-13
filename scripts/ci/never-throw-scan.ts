@@ -197,7 +197,7 @@ export async function scanTrackedFiles(): Promise<ScanTrackedResult> {
     for (const rel of files) {
       const source = await readFile(resolve(REPO_ROOT, rel), "utf8");
       const r = scanSource(rel, source);
-      if (!r.ok) return r;
+      if ("error" in r) return { ok: false, error: r.error };
       for (const f of r.findings) keys.add(findingKey(rel, f));
     }
     return { ok: true, keys: [...keys].sort() };
@@ -235,7 +235,7 @@ async function main(argv: string[]): Promise<number> {
   const init = argv.includes("--init");
   const write = argv.includes("--write-baseline");
   const scan = await scanTrackedFiles();
-  if (!scan.ok) {
+  if ("error" in scan) {
     console.error(`[${NAME}] ${scan.error}`);
     return 2;
   }
