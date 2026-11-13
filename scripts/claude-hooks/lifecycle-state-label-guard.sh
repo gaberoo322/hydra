@@ -543,7 +543,9 @@ def _api_label_state(args, npre=0):
     # `gh api`: mutating call that writes labels on an issue: either
     # issues/<n>/labels[/<name>] or a PATCH/POST of issues/<n> carrying labels.
     # npre: leading global-flag tokens (-R <repo>) prepended by the caller.
-    if len(args) > npre and args[npre] == "graphql":
+    # The endpoint may follow any gh api flag (-X POST graphql, -H x graphql),
+    # so match the bare token anywhere rather than at a fixed offset.
+    if "graphql" in args:
         # A label mutation through GraphQL (addLabelsToLabelable /
         # removeLabelsFromLabelable / updateIssue labelIds) carries opaque
         # ids, but deny it when the same command names a lifecycle state.

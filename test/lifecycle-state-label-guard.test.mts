@@ -414,6 +414,15 @@ describe("lifecycle-state-label-guard: -R ordering and documented gaps (PR #5426
   test("gh api graphql without -R naming a state stays denied (sibling pin)", () => {
     assertDeny(`${GH_API} graphql -f query='mutation { addLabelsToLabelable(input:{labelIds:["x"]}) } needs-qa'`);
   });
+  test("gh api -X POST graphql naming a state is denied (round-7)", () => {
+    assertDeny(`gh api -X POST graphql -f query='mutation { addLabelsToLabelable(input:{labelIds:["x"]}) } needs-qa'`);
+  });
+  test("gh api -H x graphql naming a state is denied (round-7)", () => {
+    assertDeny(`gh api -H 'Accept: x' graphql -f query='mutation { addLabelsToLabelable(input:{labelIds:["x"]}) } needs-qa'`);
+  });
+  test("gh api -X POST graphql with no state word stays allowed (sibling pin)", () => {
+    assertAllow(`gh api -X POST graphql -f query='mutation { addLabelsToLabelable(input:{labelIds:["x"]}) } bug'`);
+  });
   test("gh -R this repo api graphql with no state word stays allowed (sibling pin)", () => {
     assertAllow(`gh -R gaberoo322/hydra api graphql -f query='mutation { addLabelsToLabelable(input:{labelIds:["x"]}) } bug'`);
   });
