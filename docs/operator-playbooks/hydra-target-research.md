@@ -22,11 +22,8 @@ Full research cycle for the Hydra autonomous orchestrator. Output drives what Hy
 
 Files:
 1. `~/hydra/config/direction/vision.md`
-2. `~/hydra/config/direction/goals.md`
-3. `~/hydra/config/direction/priorities.md`
-4. `~/hydra/config/direction/roadmap.md`
-5. `~/hydra/config/feedback/to-planner.md`
-6. `$TARGET_WS/CONTEXT.md` and `$TARGET_WS/direction/vision.md` — the target's OWN domain framing; the researcher prompts below deliberately carry no domain vocabulary of their own (issue #4411, INV-8) — read these first for what this target's domain, technical stack, and market actually are.
+2. `~/hydra/config/direction/priorities.md`
+3. `$TARGET_WS/CONTEXT.md` and `$TARGET_WS/direction/vision.md` — the target's OWN domain framing; the researcher prompts below deliberately carry no domain vocabulary of their own (issue #4411, INV-8) — read these first for what this target's domain, technical stack, and market actually are.
 
 Live state (parallel):
 ```bash

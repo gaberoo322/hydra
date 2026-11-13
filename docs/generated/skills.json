@@ -516,7 +516,7 @@
       "name": "hydra-target-retro",
       "path": "docs/operator-playbooks/hydra-target-retro.md",
       "stage": "operator-interactive",
-      "description": "Per-run (or daily) Target retrospective — deep-reads failed and reframed Target builds plus subagent friction reports, extracts recurring failure patterns, and routes them — capped ≤2/run, deduped — into the Target planner/executor feedback surface (prompt-shaped) and Redis Target-backlog (code-shaped). NO gated PR, NO tier machinery.",
+      "description": "Per-run (or daily) Target retrospective — deep-reads failed and reframed Target builds plus subagent friction reports, extracts recurring failure patterns, and files them — capped ≤2/run, deduped — as needs-triage issues on the Target board. NO gated PR, NO tier machinery.",
       "dispatchedBy": [],
       "composedFrom": [
         "docs/operator-playbooks/_fragments/target-seam-preamble.md"

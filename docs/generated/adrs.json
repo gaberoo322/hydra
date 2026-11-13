@@ -261,9 +261,7 @@
         "docs/operator-playbooks/hydra-qa.md",
         "docs/operator-playbooks/hydra-research.md",
         "docs/operator-playbooks/hydra-target-build.md",
-        "docs/operator-playbooks/hydra-target-incident.md",
         "docs/operator-playbooks/hydra-target-research.md",
-        "docs/operator-playbooks/hydra-target-retro.md",
         "docs/quality-gates.md",
         "docs/reference.md",
         "src/autopilot/CONTEXT.md"
@@ -926,6 +924,7 @@
         "docs/operator-playbooks/hydra-target-build.md",
         "docs/operator-playbooks/hydra-target-cleanup.md",
         "docs/operator-playbooks/hydra-target-discover.md",
+        "docs/operator-playbooks/hydra-target-incident.md",
         "docs/operator-playbooks/hydra-target-qa.md",
         "docs/operator-playbooks/hydra-target-research.md",
         "docs/operator-playbooks/hydra-target-retro.md",
