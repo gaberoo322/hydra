@@ -1,5 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   scanSource,
   diffKeys,
@@ -82,6 +85,18 @@ describe("never-throw-scan scanSource", () => {
   it("returns ok:false rather than throwing on a crash input", () => {
     const r = scanSource("x.ts", undefined as unknown as string);
     assert.equal(r.ok, false);
+  });
+});
+
+describe("never-throw-scan advisory wiring", () => {
+  it("stays advisory: wired only in advisory-checks and never scans the live tree", () => {
+    const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+    const advisory = readFileSync(join(root, ".github/workflows/advisory-checks.yml"), "utf8");
+    const ci = readFileSync(join(root, ".github/workflows/ci.yml"), "utf8");
+    assert.match(advisory, /if: always\(\)\n\s+run: npx tsx scripts\/ci\/never-throw-scan\.ts/);
+    assert.equal(ci.includes("never-throw-scan"), false);
+    const self = readFileSync(fileURLToPath(import.meta.url), "utf8");
+    assert.equal(self.includes("scanTracked" + "Files("), false);
   });
 });
 
