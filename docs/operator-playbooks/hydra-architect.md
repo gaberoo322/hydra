@@ -116,7 +116,7 @@ echo "=== Target ==="
 unset TARGET_WS TARGET_APP_DIR
 eval "$(cd ~/hydra && npx tsx scripts/target/print-target-facts.ts --sh)"
 [ -n "${TARGET_WS:-}" ] || echo "Target unresolved -- skipping Target collectors"
-if [ -n "${TARGET_APP_DIR:-}" ]; then (cd "${TARGET_APP_DIR:?}" && find src -name '*.ts' -o -name '*.tsx' | wc -l; npx vitest run 2>&1 | tail -3); fi
+if [ -n "${TARGET_APP_DIR:-}" ]; then (cd "${TARGET_APP_DIR:?}" && find src -name '*.ts' -o -name '*.tsx' | wc -l); fi
 echo "=== Config ==="; find ~/hydra/config -name '*.md' | wc -l
 ```
 
