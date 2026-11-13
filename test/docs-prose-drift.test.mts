@@ -26,6 +26,10 @@ import {
   blankProse,
   classifyToken,
   compareBaseline,
+  danglingTermClaims,
+  definedTermsIn,
+  termResolves,
+  termShaped,
   countClaimsIn,
   envVarClaimResolves,
   normaliseRedisKey,
@@ -577,5 +581,95 @@ describe("prose-drift: verification never throws on unreadable inputs", () => {
     await withFixture({ [BASELINE_FILE]: JSON.stringify(["a:path:b"]) }, (root) => {
       deepStrictEqual(readBaseline(root), ["a:path:b"]);
     });
+  });
+});
+
+describe("prose-drift: dangling glossary terms (#5491)", () => {
+  const glossary = [
+    "# Glossary",
+    "",
+    "**Run Ledger**:",
+    "A thing.",
+    "",
+    "**Target**:",
+    "Another.",
+    "",
+    "```",
+    "**Fenced Term**:",
+    "```",
+    "",
+  ].join("\n");
+
+  test("defined terms come only from `**Term**:` entry lines outside fences", () => {
+    deepStrictEqual([...definedTermsIn(blankProse(glossary))].sort(), ["run ledger", "target"]);
+  });
+
+  test("term-shape filter keeps term-shaped phrases and drops emphasis", () => {
+    for (const yes of ["Run Ledger", "Turn Row", "Time of Day", "Builder-Health Scorecard"]) ok(termShaped(yes), yes);
+    for (const no of ["never", "Operator:", "STD-REDIS-SEAM", "T1", "Not A Term.", "lower Start", "(none)"]) {
+      ok(!termShaped(no), no);
+    }
+  });
+
+  test("resolution is case-insensitive and folds a plural or possessive, nothing fuzzier", () => {
+    const defined = new Set(["autopilot run", "target"]);
+    ok(termResolves("Autopilot Runs", defined));
+    ok(termResolves("**Target's**", defined));
+    ok(termResolves("autopilot run", defined));
+    ok(!termResolves("Autopilot Cycle", defined));
+  });
+
+  test("a fenced bold phrase never yields a claim and a speaker label is excluded", () => {
+    const body = ["**Turn Row** here.", "", "```", "**Fenced Term**", "```", "", "**Operator:** hi"].join("\n");
+    const claims = danglingTermClaims(blankProse(body), new Set(["run ledger"]));
+    deepStrictEqual(claims.map((c) => c.phrase), ["Turn Row"]);
+  });
+
+  test("scan reports a dangling term in CONTEXT.md and a module map; a module map mints no definition", async () => {
+    await withFixture(
+      {
+        "CONTEXT.md": glossary + "\nSee **Ghost Term** and **Run Ledger**.\n",
+        "src/x/CONTEXT.md": "**Local Term**:\nnot a definition.\n\nUses **Local Term** and **Run Ledger**.\n",
+        "docs/adr/0001.md": "**Ghost Term** in an ADR is emphasis.\n",
+      },
+      (root) => {
+        const offenders = scanProseDrift(root, {
+          corpusRows: [
+            { path: "CONTEXT.md", tier: "living" },
+            { path: "src/x/CONTEXT.md", tier: "module-map" },
+            { path: "docs/adr/0001.md", tier: "adr" },
+          ],
+          fragmentFiles: [],
+          tracked: ["CONTEXT.md", "src/x/CONTEXT.md", "docs/adr/0001.md"],
+          routePaths: [],
+          redisKeyPatterns: [],
+          skillNames: [],
+          envVarNames: [],
+          counts: [],
+          retiredTerms: [],
+          sourceBlob: "",
+        });
+        deepStrictEqual(offenderRowsAndIndex(offenders).rows, [
+          "CONTEXT.md:dangling-term:Ghost Term",
+          "src/x/CONTEXT.md:dangling-term:Local Term",
+        ]);
+        strictEqual(kindOfRow("CONTEXT.md:dangling-term:Ghost Term"), "dangling-term");
+      },
+    );
+  });
+
+  test("renderReport prints a dangling-term row with its kind-specific fix and the docblock count prose stays true", () => {
+    const o: Offender = {
+      file: "CONTEXT.md",
+      line: 7,
+      kind: "dangling-term",
+      token: "Ghost Term",
+      fix: "define the term in CONTEXT.md (separate ubiquitous-language PR) or de-bold the phrase if it is emphasis",
+    };
+    const { rows, byRow } = offenderRowsAndIndex([o]);
+    ok(renderReport("new", rows, byRow).includes(`CONTEXT.md:7 — dangling-term — Ghost Term — ${o.fix}`));
+    const src = readFileSync(join(REPO_ROOT, "scripts/docs/prose-drift.ts"), "utf8");
+    ok(src.includes("The ten offender kinds") && src.includes("Five checks"), "docblock counts must match the ten kinds / five checks");
+    ok(!src.includes("The nine offender kinds") && !src.includes("Four checks"), "stale count prose must be gone");
   });
 });

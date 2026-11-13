@@ -201,6 +201,40 @@ def closing_issues(pr_json):
     return out
 
 
+def closing_pr_number(pr_json, issue):
+    """The number of the first PR whose body CLOSES `issue` (negation-aware,
+    same predicate as `closing_issues()`), or None. Issue #5318: reap passes it
+    as the seam's `--evidence pr=<N>` on the needs-qa promotion."""
+    for pr in _prs(pr_json):
+        number = pr.get("number")
+        if not isinstance(number, int) or isinstance(number, bool):
+            continue
+        for m in _CLOSE_RE.finditer(pr.get("body") or ""):
+            if m.group(1) is not None and int(m.group(1)) == issue:
+                return number
+    return None
+
+
+def referenced_pairs(pr_json):
+    """Return `{issue: pr_number}` over the SAME union predicate as
+    `referenced_issues()` (issue #5318 INV-10). First matching PR wins, in
+    payload order. Rows without an integer `number` still contribute their
+    issue refs via `referenced_issues`' semantics but carry no pr, so they
+    are skipped here (a pair needs both halves).
+
+    Consumer: recover-stale.sh, which passes the PR number as the seam's
+    `--evidence pr=<N>` on its needs-qa promotions.
+    """
+    out = {}
+    for pr in _prs(pr_json):
+        number = pr.get("number")
+        if not isinstance(number, int) or isinstance(number, bool):
+            continue
+        for issue in sorted(_branch_refs(pr) | _body_refs(pr)):
+            out.setdefault(issue, number)
+    return out
+
+
 def _selector_for(argv):
     """Map argv onto a predicate. Zero args = the union (the contract
     recover-stale.sh and the hydra-dev parent flow already depend on);
@@ -214,13 +248,19 @@ def _selector_for(argv):
     if len(argv) == 2 and argv[0] == "--source" and argv[1] in ("branch", "body"):
         return branch_issues if argv[1] == "branch" else bodyref_issues
     sys.stderr.write(
-        "usage: pr-refs.py [--source branch|body] [--closing] < gh-pr-list-JSON\n"
+        "usage: pr-refs.py [--source branch|body] [--closing] [--pairs] < gh-pr-list-JSON\n"
         f"unknown arguments: {' '.join(argv)}\n"
     )
     sys.exit(2)
 
 
 def main():
+    if sys.argv[1:] == ["--pairs"]:
+        pairs = referenced_pairs(sys.stdin.read())
+        # One `<issue> <pr>` line per pair, sorted by issue for determinism.
+        for issue in sorted(pairs):
+            sys.stdout.write(f"{issue} {pairs[issue]}\n")
+        return
     nums = _selector_for(sys.argv[1:])(sys.stdin.read())
     if nums:
         # Space-separated, sorted for determinism. No trailing newline needed —
