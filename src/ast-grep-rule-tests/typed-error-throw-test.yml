@@ -1,0 +1,30 @@
+# Rule tests for src/ast-grep-rules/typed-error-throw.yml (issue #5434).
+# Run: npx --yes -p @ast-grep/cli@0.43.0 ast-grep test --skip-snapshot-tests
+# `valid` snippets must NOT match; `invalid` snippets MUST match.
+id: typed-error-throw
+valid:
+  - |
+    throw new InvariantViolationError("bad state");
+  - |
+    throw new RedisSeamError("read failed", { cause: err });
+  - |
+    throw new TypeError("expected string");
+  - |
+    throw new RangeError("out of range");
+  - |
+    catch (err) { throw err; }
+  - |
+    throw new errors.Error("qualified");
+  - |
+    const e = new Error("constructed but not thrown"); return e;
+invalid:
+  - |
+    throw new Error("boom");
+  - |
+    throw new Error();
+  - |
+    throw new Error("boom", { cause: err });
+  - |
+    throw Error("no new");
+  - |
+    function f() { if (!x) { throw new Error(`bad ${x}`); } }

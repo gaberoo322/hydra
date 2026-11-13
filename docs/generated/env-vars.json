@@ -2224,6 +2224,21 @@
       }
     },
     {
+      "name": "HYDRA_REPO_ROOT",
+      "readSites": [
+        {
+          "path": "scripts/docs/generate-inventories.ts"
+        },
+        {
+          "path": "scripts/test/suite-count-check.mjs"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/docs/generate-inventories.ts"
+      }
+    },
+    {
       "name": "HYDRA_RESEARCH_MIN_INTERVAL_MS",
       "readSites": [],
       "inEnvExample": true,
@@ -2423,6 +2438,18 @@
       "inEnvExample": false,
       "source": {
         "path": "src/target-config.ts"
+      }
+    },
+    {
+      "name": "HYDRA_TMP_REAP_ROOT",
+      "readSites": [
+        {
+          "path": "scripts/reap-stale-tmp.sh"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/reap-stale-tmp.sh"
       }
     },
     {

@@ -60,6 +60,7 @@ import {
   fetchTurnsWithJoins,
   type ProjectionDeps,
 } from "../src/autopilot/run-projections.ts";
+import { joinedTurnFromWire } from "../src/autopilot/turn-row.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -222,6 +223,10 @@ describe("flagDispatchesForDrill", () => {
 // projectDispatches (pure)
 // ---------------------------------------------------------------------------
 
+/** Rebuild typed joined turns from wire-shaped fixtures (outcomes inline on the actions). */
+const pd = (turns: Array<Record<string, unknown>>) =>
+  projectDispatches(turns.flatMap((t) => joinedTurnFromWire(t) ?? []));
+
 describe("projectDispatches", () => {
   const BRANCH = "worktree-agent-ab2331d4-t6-dev_orch";
   const dispatchAction = {
@@ -236,7 +241,7 @@ describe("projectDispatches", () => {
   });
 
   test("slot dispatch_id joins an earlier action with a null snapshot -> one row (#5369)", () => {
-    const out = projectDispatches([
+    const out = pd([
       { turn_n: 6, actions: [dispatchAction], slots_snapshot: { dev_orch: null } },
       { turn_n: 7, actions: [], slots_snapshot: slotAt("a8e26dad6183e4a7b", BRANCH) },
     ]);
@@ -248,7 +253,7 @@ describe("projectDispatches", () => {
   });
 
   test("outcome-less action registered by worktreeBranch still joins (#5369)", () => {
-    const out = projectDispatches([
+    const out = pd([
       { turn_n: 6, actions: [{ ...dispatchAction, outcome: null }], slots_snapshot: {} },
       { turn_n: 7, actions: [], slots_snapshot: slotAt("t1", BRANCH) },
     ]);
@@ -256,7 +261,7 @@ describe("projectDispatches", () => {
   });
 
   test("same dispatch_id with a second distinct task_id emits a second row (#3834 preserved)", () => {
-    const out = projectDispatches([
+    const out = pd([
       { turn_n: 6, actions: [dispatchAction], slots_snapshot: { dev_orch: null } },
       { turn_n: 7, actions: [], slots_snapshot: slotAt("taskA", BRANCH) },
       { turn_n: 8, actions: [], slots_snapshot: slotAt("taskB", BRANCH) },
@@ -265,7 +270,7 @@ describe("projectDispatches", () => {
   });
 
   test("a different dispatch_id does not join (#5369)", () => {
-    const out = projectDispatches([
+    const out = pd([
       { turn_n: 6, actions: [dispatchAction], slots_snapshot: { dev_orch: null } },
       { turn_n: 7, actions: [], slots_snapshot: slotAt("taskA", "other") },
     ]);
@@ -287,7 +292,7 @@ describe("projectDispatches", () => {
         ],
       },
     ];
-    const out = projectDispatches(turns);
+    const out = pd(turns);
     assert.equal(out.length, 1);
     assert.equal(out[0].cycleId, "c1");
     assert.equal(out[0].skill, "hydra-dev");
@@ -302,7 +307,7 @@ describe("projectDispatches", () => {
     const turns = [
       { turn_n: 3, actions: [{ type: "dispatch", cycleId: "c9", outcome: null }] },
     ];
-    const out = projectDispatches(turns);
+    const out = pd(turns);
     assert.equal(out[0].cycleId, "c9");
     assert.equal(out[0].status, null);
     assert.equal(out[0].bucket, null);
@@ -329,7 +334,7 @@ describe("projectDispatches", () => {
         ],
       },
     ];
-    const out = projectDispatches(turns);
+    const out = pd(turns);
     assert.equal(out.length, 1);
     assert.equal(out[0].anchorReference, "#961");
     assert.equal(out[0].skill, "hydra-dev");
@@ -350,7 +355,7 @@ describe("projectDispatches", () => {
         },
       },
     ];
-    const out = projectDispatches(turns);
+    const out = pd(turns);
     assert.equal(out.length, 2, "two occupied slots → two dispatches (null slot skipped)");
 
     const qa = out.find((d) => d.skill === "hydra-qa");
@@ -387,7 +392,7 @@ describe("projectDispatches", () => {
         },
       },
     ];
-    const out = projectDispatches(turns);
+    const out = pd(turns);
     assert.equal(out.length, 1, "merged by slot — exactly one dispatch, no double-count");
     assert.equal(out[0].skill, "hydra-dev", "action skill wins");
     assert.equal(out[0].anchorReference, "issue-918", "action anchor wins");
@@ -409,7 +414,7 @@ describe("projectDispatches", () => {
         },
       },
     ];
-    const out = projectDispatches(turns);
+    const out = pd(turns);
     assert.equal(out.length, 1);
     assert.equal(out[0].skill, "hydra-qa");
     assert.equal(out[0].anchorReference, "PR#970");
@@ -427,7 +432,7 @@ describe("projectDispatches", () => {
         slots_snapshot: { dev_orch: "not-an-object", qa_orch: 42, research_orch: ["x"] },
       },
     ];
-    const out = projectDispatches(turns);
+    const out = pd(turns);
     // The action dispatch survives; non-object slot members are skipped.
     assert.equal(out.length, 1);
     assert.equal(out[0].skill, "hydra-dev");
@@ -456,7 +461,7 @@ describe("projectDispatches", () => {
       { turn_n: 6, actions: [], slots_snapshot: { design_concept_orch: slotEntry } },
       { turn_n: 7, actions: [], slots_snapshot: { design_concept_orch: slotEntry } },
     ];
-    const out = projectDispatches(turns);
+    const out = pd(turns);
     assert.equal(out.length, 1, "one real dispatch → exactly one RetroDispatch");
     assert.equal(out[0].cycleId, "a4ddfcd1b57226e5a");
     assert.equal(out[0].turn_n, 5, "the earliest-turn row is canonical");
@@ -491,7 +496,7 @@ describe("projectDispatches", () => {
       },
       { turn_n: 6, actions: [], slots_snapshot: { qa_orch: slotEntry } },
     ];
-    const out = projectDispatches(turns);
+    const out = pd(turns);
     assert.equal(out.length, 1, "action + later snapshots merge by task_id — no duplicate row");
     assert.equal(out[0].turn_n, 5, "dispatching turn stays canonical");
     assert.equal(out[0].status, "merged", "action/outcome values win");
@@ -516,7 +521,7 @@ describe("projectDispatches", () => {
         },
       },
     ];
-    const out = projectDispatches(turns);
+    const out = pd(turns);
     assert.equal(out.length, 1, "same task_id across turns — one row");
     assert.equal(out[0].turn_n, 1, "earliest-turn row is canonical");
     assert.equal(out[0].anchorReference, "PR#1767", "later snapshot fills the null anchor");
@@ -540,7 +545,7 @@ describe("projectDispatches", () => {
         },
       },
     ];
-    const out = projectDispatches(turns);
+    const out = pd(turns);
     assert.equal(out.length, 2, "different identities in the same slot are different dispatches");
     assert.deepEqual(out.map((d) => d.cycleId), ["tid-first", "tid-second"]);
     assert.deepEqual(out.map((d) => d.anchorReference), ["#100", "#200"]);
@@ -561,7 +566,7 @@ describe("projectDispatches", () => {
         slots_snapshot: { dev_orch: { skill: "hydra-dev", anchor: "#300", started_epoch: 1781210700 } },
       },
     ];
-    const out = projectDispatches(turns);
+    const out = pd(turns);
     assert.equal(out.length, 1, "same slot@started_epoch — one row despite no task_id");
     assert.equal(out[0].turn_n, 3);
   });
@@ -574,7 +579,7 @@ describe("projectDispatches", () => {
       { turn_n: 1, actions: [], slots_snapshot: { dev_orch: { skill: "hydra-dev", anchor: "#400" } } },
       { turn_n: 2, actions: [], slots_snapshot: { dev_orch: { skill: "hydra-dev", anchor: "#400" } } },
     ];
-    const out = projectDispatches(turns);
+    const out = pd(turns);
     assert.equal(out.length, 2, "no durable identity — no cross-turn merge");
   });
 });
@@ -2139,7 +2144,7 @@ function readRunViaRealJoin(
     return {
       ok: true as const,
       run: { run_id: runId, status: "ended", term_reason: "budget" },
-      turns,
+      turns: turns.map((t) => t.raw),
     };
   };
 }

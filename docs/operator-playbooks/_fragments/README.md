@@ -52,3 +52,29 @@ no-frontmatter skip path.) This `README.md` is likewise never read by the glob.
 Edit the fragment here, then run `scripts/sync-skills.sh` (or let the deploy /
 post-merge hook do it). **Never hand-edit a generated `SKILL.md`** — it carries
 a DO-NOT-EDIT banner and will be overwritten on the next sync.
+
+## Reference check (issue #5499)
+
+Every playbook and fragment is scanned by `test/playbook-reference-check.test.mts`,
+part of the required `npm test` suite. A cited repo path, HTTP API route,
+`npm run` script, ADR number, or code symbol attributed to a file must resolve
+against the tree, and a cited ADR must not be superseded, or the suite fails
+naming the file, line and reference. The exact rules live in the header of
+`scripts/ci/playbook-reference-check.ts`.
+
+When a cite is an illustration and not a real reference, mark it:
+
+- one line — put `ref-check: example` on that line, inside an HTML comment in
+  prose (`<!-- ref-check: example -->`) or a `#` comment in a shell block;
+- several lines — wrap them in `<!-- ref-check: example-start -->` and
+  `<!-- ref-check: example-end -->`.
+
+Placeholders (`<name>`, `NNNN`, `*`), metasyntactic names (`foo`, `bar`, `baz`, `qux`),
+paths under another root (`$TARGET_WS/...`), Target-side `npm run` scripts and
+routes behind `$TARGET_WEB_URL` are skipped without a marker. This `README.md` is not scanned.
+
+Dead references that predate the check sit in
+`scripts/ci/playbook-reference-baseline.json`. The baseline only shrinks: fix a
+dead cite and the suite fails until you lower it with
+`npx tsx scripts/ci/playbook-reference-check.ts --write-baseline`. Never add an
+entry to make a new dead cite pass — fix the cite or mark it as an example.

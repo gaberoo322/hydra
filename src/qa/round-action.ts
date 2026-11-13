@@ -6,9 +6,13 @@
  * scripts/ci/qa-verdict.ts re-exports the names its consumers import.
  */
 
+import { isVerifierCore } from "../untouchable.ts";
 import type { ReviewVerdict } from "./admission.ts";
-import { CAP_DEFAULTS, countReviewedFailRoundsSinceReset } from "../lifecycle/caps.ts";
+import { classifyQaFixPath } from "./fix-proof.ts";
+import { detectOneWayDoor, requiresOneWayDepth } from "./one-way-door.ts";
+import type { ReviewerCommitsValue } from "./rollout-switches.ts";
 import { qaVerdictHistory } from "./prior-round.ts";
+import { CAP_DEFAULTS, countReviewedFailRoundsSinceReset } from "../lifecycle/caps.ts";
 import { isFailVerdict, nextQaVerdictRound, type FinalVerdict, type QaVerdictTrailer } from "./verdict-trailer.ts";
 
 /**
@@ -426,4 +430,274 @@ export function decideRound(input: DecideRoundInput): DecideRoundResult {
   const failMarker =
     deepQa?.action === "bounce" || deepQa?.action === "block-and-escalate" ? DEEP_QA_FAIL_MARKER : null;
   return { round, deepQa, passMarker, escalationSummary, labels: QA_ESCALATION_LABELS, failMarker };
+}
+
+// ---------------------------------------------------------------------------
+// Reviewer commit, class A (issue #5267, ADR-0046 Decision 2; epic #5255).
+//
+// When the `reviewer-commits` rollout stage is `A` or `A+B`, a round whose
+// EVERY blocking finding sits in a class-A location (the PR body, docs,
+// changelog, generated inventories, ratchet baselines) may be repaired by the
+// reviewer itself instead of bouncing to dev. The decision is pure and
+// all-or-nothing: one blocking finding anywhere else makes the whole round
+// `none` and the ordinary FAIL routing runs unchanged. It never edits, filters
+// or re-grades a finding (the fold owns the verdict). All I/O lives in
+// src/qa/phases.ts and the playbook's step 9.4.
+// ---------------------------------------------------------------------------
+
+export type ReviewerCommitReason =
+  | "stage-off"
+  | "tier-fence"
+  | "verifier-core"
+  | "one-way-door"
+  | "no-blocking"
+  | "ineligible-finding"
+  | "out-of-scope"
+  | "decision-error"
+  | "class-a-fixable";
+
+export interface ReviewerCommitDecision {
+  action: "none" | "commit-a";
+  reason: ReviewerCommitReason;
+  detail: string;
+  /** Class-A paths named by BLOCKING findings: every one must end up staged (empty unless commit-a). */
+  blockingPaths: string[];
+  /** Class-A paths named only by low follow-ups: an optional subset may ride along, none is required. */
+  followUpPaths: string[];
+  /** True when a blocking finding is located at the PR body. */
+  bodyFix: boolean;
+}
+
+export interface ReviewerCommitInput {
+  /** The EFFECTIVE `reviewer-commits` switch (read from the QA session's master-based tree). */
+  stage: ReviewerCommitsValue;
+  tier: number | null;
+  /** The PR's full changed-file list. */
+  changedPaths: readonly string[];
+  /** Unified diff of the PR (empty/unparseable => door `unknown` => refuse). */
+  diff: string;
+  /** `fold.blocking[]` rows (the rows that set blockers>0). */
+  blocking: ReadonlyArray<{ location: string }>;
+  /** `fold.followUps[]` rows; lows at class-A locations may ride along. */
+  followUps?: ReadonlyArray<{ location: string }>;
+  /** Paths listed under the PR body's `## Files out of scope`; null = unreadable body (fail closed). */
+  outOfScope: readonly string[] | null;
+}
+
+const noReviewerCommit = (reason: ReviewerCommitReason, detail: string): ReviewerCommitDecision => ({
+  action: "none",
+  reason,
+  detail,
+  blockingPaths: [],
+  followUpPaths: [],
+  bodyFix: false,
+});
+
+/**
+ * The repo path (and first line number, when present) a finding location names,
+ * or null for a placeholder / non-path. The single parser behind the step-9.4
+ * per-row re-verify (`qa-commit-checks.ts row-loc`), so the playbook never
+ * re-implements it in shell.
+ */
+export function reviewerCommitLocationRef(location: string): { path: string; line: number | null } | null {
+  let s = String(location ?? "").replace(/\s+/g, " ").trim();
+  s = s.replace(/^(["'`])(.*)\1$/, "$2").trim();
+  s = s.replace(/\s*\([^)]*\)\s*$/, "").trim();
+  let line: number | null = null;
+  const m = /(?:[:#]\s*L?(\d+)(?:[-:]\d+)*|\s+L(\d+))$/i.exec(s);
+  if (m) {
+    line = Number(m[1] ?? m[2]);
+    s = s.slice(0, m.index).trim();
+  }
+  s = s.replace(/^\.\//, "");
+  if (!/^[A-Za-z0-9_.\-/]+$/.test(s)) return null;
+  return s.includes("/") || s.includes(".") ? { path: s, line } : null;
+}
+
+/** The repo path a finding location names, or null for a placeholder / non-path. */
+export function reviewerCommitLocationPath(location: string): string | null {
+  return reviewerCommitLocationRef(location)?.path ?? null;
+}
+
+/** Paths listed under a PR body's `## Files out of scope` heading (backticked or bare bullets). */
+export function parseFilesOutOfScope(body: string): string[] {
+  const lines = String(body ?? "").split(/\r?\n/);
+  const out: string[] = [];
+  let inSection = false;
+  for (const line of lines) {
+    if (/^#{1,6}\s/.test(line)) {
+      inSection = /^#{1,6}\s+files out of scope\b/i.test(line);
+      continue;
+    }
+    if (!inSection) continue;
+    // Fail closed: collect BOTH the backticked spans and the bullet's leading
+    // token, so prose like "- docs/x.md (see `y`)" never drops the real path.
+    out.push(...[...line.matchAll(/`([^`]+)`/g)].map((m) => (m[1] as string).trim()));
+    const bullet = /^\s*[-*]\s+(\S+)/.exec(line);
+    if (bullet) {
+      // Strip emphasis wrappers, backticks and trailing punctuation so "- src/x.ts: reason" and "- **docs/x.md**" match the path.
+      const token = (bullet[1] as string).replace(/^[*_`]+/, "").replace(/[*_`:,;.]+$/, "");
+      if (token !== "") out.push(token);
+    }
+  }
+  return [...new Set(out.map((p) => p.replace(/^\.\//, "")).filter((p) => p !== ""))];
+}
+
+/** Glob entry (`docs/generated/**`): `*` matches anything (even `/`) and `?` one char, so the fence only ever widens. */
+function globToRegExp(glob: string): RegExp {
+  const src = glob.replace(/[.+^${}()|\\]/g, "\\$&").replace(/\*+/g, ".*").replace(/\?/g, ".");
+  return new RegExp(`^${src}`);
+}
+
+function isOutOfScope(path: string, outOfScope: readonly string[]): boolean {
+  return outOfScope.some((o) =>
+    /[*?[]/.test(o)
+      ? globToRegExp(o).test(path)
+      : o.endsWith("/") ? path.startsWith(o) : path === o || path.startsWith(`${o}/`));
+}
+
+/**
+ * Decide whether the reviewer may repair this round itself with a class-A
+ * commit. Pure, total, never throws (STD-VERIFY-NEVER-THROW). Fences, in order:
+ * stage, tier (T4 / unknown), Verifier Core, one-way/unknown door; then
+ * all-or-nothing eligibility of every blocking finding.
+ */
+export function decideReviewerCommit(input: ReviewerCommitInput): ReviewerCommitDecision {
+  try {
+    if (input.stage !== "A" && input.stage !== "A+B") {
+      return noReviewerCommit("stage-off", "reviewer-commits rollout stage is off");
+    }
+    const tier = typeof input.tier === "number" && Number.isFinite(input.tier) && input.tier >= 1 ? input.tier : null;
+    if (tier === null || tier >= 4) {
+      return noReviewerCommit("tier-fence", "no reviewer commits on T4 or an unknown tier");
+    }
+    const changed = input.changedPaths.map((p) => String(p ?? "").trim()).filter((p) => p !== "");
+    if (changed.some((p) => isVerifierCore(p))) {
+      return noReviewerCommit("verifier-core", "the PR touches Verifier Core");
+    }
+    const door = detectOneWayDoor({ paths: changed, diff: input.diff });
+    if (requiresOneWayDepth(door)) {
+      return noReviewerCommit("one-way-door", `door is ${door.door}: one-way and unknown refuse`);
+    }
+    if (input.blocking.length === 0) {
+      return noReviewerCommit("no-blocking", "no blocking finding to repair");
+    }
+    const blockingPaths: string[] = [];
+    const followUpPaths: string[] = [];
+    let bodyFix = false;
+    const consider = (location: string, blocking: boolean): ReviewerCommitDecision | null => {
+      if (/^\s*pr body\s*$/i.test(String(location ?? ""))) {
+        // Only a BLOCKING row demands a body edit; a low follow-up at the PR
+        // body must never force bodyFix on (INV-3).
+        if (blocking) bodyFix = true;
+        return null;
+      }
+      const path = reviewerCommitLocationPath(location);
+      const cls = path === null ? "deny" : classifyQaFixPath(path);
+      if (path === null || (cls !== "A" && cls !== "AB")) {
+        return blocking
+          ? noReviewerCommit("ineligible-finding", `blocking finding at ${JSON.stringify(location)} is not class A`)
+          : null;
+      }
+      if (input.outOfScope === null || isOutOfScope(path, input.outOfScope)) {
+        return blocking
+          ? noReviewerCommit("out-of-scope", `${path} is listed under Files out of scope or the scope is unreadable`)
+          : null;
+      }
+      const into = blocking ? blockingPaths : followUpPaths;
+      if (!into.includes(path)) into.push(path);
+      return null;
+    };
+    for (const f of input.blocking) {
+      const refusal = consider(f.location, true);
+      if (refusal) return refusal;
+    }
+    for (const f of input.followUps ?? []) consider(f.location, false);
+    // A path that is also blocking is required, never merely optional.
+    const optionalPaths = followUpPaths.filter((p) => !blockingPaths.includes(p));
+    return {
+      action: "commit-a",
+      reason: "class-a-fixable",
+      detail: `every blocking finding is class A (${blockingPaths.length} path(s)${bodyFix ? " + PR body" : ""})`,
+      blockingPaths,
+      followUpPaths: optionalPaths,
+      bodyFix,
+    };
+  } catch (err) {
+    console.error("[round-action] decideReviewerCommit failed; refusing the commit path:", err);
+    return noReviewerCommit("decision-error", "decision threw; fail closed");
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+// Deterministic re-verify helpers for playbook step 9.4 (issue #5267, round-3
+// fix-forward). Pure; scripts/ci/qa-commit-checks.ts is their only caller.
+// ---------------------------------------------------------------------------
+
+const SECTION_HEADING = /^#{1,6}\s/;
+const FILES_IN_SCOPE_HEADING = /^#{1,6}\s+files in scope\b/i;
+
+function splitBodySections(body: string): Array<{ heading: string; lines: string[] }> {
+  const lines = String(body ?? "").replace(/\r\n/g, "\n").replace(/\s+$/, "").split("\n");
+  const sections: Array<{ heading: string; lines: string[] }> = [{ heading: "", lines: [] }];
+  for (const line of lines) {
+    if (SECTION_HEADING.test(line)) sections.push({ heading: line.trim(), lines: [] });
+    else (sections[sections.length - 1] as { lines: string[] }).lines.push(line);
+  }
+  return sections;
+}
+
+/**
+ * INV-6: a reviewer body fix may only ADD bullets under `## Files in scope`.
+ * Every other section (Files out of scope, reconciliation, Closes-ref...) must
+ * be byte-identical, the heading sequence unchanged, and the original lines of
+ * Files in scope must survive in order. Never throws.
+ */
+export function checkBodyScopeEdit(orig: string, next: string): { ok: boolean; reason: string } {
+  try {
+    const a = splitBodySections(orig);
+    const b = splitBodySections(next);
+    if (a.length !== b.length || a.some((s, i) => s.heading !== (b[i] as { heading: string }).heading)) {
+      return { ok: false, reason: "section headings changed" };
+    }
+    for (let i = 0; i < a.length; i++) {
+      const x = a[i] as { heading: string; lines: string[] };
+      const y = b[i] as { heading: string; lines: string[] };
+      if (!FILES_IN_SCOPE_HEADING.test(x.heading)) {
+        if (x.lines.join("\n") !== y.lines.join("\n")) {
+          return { ok: false, reason: `section ${JSON.stringify(x.heading || "(preamble)")} was edited` };
+        }
+        continue;
+      }
+      let j = 0;
+      for (const line of y.lines) {
+        if (j < x.lines.length && line === x.lines[j]) j++;
+        else if (!/^\s*$/.test(line) && !/^\s*[-*]\s+\S/.test(line)) {
+          return { ok: false, reason: `Files in scope gained a non-bullet line ${JSON.stringify(line)}` };
+        }
+      }
+      if (j !== x.lines.length) return { ok: false, reason: "an original Files in scope line was removed or edited" };
+    }
+    return { ok: true, reason: "only Files in scope bullets were added" };
+  } catch (err) {
+    console.error("[round-action] checkBodyScopeEdit failed; refusing:", err);
+    return { ok: false, reason: "check threw; fail closed" };
+  }
+}
+
+/**
+ * True when a unified `-U0` diff of ONE file has a hunk touching or adjacent
+ * to `line` (old or new side). A non-positive / non-integer line is false.
+ */
+export function diffHasHunkNearLine(diffU0: string, line: number): boolean {
+  if (!Number.isInteger(line) || line < 1) return false;
+  for (const m of String(diffU0 ?? "").matchAll(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/gm)) {
+    const oa = Number(m[1]);
+    const ol = m[2] === undefined ? 1 : Number(m[2]);
+    const na = Number(m[3]);
+    const nl = m[4] === undefined ? 1 : Number(m[4]);
+    if ((line >= oa - 1 && line <= oa + ol) || (line >= na - 1 && line <= na + nl)) return true;
+  }
+  return false;
 }

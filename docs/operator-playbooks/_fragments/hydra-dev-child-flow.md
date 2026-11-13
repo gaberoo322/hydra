@@ -81,8 +81,9 @@ Run these numbered steps.
    from it. Also run `npm run typecheck` and `npm run build`.
 7a. **Fail-loud lint on changed files** (issue #4732, widened #5424) — run the
    ast-grep `fail-loud-catch` rule over the PR's changed `.ts`/`.mts` files,
-   `fail-loud-except-py` over changed `.py` files and `fail-loud-devnull-sh` over
-   changed `.sh` files, and fix every hit before `gh pr create` (the shrink-only
+   `fail-loud-except-py` over changed `.py` files, `fail-loud-devnull-sh` over
+   changed `.sh` files and `typed-error-throw` over changed `src/`/`scripts/` `.ts`
+   files (bare `throw new Error`, STD-ERROR-TYPED-CODE), and fix every hit before `gh pr create` (the shrink-only
    `test/fail-loud-ratchet.test.mts` in `npm test` blocks any new or edited hit). Recipe: "Fail-loud lint — changed files" below.
 7b. **Test-can-fail proof on changed tests** (issue #5447, STD-TEST-CAN-FAIL) —
    run the same advisory judge CI runs over the test files you added or
@@ -247,7 +248,7 @@ would swallow these backticked paths as scope entries):
 
 Artifact: `<first 12+ chars of .artifactHash>`
 
-- INV-1: "<verbatim prefix of invariants[0], >=16 chars>" — verified by: `file-contains: src/x.ts :: doThing(`
+- INV-1: "<verbatim prefix of invariants[0], >=16 chars>" — verified by: `file-contains: src/foo.ts :: doThing(`
 - INV-2: "<verbatim prefix of invariants[1], a MUST NOT>" — verified by: `test: test/api.test.mts :: "pruneIndex is never called on a closed lane"`
 ```
 
@@ -493,6 +494,14 @@ for spec in "fail-loud-catch:*.ts *.mts" "fail-loud-catch-src:*.ts" "logger-seam
     npx tsx scripts/ast-search.ts --rule "$rule" --text "${LINT_ARGS[@]}"
   fi
 done
+# STD-ERROR-TYPED-CODE (#5434): bare `throw new Error(...)` in changed src/ + scripts/ .ts files.
+TE_ARGS=()
+while IFS= read -r f; do
+  [ -f "$f" ] && TE_ARGS+=(--path "$f")
+done < <(git diff --name-only --diff-filter=AM origin/master...HEAD -- '*.ts')
+if [ "${#TE_ARGS[@]}" -gt 0 ]; then
+  npx tsx scripts/ast-search.ts --rule typed-error-throw --text "${TE_ARGS[@]}"
+fi
 # Prints `file:line:col: <catch text>` per hit (0-based line/col); no output = clean.
 # Python/shell use `# intentional: <reason>` as the annotation.
 ```
@@ -500,7 +509,9 @@ done
 For every hit in a catch you **added or edited**: log with context
 (`console.error("[module] what failed:", err)` or `logger.warn({ err }, "…")`),
 rethrow, or — only when swallowing is genuinely correct — annotate it
-`/* intentional: <reason> */`. A hit in untouched pre-existing code in a changed
+`/* intentional: <reason> */`. A `typed-error-throw` hit means replace the bare
+`Error` with the `src/errors.ts` subclass that fits the failure kind (the rule
+message lists them; `InvariantViolationError` is never for I/O). A hit in untouched pre-existing code in a changed
 file is optional to fix; do not widen the diff for it. The rule is advisory
 (no CI job runs it), so this step is the enforcement. Rule fixtures:
 `src/ast-grep-rule-tests/fail-loud-catch-test.yml`, run with

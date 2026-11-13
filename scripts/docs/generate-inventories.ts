@@ -54,7 +54,11 @@ import { extractUnitsScripts, unitScriptRowLabel } from "./inventories/units-scr
 // because the drift test imports corpusRowLabel from here.
 export { corpusRowLabel, routeRowLabel };
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+// HYDRA_REPO_ROOT lets a trusted copy of this script regenerate ANOTHER checkout
+// (the QA reviewer-commit step runs master-based scripts against a PR worktree, #5267).
+const REPO_ROOT = process.env.HYDRA_REPO_ROOT
+  ? resolve(process.env.HYDRA_REPO_ROOT)
+  : resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 /**
  * What a family extractor may depend on, built once per run. The adrs family

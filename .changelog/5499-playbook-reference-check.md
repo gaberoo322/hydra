@@ -1,0 +1,1 @@
+- feat: required-suite check that every path, route, npm script, ADR and code symbol cited in an operator playbook resolves, with a shrink-only baseline (#5499)

@@ -12,7 +12,8 @@
  * are memoised per (pr, field-set) so one phase run costs one read per kind.
  */
 
-import { ghJson } from "../github/gh.ts";
+import { ghExec, ghJson } from "../github/gh.ts";
+import { loadRolloutSwitches } from "./rollout-switches.ts";
 import { gitExec } from "../github/git.ts";
 import { isGhFailure } from "../github/exec.ts";
 import { listRequiredStatusContextsOrNull } from "../github/prs.ts";
@@ -95,6 +96,26 @@ export function createGhQaVerdictFetchers(repo: string): QaVerdictFetchers {
       return [...v.comments, ...v.reviews]
         .map((e) => (isRecord(e) && typeof e.body === "string" ? e.body : ""))
         .filter((b) => b.length > 0);
+    },
+
+    async rolloutStage() {
+      // cwd is the QA session's own master-based worktree, never the PR tree.
+      const sw = await loadRolloutSwitches(process.cwd());
+      return sw.effective["reviewer-commits"];
+    },
+
+    async prDiff(pr) {
+      const res = await ghExec(["pr", "diff", String(pr), "--repo", repo]);
+      if (isGhFailure(res)) {
+        console.error(`[qa-verdict] gh pr diff ${pr} failed (${res.code})`);
+        return null;
+      }
+      return res.data.stdout;
+    },
+
+    async prBody(pr) {
+      const v = await prView(pr, "body");
+      return v && typeof v.body === "string" ? v.body : null;
     },
 
     async ancestry(priorSha, headSha): Promise<QaAncestryFacts> {
