@@ -69,13 +69,14 @@ worktree-fence violations are safety failures.
    instead of a worktree, it MUST abort. Falling back to `~/hydra` left the main
    checkout on a feature branch on 2026-05-11 and stalled deploys for ~30 min
    (incident: PR #245).
-5. **Run tests via `npm test`, or pass `--test-force-exit` for a single file.
-   NEVER run a bare `node --test <file>`.** Orchestrator modules open a
+5. **Run tests via `npm test`, or `npm run test:file -- test/<name>.test.mts`
+   for a single file. NEVER run a bare `node --test <file>`.** Orchestrator modules open a
    long-lived `ioredis` connection and a scheduler `setTimeout`, so `node:test`
    keeps the event loop alive and **hangs forever** after the assertions pass.
    A hung test blocks the Bash tool call, which froze a whole autopilot session
-   for 11h (2026-05-28). `npm test` already includes `--test-force-exit`; for a
-   subset use `node --test --test-force-exit <file>`.
+   for 11h (2026-05-28). `npm test` and `test:file` both carry `--test-force-exit`, and
+   `test:file` adds the per-run Redis DB isolation a bare `node --test` skips
+   (CLAUDE.md "Single-file test run").
 6. **To identify *which* test failed in one run, use `npm run test:debug` —
    never re-run + grep (issue #1076).** The default reporter buffers stdout and
    `--test-force-exit` tears the process down before the per-test `not ok`

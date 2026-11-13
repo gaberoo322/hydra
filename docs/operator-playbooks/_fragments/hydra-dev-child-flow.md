@@ -50,7 +50,7 @@ Run these numbered steps.
    where practical — **red before green, one slice at a time** (the `tdd` skill
    is reference-only in v1.1: refactoring is NOT part of the loop, it belongs in
    review) — and run `npm run typecheck` plus **single test files**
-   (`node --test --test-force-exit test/<name>.test.mts`) **regularly as you go**,
+   (`npm run test:file -- test/<name>.test.mts`) **regularly as you go**,
    reserving the full `npm test` sweep for step 8.
 6. **Declare glossary/ADR impact** — per `docs/agents/domain.md`, add a
    `Glossary impact:` / `ADR impact:` line to the PR body for any term resolved
@@ -127,7 +127,7 @@ Run these numbered steps.
    NOT open the PR — emit a `## Friction Report` naming the unmet invariant
    and stop.
 9b. **MANDATORY — run the pre-PR mechanical gate BEFORE `gh pr create`**
-   (issue #4731). Write the PR body to a file first, then run all three checks
+   (issue #4731). Write the PR body to a file first, then run all four checks
    under "Pre-PR mechanical gate" below — reconcile dry-run against that body
    file, baseline regeneration, foreground `npm test` + `npm run typecheck:test`,
    and the `Merge danger:` field check (Gate 4).
@@ -135,7 +135,7 @@ Run these numbered steps.
    `gh pr create --body-file <that same file>` so the checked body is the
    submitted body.
 9. Open a PR with `closes #$issue_number`, a `## Files in scope` mirror of the
-    issue's section, a `Tier: <0|1|2|3>` line from the API, and a
+    issue's section, a `Tier: <1|2|3|4>` line from the API, and a
     `Merge danger: <one-way|two-way> — <reason>` line (issue #5258, ADR-0046
     D5) as its own top-level line beside `Tier:` — never inside
     `## Files in scope`. It declares whether `git revert` plus the automatic
@@ -200,7 +200,7 @@ npm run deposit:reflect -- hydra-dev <ANCHOR_REF> --file .hydra-refl.json
 
 **Grounding test-count deposit (issue #2754 — MANDATORY, child-step 8a, right
 after `npm test` passes).** The helper parses the node:test footer of the log
-you just captured (it never re-runs the 15-25 minute suite with `--from-log`) and
+you just captured (it never re-runs the full suite with `--from-log`) and
 deposits `hydra-grounding-tests-<task_id>` (`testsAfter` / `testsPassingAfter`)
 keyed on the SAME harness `task_id`. Best-effort:
 ```bash
@@ -339,8 +339,10 @@ npx tsx scripts/ci/design-concept-reconcile-run.ts \
   FILE-SET verdict hard-fails the required `test` job until the baseline
   matches:
   ```bash
-  node scripts/test/suite-count-check.mjs --update-baseline
+  node scripts/test/suite-count-check.mjs --update-baseline --only <your test files>
   ```
+  (`--only` scopes the rewrite to your files; without it the whole baseline is
+  rewritten — CLAUDE.md "SUITE-COUNT GATE".)
 - Added a test file that resolves to a new or already-baselined **subject**
   (`test/test-file-sprawl-guard.test.mts` fails)? First prefer extending the
   subject's existing test file — sprawl is what the ratchet exists to stop.
@@ -406,7 +408,7 @@ The service exposes a deterministic classifier at
 `GET http://localhost:4000/api/tier?files=<comma-separated repo-relative paths>`.
 Call it with the exact files you changed and use the returned `tier` verbatim.
 Never infer tier from path patterns. Response (200):
-`{ "tier": 0|1|2|3, "reason": "<string>", "perFile": [...] }`; (400) missing-files.
+`{ "tier": 1|2|3|4, "reason": "<string>", "perFile": [...] }`; (400) missing-files.
 ```bash
 # After committing on the feature branch, before opening the PR. Diff against
 # origin/master, never local master (the shared gitdir's local master goes stale
@@ -513,19 +515,20 @@ rethrow, or — only when swallowing is genuinely correct — annotate it
 `/* intentional: <reason> */`. A `typed-error-throw` hit means replace the bare
 `Error` with the `src/errors.ts` subclass that fits the failure kind (the rule
 message lists them; `InvariantViolationError` is never for I/O). A hit in untouched pre-existing code in a changed
-file is optional to fix; do not widen the diff for it. The rule is advisory
-(no CI job runs it), so this step is the enforcement. Rule fixtures:
+file is optional to fix; do not widen the diff for it. The shrink-only
+`test/fail-loud-ratchet.test.mts` runs in the required suite and blocks new hits;
+this step catches them before the PR. Rule fixtures:
 `src/ast-grep-rule-tests/fail-loud-catch-test.yml`, run with
 `npx --yes -p @ast-grep/cli@0.43.0 ast-grep test --skip-snapshot-tests`.
 
 ## Critical test/verification rules
 
-- **Run tests via `npm test`, or `--test-force-exit` for a single file. NEVER a
-  bare `node --test <file>`** — orchestrator modules keep a long-lived ioredis
+- **Run tests via `npm test`, or `npm run test:file -- test/<name>.test.mts` for a
+  single file. NEVER a bare `node --test <file>`** — orchestrator modules keep a long-lived ioredis
   connection + scheduler timeout alive, so `node:test` hangs forever after the
   assertions pass (froze an 11h autopilot session, 2026-05-28). `npm test`
-  already includes `--test-force-exit`; for a subset use
-  `node --test --test-force-exit <file>`.
+  and `test:file` carry `--test-force-exit`; `test:file` also adds per-run Redis
+  DB isolation (CLAUDE.md "Single-file test run").
 - **To identify WHICH test failed in one run, use `npm run test:debug`, never
   re-run + grep** (issue #1076). The default reporter buffers stdout and
   force-exit tears down before the per-test `not ok` lines flush. `test:debug`

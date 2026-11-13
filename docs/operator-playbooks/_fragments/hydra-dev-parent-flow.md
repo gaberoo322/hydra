@@ -110,15 +110,6 @@ non-zero exit is final; never fall back to a direct `in-progress` label write
 ### 5. Spawn worktree agent
 
 - **Claude:** `Agent(isolation: "worktree", prompt: <child-prompt>)`
-- **Codex (retired, ADR-0006):** Create worktree first, then `codex exec` inside it:
-  ```bash
-  WT=/dev/shm/hydra-worktrees/issue-${issue_number}-$(date +%s)
-  git -C ~/hydra worktree add -b "issue-${issue_number}-dev" "$WT" master
-  # MANDATORY: /dev/shm worktrees have no ancestor node_modules — symlink first.
-  # (cue: devshm-verify-worktree-needs-node-modules-symlink)
-  ln -sfn /home/gabe/hydra/node_modules "$WT/node_modules"
-  (cd "$WT" && codex exec --skill hydra-dev-child --json "{\"issue\":${issue_number}}")
-  ```
 
 **Branch held by a stale sibling worktree (cue:
 pr-branch-checked-out-in-stale-sibling-worktree).** `git worktree add -b
@@ -146,8 +137,9 @@ trailing slash matches a directory, not the symlink-as-file. After staging, run
 is empty before committing. Prefer staging touched files by path.
 
 The child prompt MUST include the worktree-guard preamble, the PATH ANCHORING
-block, the ENTERWORKTREE ANCHOR block, and the scope-respect block (all in
-`hydra-dev-child-flow.md`). The child runs the child execution contract there.
+block, the ENTERWORKTREE ANCHOR block, and the scope-respect block (all in this
+fragment, below). The child runs the child execution contract in
+`hydra-dev-child-flow.md`.
 
 ### Child-prompt worktree-guard preamble (REQUIRED)
 
@@ -235,10 +227,9 @@ RULES:
 ```
 
 > Orthogonal note (issue #1861 / #549 — NOT the #2371 fix): the custom
-> `worktree-write-fence.sh` PreToolUse ghost-write hook is currently
-> *uninstalled* on this host. Installing it via `scripts/setup-claude-hooks.sh`
-> closes the orthogonal ghost-write-to-main gap but does NOT resolve the #2371
-> symptom above. Keep hook installation as a separate operator step.
+> `worktree-write-fence.sh` PreToolUse ghost-write hook is installed (see
+> `scripts/setup-claude-hooks.sh`). It closes the ghost-write-to-main gap but
+> does NOT resolve the #2371 symptom above.
 
 ### Child-prompt scope-respect block (REQUIRED — issue #396)
 

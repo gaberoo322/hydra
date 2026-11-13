@@ -87,7 +87,7 @@ export interface PrdInput {
    */
   expectedGlossaryTerms?: string[];
   /**
-   * Optional source pointer (e.g. `hydra:reports:research:2026-05-18T...`)
+   * Optional source pointer (e.g. `issue-5000`)
    * surfaced in the parent footer so future operators can trace the epic
    * back to the finding that produced it.
    */
@@ -480,7 +480,7 @@ export function renderChildBody(
  * `money-critical` for a Target slice on the risk surface (the label the
  * Target's automerge fence reads). Lifecycle STATE labels are never created by
  * hand (ADR-0047 D3, issue #5322): the child's first state is data, returned by
- * {@link childInitialState} and written through
+ * {@link childInitialState} (which also holds the child-labelling rule) and written through
  * `npx tsx scripts/lifecycle.ts advance`.
  */
 export function childLabels(slice: PrdSlice, scope: RenderScope = { kind: "orch" }): string[] {
@@ -492,9 +492,14 @@ export function childLabels(slice: PrdSlice, scope: RenderScope = { kind: "orch"
 }
 
 /**
- * The lifecycle state a child slice is born into, as data. Orchestrator scope:
- * always `ready-for-agent` (reached through `needs-triage`, the one gate-free
- * move from no state, then `advance ... ready-for-agent --reason scoped`). In
+ * The lifecycle state a child slice is born into, as data. THE normative
+ * child-labelling rule (hydra-tickets.md and hydra-prd.md point here and do not
+ * restate it): every orchestrator child is `ready-for-agent` (reached through
+ * `needs-triage`, the one gate-free move from no state, then
+ * `advance ... ready-for-agent --reason scoped`); dependency gating is the
+ * `Blocked by #N` body line, which `src/autopilot/board-state.ts` excludes from
+ * the ready pool (#3059/#3965), so a labelled-but-blocked orch child is never
+ * picked. In
  * Target scope (issue #5168) a slice with a `dependsOn` edge is filed `blocked`
  * INSTEAD of `ready-for-agent` (the Target build's board pick reads no blockers,
  * and `hydra-target-sweep` promotes it once its blocker closes).
