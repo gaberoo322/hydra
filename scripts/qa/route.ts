@@ -67,7 +67,7 @@ import {
   type RouteResult,
 } from "../../src/schemas/qa-plumbing-cli.ts";
 import { QA_ADMISSION_SKIP_MARKER, annotateReviewerFixedReport } from "../../src/qa/round-action.ts";
-import { COHORT_BASELINE_PATH, QA_ROLLOUT_CONFIG_PATH, resolveRolloutSwitches, tripFromBaseline, type ReviewerCommitsValue } from "../../src/qa/rollout-switches.ts";
+import { COHORT_BASELINE_PATH, QA_ROLLOUT_CONFIG_PATH, resolveReviewerCommitsStageFromTexts, type ReviewerCommitsValue } from "../../src/qa/rollout-switches.ts";
 import { parseQaVerdictTrailer } from "../../src/qa/verdict-trailer.ts";
 import { rowsFromFold } from "../../src/qa/review-findings-extract.ts";
 import type { StoredReviewFindingRow } from "../../src/redis/review-findings.ts";
@@ -324,7 +324,7 @@ async function runRouteImpl(
 
   /**
    * The `reviewer-commits` stage AT THE FIXED POINT (never process.cwd(): the QA session tree holds the
-   * PR head, so a PR could flip its own stage). Mirrors scripts/ci/qa-fix-proof.ts at --base. A null
+   * PR head, so a PR could flip its own stage). Shares resolveReviewerCommitsStageFromTexts with scripts/ci/qa-fix-proof.ts. A null
    * fixedSha or a failed `show` is stage `off` + degraded `rollout-stage`.
    */
   const readReviewerCommitsStage = async (): Promise<ReviewerCommitsValue> => {
@@ -338,7 +338,7 @@ async function runRouteImpl(
       degraded.push("rollout-stage");
       return "off";
     }
-    return resolveRolloutSwitches(tryParse(cfg.stdout), tripFromBaseline(base.stdout)).effective["reviewer-commits"];
+    return resolveReviewerCommitsStageFromTexts(cfg.stdout, base.stdout);
   };
 
   /** The result of a path that posted without a verdict (a stop comment or a defer). */

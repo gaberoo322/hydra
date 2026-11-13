@@ -87,6 +87,28 @@ export function tripFromBaseline(text: string): TripState {
   }
 }
 
+/**
+ * The single fixed-point `reviewer-commits` stage reader: given the config + baseline texts as read at a
+ * fixed ref (undefined when unreadable), resolve the effective stage. Shared by scripts/ci/qa-fix-proof.ts
+ * and scripts/qa/route.ts so the two gates that decide whether a reviewer commit may stand cannot drift.
+ */
+export function resolveReviewerCommitsStageFromTexts(
+  cfgText: string | undefined,
+  baselineText: string | undefined,
+): ReviewerCommitsValue {
+  let raw: unknown = undefined;
+  if (cfgText !== undefined) {
+    try {
+      raw = JSON.parse(cfgText);
+    } catch {
+      /* intentional: unparsable config resolves to config-malformed => off */
+      raw = "malformed";
+    }
+  }
+  const trip: TripState = baselineText === undefined ? "unknown" : tripFromBaseline(baselineText);
+  return resolveRolloutSwitches(raw, trip).effective["reviewer-commits"];
+}
+
 export interface RolloutDeps {
   readFile?: (path: string) => Promise<string>;
 }
