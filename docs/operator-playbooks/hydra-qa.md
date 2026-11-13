@@ -361,11 +361,31 @@ SUMMARIES_FILE=$(mktemp)   # {"standardsSummary": "...", "specSummary": "..."}
 ROUTE_JSON=$(node --no-warnings --experimental-strip-types scripts/qa/route.ts \
   --preflight "$PF" --packet "$PK" --findings "$FINDINGS_FILE" --summaries "$SUMMARIES_FILE") \
   || { echo "[hydra-qa] ERROR: route produced no verdict — pre-verdict exit, one QA-Verdict-Error comment at most, needs-qa untouched" >&2; exit 1; }
-rm -f "$FINDINGS_FILE" "$SUMMARIES_FILE"
 NEXT=$(printf '%s' "$ROUTE_JSON" | jq -er '.nextStep') || exit 1
 ```
 
-`route.ts` makes exactly ONE pass through the engine — fold → classify → trailer → round action, in-process — then performs the step-10 effects and prints `{verdict, reason, reviewVerdict, blockers, maxSeverity, worstFinding, trailer, round, deepQa, effects:[{kind, target, ok}], nextStep, degraded}`. `--dry-run` prints the identical plan with zero writes. Findings are bound RAW so a malformed file reaches the fold and fails closed to the high `reviewer-output-malformed` blocker; T1–T3 fold severity-gated, T4 (or an unknown tier) keeps the unchanged any-blocker AND (`aggregateAdversarialReview()`).
+#### 9.4 Reviewer commit branch — only when `route` pauses for it (issue #5415)
+
+If `NEXT` is `reviewer-commit`, `route` decided a class-A reviewer commit may repair this FAIL and has written nothing yet. Read `### 9.4 Reviewer commit (class A)` in `hydra-qa-reference.md`, run its block (every input comes from `$ROUTE_JSON.reviewerCommit`; it exports `RC_OK` and `NEW_HEAD`), then re-call `route` with the same files and read `NEXT` again:
+
+```bash
+if [ "$NEXT" = "reviewer-commit" ]; then
+  # ... run the reference sidecar's 9.4 block here ...
+  if [ "${RC_OK:-0}" = 1 ] && [ -n "${NEW_HEAD:-}" ]; then
+    ROUTE_JSON=$(node --no-warnings --experimental-strip-types scripts/qa/route.ts \
+      --preflight "$PF" --packet "$PK" --findings "$FINDINGS_FILE" --summaries "$SUMMARIES_FILE" --reviewer-fixed "$NEW_HEAD") || exit 1
+  else
+    ROUTE_JSON=$(node --no-warnings --experimental-strip-types scripts/qa/route.ts \
+      --preflight "$PF" --packet "$PK" --findings "$FINDINGS_FILE" --summaries "$SUMMARIES_FILE" --reviewer-commit-aborted) || exit 1
+  fi
+  NEXT=$(printf '%s' "$ROUTE_JSON" | jq -er '.nextStep') || exit 1
+fi
+rm -f "$FINDINGS_FILE" "$SUMMARIES_FILE"
+```
+
+The disarm-failed HARD STOP check and the auto-merge call site below run after this FINAL `route` call.
+
+`route.ts` makes exactly ONE pass through the engine — fold → (reviewed FAIL only) reviewer-commit decision → classify → trailer → round action, in-process — then performs the step-10 effects and prints `{verdict, reason, reviewVerdict, blockers, maxSeverity, worstFinding, trailer, round, deepQa, effects:[{kind, target, ok}], nextStep, reviewerCommit?, degraded}`. `--dry-run` prints the identical plan with zero writes. Findings are bound RAW so a malformed file reaches the fold and fails closed to the high `reviewer-output-malformed` blocker; T1–T3 fold severity-gated, T4 (or an unknown tier) keeps the unchanged any-blocker AND (`aggregateAdversarialReview()`).
 
 - **A non-zero fold / trailer / round-action result is a pre-verdict exit.** `route` exits 1 with at most one `QA-Verdict-Error` comment and `needs-qa` untouched; the next dispatch retries. There is no bash verdict fallback, and no path from a degraded fold or an empty round-action to a PASS. `--defer` is the only path that posts without a verdict.
 - **Every verdict comment ends with exactly one canonical trailer line** (the human header above it is free to drift; this line is not): `QA-Verdict: <PASS|FAIL|PASS-pending-CI|FAIL-pending-CI> pr=<N> round=<k> sha=<head12> blockers=<n> max_severity=<high|medium|low|none>`. The `trailer` engine phase derives `round` from the PR thread and owns the fail-closed `QA-Verdict-Error:` line. The full review lives only on the PR; the issue gets a short pointer that keeps its bounce-marker header line.
