@@ -65,6 +65,15 @@ describe("never-throw-scan scanSource", () => {
     );
   });
 
+  it("does not attribute an unguarded nested arrow body to the outer function", () => {
+    // The nested arrow sits OUTSIDE any try/catch, so only the function
+    // boundary check keeps its await/throw from being flagged on `f`.
+    assert.deepEqual(
+      kinds(`/** never throws */\nfunction f() { const h = async () => { await g(); throw new Error("x"); }; return h; }`),
+      [],
+    );
+  });
+
   it("treats await x().catch() as guarded", () => {
     assert.deepEqual(kinds(`/** never throws */\nasync function f() { await g().catch(() => 1); }`), []);
   });
