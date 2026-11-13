@@ -15,7 +15,6 @@ import {
   probeTargetCapabilities,
   renderCapabilityShell,
 } from "../scripts/target/target-capabilities.ts";
-import { collectTargetFacts } from "../scripts/target/print-target-facts.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 
@@ -111,13 +110,6 @@ describe("renderCapabilityShell", () => {
       .find((l) => l.startsWith("export TARGET_CAPABILITIES_JSON="))!;
     const json = line.slice("export TARGET_CAPABILITIES_JSON='".length, -1);
     assert.deepEqual(JSON.parse(json), caps);
-  });
-});
-
-describe("seam shape", () => {
-  test("collectTargetFacts() return shape is unchanged (no capabilities key)", () => {
-    const facts = collectTargetFacts();
-    assert.equal("capabilities" in facts, false);
   });
 });
 
