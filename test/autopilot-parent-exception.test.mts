@@ -357,7 +357,9 @@ describe("turn.sh journals its own exceptions, best-effort (#5323)", () => {
         ...process.env,
         HYDRA_AUTOPILOT_STATE: sb.state, HYDRA_AUTOPILOT_PLAN: sb.plan, HYDRA_AUTOPILOT_EVENTS: sb.events,
         HYDRA_AUTOPILOT_CANDIDATES: sb.cands, HYDRA_AUTOPILOT_SNAPSHOT: join(dir, "snapshot.json"),
-        HYDRA_AUTOPILOT_SNAPSHOT_REPLAY: SNAPSHOT_FIXTURE, HYDRA_AUTOPILOT_LOG: join(dir, "nightly.log"), ...extra,
+        HYDRA_AUTOPILOT_SNAPSHOT_REPLAY: SNAPSHOT_FIXTURE, HYDRA_AUTOPILOT_LOG: join(dir, "nightly.log"),
+        // Never POST fake run_ids at the live orchestrator (Phase 0.5 back-fill, #5488).
+        HYDRA_API_BASE: "http://127.0.0.1:1", ...extra,
       },
     });
     return { sb, r, doc: () => JSON.parse(readFileSync(sb.state, "utf-8")) };
