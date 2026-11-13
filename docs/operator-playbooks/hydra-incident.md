@@ -110,7 +110,7 @@ expands the live timestamp; the heredoc body stays literal):
 
 ```bash
 . ~/hydra/scripts/hydra/footer.sh
-gh issue create --repo gaberoo322/hydra --title "Post-mortem: <summary>" --label "needs-triage" --body "$(cat <<'EOF'
+gh issue create --repo gaberoo322/hydra --title "Post-mortem: <summary>" --body "$(cat <<'EOF'
 ## Incident Summary
 - **Type:** <regression/crash/build-failure/data-corruption>
 - **Severity:** <critical/high/medium>
@@ -141,6 +141,8 @@ EOF
 )
 $(hydra_issue_footer hydra-incident)"
 ```
+
+**State label (HARD):** `gh issue create` carries FLAG labels only, never a state. Immediately after it returns the issue URL, write the first state through the lifecycle seam: `npx tsx scripts/lifecycle.ts advance <N> needs-triage --actor hydra-incident` (from none, gate-free). If it returns `illegal-transition` with observed state `needs-triage` (the reconcile zero-state backstop raced it), carry on. A non-zero exit is otherwise final — never fall back to a direct label write (ADR-0047 D3/D4).
 
 ### Phase 5: Prevention rule
 

@@ -63,8 +63,15 @@ deterministic and unit-tested (`test/hydra-prd-template.test.mts`).
    `renderChildBody()`, resolving `dependsOn` indices to the real issue numbers;
    then re-render the parent with the real numbers and update it. The two passes
    are what keep cross-references resolvable without a back-edit per child.
-4. **Labels** — `parentLabels()` for the epic, `childLabels(slice)` for each
-   child, plus `ready-for-agent` on unblocked slices ONLY (above).
+4. **Labels and first state** — `gh issue create` carries FLAG labels only:
+   `parentLabels()` for the epic, `childLabels(slice)` for each child. The first
+   lifecycle state is data (`parentInitialState()` / `childInitialState(slice)`)
+   written in the same step through the seam — `npx tsx scripts/lifecycle.ts
+   advance <N> needs-triage --actor hydra-tickets` (from none, gate-free;
+   tolerate `illegal-transition` with observed state `needs-triage`), then for an
+   unblocked child ONLY `advance <N> ready-for-agent --reason scoped --rationale
+   "<epic title> slice <i>" --actor hydra-tickets`. A non-zero exit is otherwise
+   final; never a direct state-label write (ADR-0047 D3/D4).
 5. **Stamp the tier** — `Expected tier: N` per child from `GET /api/tier`, the
    single tier authority. Never self-classify by path.
 
@@ -91,12 +98,15 @@ on the **Target board** (issue #5168), and four things change:
    ladder is Orchestrator-only, and the Target derives its depth from the risk
    surface instead. `orch` scope keeps the default scope argument.
 3. **Publish on `$TARGET_GH_REPO`.** Every `gh issue create` / `gh issue edit`
-   carries `--repo "$TARGET_GH_REPO"`. The parent takes `enhancement` only, not
-   `parentLabels()`. On the Target board `needs-triage` is
+   carries `--repo "$TARGET_GH_REPO"` (the Target board is outside the
+   Orchestrator lifecycle seam, so the lifecycle CLI steps above are skipped and
+   the deny hook allows a non-Orchestrator `--repo`). The parent takes
+   `enhancement` only and no state. On the Target board `needs-triage` is
    `hydra-target-sweep`'s promote lane, so a triage label would queue the epic
    itself for a build.
-4. **Lane labels.** Apply `childLabels(slice, scope)` as returned: in Target
-   scope it already gives a slice with a `dependsOn` edge **`blocked`** instead
+4. **Lane labels (Target-only exception to INV-3).** On the Orchestrator board `gh issue create` carries FLAG labels only and the lane advance goes through the seam; the Target board is outside the seam (ADR-0047), so here — and only here — the lane label is a creation-time `--label`, which the deny hook permits solely because of `--repo "$TARGET_GH_REPO"`. Create each child with `childLabels(slice, scope)` (flags)
+   plus the lane `childInitialState(slice, scope)` as a `--label`: in Target
+   scope a slice with a `dependsOn` edge gets **`blocked`** instead
    of `ready-for-agent` (never bare). Its rendered
    `- Blocked by #N` lines are what `hydra-target-sweep` Step 3 reads to
    promote it to `ready-for-agent` once the blocker closes. The Target build

@@ -319,6 +319,7 @@
   "test/lifecycle-qa-verdict.test.mts": 8,
   "test/lifecycle-reconcile.test.mts": 8,
   "test/lifecycle-seam-check.test.mts": 4,
+  "test/lifecycle-state-label-guard.test.mts": 9,
   "test/lifecycle-transitions.test.mts": 5,
   "test/lifecycle-vocabulary-drift.test.mts": 9,
   "test/live-gate.test.mts": 1,

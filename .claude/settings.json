@@ -34,6 +34,10 @@
           {
             "type": "command",
             "command": "bash /home/gabe/hydra/scripts/claude-hooks/gh-label-delete-guard.sh"
+          },
+          {
+            "type": "command",
+            "command": "bash /home/gabe/hydra/scripts/claude-hooks/lifecycle-state-label-guard.sh"
           }
         ]
       },

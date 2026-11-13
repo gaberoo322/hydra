@@ -11,22 +11,25 @@ Run these numbered steps.
 
 1. **Verify isolation** — `pwd` + `git rev-parse --git-dir` under `.git/worktrees/`.
    Abort loudly if cwd is `/home/gabe/hydra` (never fall back to the main tree).
-1a. **Claim your anchor via the seam** (issue #4271, ADR-0047 D4) — workers
-   never write `in-progress` themselves. Parse `dispatchId=` / `runId=` /
-   `anchor=` from the `<!-- hydra-dispatch v1 … -->` sentinel on the first line
-   of the task prompt. If the issue was pinned (sentinel `anchor=` present, or
-   the prompt names the issue) do nothing: the dispatcher already holds the
-   claim. Otherwise (self-selected) open it now, which also takes the anchor
-   off the `glm-eligible` sweep for the dispatch's duration; the seam performs
-   the `ready-for-agent` -> `in-progress` advance:
-   ```bash
-   npx tsx scripts/lifecycle.ts dispatch "$ISSUE_NUMBER" --dispatch "$DISPATCH_ID" --class dev_orch --run "$RUN_ID" --purpose fresh
-   ```
-   `$DISPATCH_ID` / `$RUN_ID` come from the sentinel; without a sentinel use
-   `interactive-dev-$ISSUE_NUMBER-<epoch>` and `interactive`. `claim-held` ->
-   exclude that issue and re-run selection (at most 3 picks, then stop with a
-   report); `parked:*` or an enforce `advance-refused` -> stop and report, no
-   label write.
+1a. **Anchor claim — workers never write `in-progress` by hand** (issue #4271
+   INV-2, ADR-0047 D4, issue #5322). The `in-progress` claim keeps the anchor
+   out of the `glm-eligible` sweep for the whole dispatch (`isGlmEligibleCandidate`,
+   `src/scheduler/chores/glm-eligibility-sweep.ts`); it is the DISPATCHER's
+   write, not yours. Run from the repo root of the worktree:
+   - **Pinned anchor** (the issue number is in the `hydra-dispatch v1` sentinel
+     / dispatch prompt): only READ the claim —
+     `npx tsx scripts/lifecycle.ts claim-show "$ISSUE_NUMBER"`. If it reports no
+     open claim, log `[hydra-dev] WARN: no dispatch claim (pre-#5418 dispatcher)`
+     to stderr and continue. No write.
+   - **Unpinned, self-selected anchor**: fire the composite verb with the ids
+     from the sentinel —
+     `npx tsx scripts/lifecycle.ts dispatch "$ISSUE_NUMBER" --dispatch "$DISPATCH_ID" --class dev_orch --run "$RUN_ID" --purpose fresh`.
+     A `claim-held` refusal means another dispatch owns that issue: pick a
+     different issue.
+   Any other non-zero exit from the CLI is final for this step: log the JSON
+   line and continue (reap/reconcile own the hand-back); never fall back to a
+   direct label write (the deny hook refuses it). `claim-held` is the exception:
+   it is NOT log-and-continue — stop work on that issue and pick another.
 2. Read CLAUDE.md / AGENTS.md, CONTEXT.md, relevant ADRs.
 3. Extract the `## Files in scope` + `## Files out of scope` lists from the issue body.
 4. **Fetch per-anchor Reflections via the live API** (see "Reflection injection"

@@ -111,6 +111,7 @@
     "test/lifecycle-dispatch-claim.test.mts": "invariant-lint",
     "test/lifecycle-journal.test.mts": "invariant-lint",
     "test/lifecycle-reconcile.test.mts": "behaviour",
+    "test/lifecycle-state-label-guard.test.mts": "behaviour",
     "test/lifecycle-vocabulary-drift.test.mts": "drift-guard",
     "test/metrics-trend.test.mts": "grandfathered",
     "test/mutation-gate-inputs.test.mts": "grandfathered",

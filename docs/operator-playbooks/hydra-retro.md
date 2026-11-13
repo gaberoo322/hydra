@@ -239,7 +239,7 @@ If `apply === false` (the default), PRINT the plan and STOP — no issues, no PR
 
 Under `--apply`:
 
-- For each `plan.issues[]`: `gh issue create --repo gaberoo322/hydra --label needs-triage --title <title> --body <evidence + cue + Source>`. Then record the cue in the seen-list:
+- For each `plan.issues[]`: `gh issue create --repo gaberoo322/hydra --title <title> --body <evidence + cue + Source>` (no state label at creation), then `npx tsx scripts/lifecycle.ts advance <N> needs-triage --actor hydra-retro` (from none, gate-free; tolerate `illegal-transition` with observed state `needs-triage` — the reconcile backstop raced it; any other non-zero exit is final, never a direct label write, ADR-0047 D3/D4). Then record the cue in the seen-list:
 
       npx tsx -e 'import {recordRetroSeen} from "./src/redis/retro-seen.ts"; await recordRetroSeen({cue: process.env.CUE, decision: "issue", runId: process.env.RUN_ID, ref: process.env.REF, at: new Date().toISOString()}); process.exit(0);'
 

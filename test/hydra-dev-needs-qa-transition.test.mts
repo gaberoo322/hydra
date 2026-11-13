@@ -69,27 +69,19 @@ describe("hydra-dev playbook transitions issue to needs-qa after opening a PR (i
   const playbook = readFileSync(PLAYBOOK_PATH, "utf8");
   const block = extractSuccessBlock(playbook);
 
-  test("Success branch adds needs-qa to the source issue", () => {
+  test("Success branch advances the source issue to needs-qa through the lifecycle seam", () => {
     assert.match(
       block,
-      /gh issue edit\s+"?\$issue_number"?[\s\S]*--add-label\s+["']needs-qa["']/,
-      "Success branch must add needs-qa to the source issue so qa_orch auto-fires (#846)",
+      /scripts\/lifecycle\.ts advance\s+"?\$issue_number"?\s+needs-qa\s+--evidence\s+pr=/,
+      "Success branch must advance the source issue to needs-qa so qa_orch auto-fires (#846, ADR-0047 D3)",
     );
   });
 
-  test("Success branch removes ready-for-agent (not just in-progress)", () => {
-    // The #846 failures left issues stuck on `ready-for-agent`, so removing
-    // only `in-progress` is insufficient — BOTH must be stripped.
-    assert.match(
-      block,
-      /--remove-label\s+["']ready-for-agent["']/,
-      "Success branch must remove ready-for-agent — leaving it stale re-surfaces the issue for a duplicate dispatch (#770/#754)",
-    );
-    assert.match(
-      block,
-      /--remove-label\s+["']in-progress["']/,
-      "Success branch must also remove in-progress",
-    );
+  test("Success branch never writes a state label by hand (the seam strips ready-for-agent/in-progress)", () => {
+    // ADR-0047 D3 / #5322: the seam owns the swap, so the playbook carries no
+    // direct label flags; a refusal is final (no gh fallback).
+    assert.doesNotMatch(block, /--(?:add|remove)-label/, "no direct state-label write in the Success branch");
+    assert.match(block, /scripts\/lifecycle\.ts release\s+"?\$issue_number"?/, "claim is released");
   });
 
   test("Success branch transition is non-fatal (|| echo WARN guard)", () => {

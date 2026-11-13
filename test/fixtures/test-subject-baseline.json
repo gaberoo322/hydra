@@ -251,7 +251,7 @@
   "src/lifecycle/caps.ts": 1,
   "src/lifecycle/gates.ts": 1,
   "src/lifecycle/hold-exit.ts": 1,
-  "src/lifecycle/index.ts": 2,
+  "src/lifecycle/index.ts": 3,
   "src/lifecycle/park.ts": 1,
   "src/logger.ts": 1,
   "src/metrics/merge-predicate.ts": 1,

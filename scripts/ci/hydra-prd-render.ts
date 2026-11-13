@@ -475,40 +475,56 @@ export function renderChildBody(
 }
 
 /**
- * Render the labels the skill should apply to a child slice. Always includes
- * `ready-for-agent` plus the slice's kind (`enhancement` by default). In
- * Target scope (issue #5168) a slice with a `dependsOn` edge gets `blocked`
- * INSTEAD of `ready-for-agent` (the Target build's board pick reads no
- * blockers, and `hydra-target-sweep` promotes it once its blocker closes), and a
- * slice on the risk surface also carries `money-critical`, the label the
- * Target's automerge fence reads.
+ * Render the FLAG labels the skill should apply to a child slice at
+ * `gh issue create` time: the slice's kind (`enhancement` by default), plus
+ * `money-critical` for a Target slice on the risk surface (the label the
+ * Target's automerge fence reads). Lifecycle STATE labels are never created by
+ * hand (ADR-0047 D3, issue #5322): the child's first state is data, returned by
+ * {@link childInitialState} and written through
+ * `npx tsx scripts/lifecycle.ts advance`.
  */
 export function childLabels(slice: PrdSlice, scope: RenderScope = { kind: "orch" }): string[] {
   const kind = slice.kind ?? "enhancement";
-  if (scope.kind !== "target") return ["ready-for-agent", kind];
-  const lane = (slice.dependsOn ?? []).length > 0 ? "blocked" : "ready-for-agent";
-  const labels = [lane, kind];
+  if (scope.kind !== "target") return [kind];
+  const labels: string[] = [kind];
   if (riskSurfaceMatches(slice.filesInScope, scope.riskSurface).length > 0) labels.push("money-critical");
   return labels;
 }
 
 /**
- * Render the labels the skill should apply to the parent epic. Always includes
- * `enhancement` (the existing epic label vocabulary — `epic` is intentionally
- * not introduced here per issue #514's "reuse `enhancement` if introducing a
- * new label is out of scope" guidance) plus `needs-triage` so the epic is born
- * with a stable lifecycle label (issue #3788 Cause 2). Before this, a freshly
- * created parent carried only a category label — no `ready-for-agent` (epics
- * are correctly excluded, #777/#794) and nothing else — so once a later sweep
- * cleared a stale `blocked`, the epic reverted to fully label-less and stayed
- * an `untriaged_orphans` false-positive for its entire lifetime. `hydra-sweep`
- * already special-cases tracking parents at the `needs-triage` lane (skip
- * auto-triage, run the stuck-ness gate instead), so stamping `needs-triage`
- * here is safe: a PROGRESSING epic is left alone with the label intact, and a
- * STUCK one still routes to `ready-for-human` as before.
+ * The lifecycle state a child slice is born into, as data. Orchestrator scope:
+ * always `ready-for-agent` (reached through `needs-triage`, the one gate-free
+ * move from no state, then `advance ... ready-for-agent --reason scoped`). In
+ * Target scope (issue #5168) a slice with a `dependsOn` edge is filed `blocked`
+ * INSTEAD of `ready-for-agent` (the Target build's board pick reads no blockers,
+ * and `hydra-target-sweep` promotes it once its blocker closes).
+ */
+export function childInitialState(
+  slice: PrdSlice,
+  scope: RenderScope = { kind: "orch" },
+): "ready-for-agent" | "blocked" {
+  if (scope.kind !== "target") return "ready-for-agent";
+  return (slice.dependsOn ?? []).length > 0 ? "blocked" : "ready-for-agent";
+}
+
+/**
+ * Render the FLAG labels the skill should apply to the parent epic: `enhancement`
+ * (the existing epic label vocabulary; `epic` is intentionally not introduced
+ * per issue #514). The parent's lifecycle state is data too
+ * ({@link parentInitialState}): the epic is born into `needs-triage` so it
+ * never reverts to fully label-less (issue #3788 Cause 2, an `untriaged_orphans`
+ * false positive). It is written via `scripts/lifecycle.ts advance`, never as a
+ * creation label (issue #5322). `hydra-sweep` already special-cases tracking
+ * parents at the `needs-triage` lane (skip auto-triage, run the stuck-ness gate
+ * instead), and epics are never `ready-for-agent` (#777/#794).
  */
 export function parentLabels(): string[] {
-  return ["enhancement", "needs-triage"];
+  return ["enhancement"];
+}
+
+/** The lifecycle state a parent epic is born into (see {@link parentLabels}). */
+export function parentInitialState(): "needs-triage" {
+  return "needs-triage";
 }
 
 /**
