@@ -3187,13 +3187,15 @@ def _record_admission_refusal(
         outcome, reason = "idle", f"scope excluded ({scope})"
     elif gate == admission.GATE_BURNED:
         outcome, reason = "cooldown", burned_reason
-    else:  # admission.GATE_ORCH_REALM_SHARE_EXCEEDED
+    elif gate == admission.GATE_ORCH_REALM_SHARE_EXCEEDED:
         cap = orch_realm_share_state(state)
         out.debug.setdefault("orch_realm_share_skipped", {
             "max_share": cap["max_share"],
             "share": cap["share"],
         })
         outcome, reason = "budget", "orch realm weekly share exceeded"
+    else:
+        raise ValueError(f"unknown admission gate: {gate!r}")
     out.events.append(
         make_dispatch_decision_event(state, now, cls=cls, outcome=outcome, reason=reason)
     )
@@ -3237,7 +3239,7 @@ def _rule_pipeline_dispatch(
             freed_slots=frozenset(),
             scope=scope,
             burned_classes=burned,
-            orch_share_exceeded=orch_realm_share_exceeded(state),
+            orch_share_exceeded=lambda: orch_realm_share_exceeded(state),
             rows=CLASS_TAXONOMY,
         )
         if not verdict.admitted:
@@ -3484,7 +3486,7 @@ def _rule_signal_classes(
             freed_slots=frozenset(),
             scope=scope,
             burned_classes=burned,
-            orch_share_exceeded=orch_realm_share_exceeded(state),
+            orch_share_exceeded=lambda: orch_realm_share_exceeded(state),
             rows=CLASS_TAXONOMY,
         )
         if not verdict.admitted:

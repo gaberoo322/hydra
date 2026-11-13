@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Collection, Iterable, Mapping, NamedTuple
+from typing import Callable, Collection, Iterable, Mapping, NamedTuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import taxonomy  # noqa: E402
@@ -64,7 +64,7 @@ def admit(
     freed_slots: Collection[str],
     scope: str,
     burned_classes: Collection[str],
-    orch_share_exceeded: bool,
+    orch_share_exceeded: bool | Callable[[], bool],
     rows: Iterable[dict],
 ) -> Verdict:
     """Return ADMITTED, or a refusal carrying the first failing gate code.
@@ -73,8 +73,9 @@ def admit(
     is occupied is refused unless it is in `freed_slots` (slots the plan is
     already freeing). `rows` is the loaded taxonomy (scope source for both the
     scope mask and the orch-only share gate). `orch_share_exceeded` is the
-    pre-computed orch-realm weekly-share verdict; it applies only to classes
-    whose taxonomy scope is `orch`.
+    orch-realm weekly-share verdict (a bool, or a zero-arg callable evaluated
+    lazily -- only for an orch-scope class that passed every earlier gate); it
+    applies only to classes whose taxonomy scope is `orch`.
     """
     rows = list(rows)
     if dispatch_blocked:
@@ -87,8 +88,8 @@ def admit(
         return Verdict(False, GATE_SCOPE_EXCLUDED)
     if cls in burned_classes:
         return Verdict(False, GATE_BURNED)
-    if orch_share_exceeded and any(
-        r["name"] == cls and r["scope"] == "orch" for r in rows
+    if any(r["name"] == cls and r["scope"] == "orch" for r in rows) and (
+        orch_share_exceeded() if callable(orch_share_exceeded) else orch_share_exceeded
     ):
         return Verdict(False, GATE_ORCH_REALM_SHARE_EXCEEDED)
     return ADMITTED
