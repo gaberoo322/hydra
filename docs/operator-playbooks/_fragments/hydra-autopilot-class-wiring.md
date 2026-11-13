@@ -7,15 +7,15 @@ The authoritative sources for dispatch policy are `scripts/autopilot/classes.jso
 (`SIGNAL_LOOP_ORDER`); this file cites them by pointer and restates no value.
 
 > **Phase B wiring (issue #485, sub of #483):** `scout_orch` is a
-> calendar-driven signal class — a weekly walk (its `cooldownSeconds` in `classes.json`).
+> calendar-driven signal class (its `cooldownSeconds` in `classes.json`).
 > The walk surface (categories from `docs/ai-leverage-categories.md`,
 > and nothing else — the `dep:<name>` package.json surface was removed
 > in issue #4556 because the tool-scout playbook has no dependency-walk
 > procedure; dependency freshness/CVEs are covered by `npm run
 > deps:check` + the OSV scan) is built by
 > `src/scout/calendar-walk.ts:planWalk()`. Per-category cooldown
-> (30d default) and per-tool cooldown (90d, via the Phase A seen-list)
-> stack on top of the per-class cooldown — all three must clear
+> and per-tool cooldown (via the Phase A seen-list; values in
+> `src/scout/calendar-walk.ts`) stack on top of the per-class cooldown — all three must clear
 > before a category is dispatched. When the per-category cooldown says
 > "skip" but per-tool says "ready", the category-level skip wins
 > (operator preference: fewer issues). Each dispatched outcome is
@@ -41,9 +41,8 @@ The authoritative sources for dispatch policy are `scripts/autopilot/classes.jso
 > via `hydra-prd` / `to-tickets`. It is **issue-producing, not
 > direct-dispatch** — it never dispatches `dev_orch` itself; the issues it
 > files re-enter the board as ordinary `ready-for-agent` work on a later
-> turn. its cooldown is the `architecture_orch` row's `cooldownSeconds`
-> in `classes.json` (hourly) — an idle-reclamation cadence, in contrast to
-> `scout_orch`'s weekly walk.
+> turn. Its cooldown is the `architecture_orch` row's `cooldownSeconds`
+> in `classes.json`.
 >
 > Two precomputed Turn Snapshot signals gate it (decide.py reads
 > them verbatim, never recomputing board-empty or cooldown here — the
@@ -87,9 +86,7 @@ The authoritative sources for dispatch policy are `scripts/autopilot/classes.jso
 > the board as ordinary work on a later turn.
 >
 > - **Cadence / cooldown:** the `retro_orch` row's `cooldownSeconds`
->   in `classes.json` (daily) — a once-per-day cadence, in contrast to
->   `architecture_orch`'s hourly and `scout_orch`'s weekly cadence. The
->   cooldown is what enforces "at most once per day": the gating signal
+>   in `classes.json`. The cooldown is what rate-limits the class: the gating signal
 >   only asserts a completed run *exists*, so without the cooldown the same
 >   run would re-fire on every idle turn.
 > - **Spare-capacity / no-preemption:** `retro_orch` is a signal class, so it
@@ -132,7 +129,7 @@ The authoritative sources for dispatch policy are `scripts/autopilot/classes.jso
 > board as ordinary work on a later turn.
 >
 > - **Cadence / cooldown:** the `cleanup_orch` row's `cooldownSeconds`
->   in `classes.json` — an hourly backfill cadence like `discover_orch` /
+>   in `classes.json` — a backfill class like `discover_orch` /
 >   `architecture_orch` (#959), so the workhorse runs hot on an idle board.
 > - **Trigger / gate:** keyed off the **same** unified `orch_backfill_idle`
 >   signal as the backfill set. `cleanup_board_saturated` is the PRIMARY
