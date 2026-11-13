@@ -167,7 +167,7 @@ git checkout -b "fix/incident-$(date -u +%Y-%m-%d-%H%M)" origin/main
 APP_REL="${TARGET_APP_DIR#"$TARGET_WS"}"
 TEST_CMD=$(jq -r '.verify.test' "$TARGET_WS/.hydra/manifest.json")
 TYPECHECK_CMD=$(jq -r '.verify.typecheck' "$TARGET_WS/.hydra/manifest.json")
-( cd "$TARGET_WT$APP_REL" && eval "$TYPECHECK_CMD" && eval "$TEST_CMD" )     # worktree only
+( cd "${TARGET_WT:?unset - create the worktree per hydra-target-build Step 0.6}$APP_REL" && eval "$TYPECHECK_CMD" && eval "$TEST_CMD" )     # worktree only
 git add <files> && git commit -m "fix: <description>"
 git push -u origin HEAD
 gh pr create --repo "$TARGET_GH_REPO" --base main --title "fix: <description>" --body "Incident auto-fix. Refs #<post-mortem issue>"

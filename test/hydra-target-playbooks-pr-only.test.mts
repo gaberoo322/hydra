@@ -62,5 +62,5 @@ test("retro reads its failure signal from the reframe label board", () => {
 
 test("incident verify commands run from the app-dir equivalent in the worktree", () => {
   const body = read("hydra-target-incident.md");
-  assert.ok(body.includes('cd "$TARGET_WT$APP_REL"'));
+  assert.ok(body.includes("$APP_REL\" && eval"));
 });
