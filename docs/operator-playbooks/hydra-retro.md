@@ -83,7 +83,7 @@ dispatches it at all on a given day.
 `--audit` / `--apply` are honoured and dry-run is the default:
 
 ```bash
-# parseArgs(args) → { apply, runId?, review? }  (apply defaults to false; `--review` adds the section-10 pass)
+# parseArgs(args) → { apply, runId?, review? }  (exported by src/retro-inputs.ts, shared with the Target retro; apply defaults to false; `--review` adds the section-10 pass)
 ```
 
 If no `run_id` was given, default to the latest **completed** run:
@@ -206,14 +206,18 @@ Use a tiny `tsx` shim:
 
 ```bash
 # Bump recurrence for each observed cue, then print {seenCues, recurrence}.
+# `npx tsx -e` runs CJS, so top-level `await` is a syntax error: the body lives in
+# an async IIFE and the seam is loaded with a dynamic import().
 npx tsx -e '
-  import { bumpRetroRecurrence, getRetroSeen, getRetroRecurrence } from "./src/redis/retro-seen.ts";
-  const cues = JSON.parse(process.env.CUES || "[]");
-  for (const c of cues) await bumpRetroRecurrence(c);
-  const seen = await getRetroSeen();
-  const recurrence = await getRetroRecurrence();
-  process.stdout.write(JSON.stringify({ seenCues: Object.keys(seen), recurrence }));
-  process.exit(0);
+  (async () => {
+    const { bumpRetroRecurrence, getRetroSeen, getRetroRecurrence } = await import("./src/redis/retro-seen.ts");
+    const cues = JSON.parse(process.env.CUES || "[]");
+    for (const c of cues) await bumpRetroRecurrence(c);
+    const seen = await getRetroSeen();
+    const recurrence = await getRetroRecurrence();
+    process.stdout.write(JSON.stringify({ seenCues: Object.keys(seen), recurrence }));
+    process.exit(0);
+  })();
 '
 ```
 
@@ -241,7 +245,7 @@ Under `--apply`:
 
 - For each `plan.issues[]`: `gh issue create --repo gaberoo322/hydra --title <title> --body <evidence + cue + Source>` (no state label at creation), then `npx tsx scripts/lifecycle.ts advance <N> needs-triage --actor hydra-retro` (from none, gate-free; tolerate `illegal-transition` with observed state `needs-triage` — the reconcile backstop raced it; any other non-zero exit is final, never a direct label write, ADR-0047 D3/D4). Then record the cue in the seen-list:
 
-      npx tsx -e 'import {recordRetroSeen} from "./src/redis/retro-seen.ts"; await recordRetroSeen({cue: process.env.CUE, decision: "issue", runId: process.env.RUN_ID, ref: process.env.REF, at: new Date().toISOString()}); process.exit(0);'
+      npx tsx -e '(async () => { const {recordRetroSeen} = await import("./src/redis/retro-seen.ts"); await recordRetroSeen({cue: process.env.CUE, decision: "issue", runId: process.env.RUN_ID, ref: process.env.REF, at: new Date().toISOString()}); process.exit(0); })();'
 
 - For `plan.pr` (if non-null): open a feature branch, apply the prompt/doc fix
   (skill lesson / CLAUDE.md / CONTEXT.md note), run `npm run typecheck:test`
@@ -344,9 +348,9 @@ re-deriving it from the tool name:
 - `background` — Read, Grep, Glob
 
 **Hook script:** `scripts/autopilot/hooks/on-subagent-tool-call.sh`
-**Hook registration:** sibling `<this-playbook>.settings.json` →
-`~/.claude/skills/<this-skill>/.claude/settings.json` (propagated by
-`scripts/sync-skills.sh`)
+**Hook registration:** this playbook has no sibling `<this-playbook>.settings.json`;
+the hook is registered project-wide in `~/hydra/.claude/settings.json`
+(`PostToolUse`), which covers every session started in the repo
 
 The hook MUST NEVER propagate errors back to this skill's session — a Redis
 outage, a malformed payload, or a missing `jq` all result in a stderr
