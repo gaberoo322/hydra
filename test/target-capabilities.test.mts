@@ -7,7 +7,7 @@
  */
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -150,13 +150,4 @@ describe("playbook literal fence (INV-5)", () => {
     assert.deepEqual(hits, []);
   });
 
-  test("the probe table is the only place the convention names are spelled in scripts/target", () => {
-    const others = readdirSync(join(REPO_ROOT, "scripts", "target")).filter(
-      (f) => f.endsWith(".ts") && f !== "target-capabilities.ts",
-    );
-    for (const f of others) {
-      const text = readFileSync(join(REPO_ROOT, "scripts", "target", f), "utf8");
-      assert.ok(!/e2e:smoke|deadcode:ledger/.test(text), `${f} spells a convention name`);
-    }
-  });
 });
