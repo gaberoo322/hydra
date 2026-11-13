@@ -288,7 +288,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass, field, asdict
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Collection, Iterable, Sequence
 
 # The Turn Snapshot accessor (ADR-0043 Decision 5, #4934): decide.py reads
 # every collector-produced fact through it — `state.turn_snapshot` as the TS
@@ -2481,6 +2481,8 @@ def _rule_instant_death_replay(
     *,
     dispatch_blocked: bool = False,
     shed_classes: set[str] = frozenset(),
+    scope: str = "all",
+    freed_slots: Collection[str] = frozenset(),
 ) -> tuple[_RuleOutput, set[str]]:
     """Step 2.45 - replay a Fable instant death ONCE on opus (#5323).
 
@@ -2489,13 +2491,17 @@ def _rule_instant_death_replay(
     `prior_attempt_status: instant-death`. Bounded (a recorded
     `instant-death` dispatch is never replayed again), join-checked (a slot's
     `dispatch_id` must equal the recorded `worktreeBranch`), and suppressed -
-    with a named reason - under the usage hard stop / shed. Returns the replayed
+    with a named reason - when `admission.admit` refuses it (usage hard stop /
+    shed, scope excluded, burned, orch-realm share; gate order is owned by
+    `scripts/autopilot/admission.py`). `freed_slots` are the slots this plan
+    reaps, so the replay's own dead slot does not count as busy (#5479). Returns the replayed
     class set so the escalation, signal and pipeline rules never double-dispatch.
     """
     out = _RuleOutput()
     replayed: set[str] = set()
     slots = state.get("slots") or {}
     recorded = state.get("last_dispatch_by_class") or {}
+    burned = set(state.get("burned_classes") or [])
     for ev in events:
         if not is_fable_instant_death(ev, state):
             continue
@@ -2520,11 +2526,19 @@ def _rule_instant_death_replay(
         if prior_args.get("prior_attempt_status") == "instant-death":
             out.reasons.append(f"instant-death-replay-exhausted:{cls}")
             continue
-        if dispatch_blocked:
-            out.reasons.append(f"instant-death-replay-suppressed:{cls}:usage_dispatch_blocked")
-            continue
-        if cls in shed_classes:
-            out.reasons.append(f"instant-death-replay-suppressed:{cls}:usage_shed")
+        verdict = admission.admit(
+            cls,
+            dispatch_blocked=dispatch_blocked,
+            shed_classes=shed_classes,
+            slots=slots,
+            freed_slots=freed_slots,
+            scope=scope,
+            burned_classes=burned,
+            orch_share_exceeded=lambda: orch_realm_share_exceeded(state),
+            rows=CLASS_TAXONOMY,
+        )
+        if not verdict.admitted:
+            out.reasons.append(f"instant-death-replay-suppressed:{cls}:{verdict.gate}")
             continue
         try:
             prior_attempt = int(prior_args.get("attempt") or 1)
@@ -2601,6 +2615,8 @@ def _rule_escalation(
     dispatch_blocked: bool = False,
     shed_classes: set[str] = frozenset(),
     skip_slots: set[str] = frozenset(),
+    freed_slots: Collection[str] = frozenset(),
+    scope: str = "all",
 ) -> tuple[_RuleOutput, set[str]]:
     """Cascade-routing escalation re-dispatch (issue #3274, design-concept issue-3274).
 
@@ -2660,8 +2676,11 @@ def _rule_escalation(
     `shed_classes`, this rule now emits exactly ONE `cascade_routing_blocked`
     event with `block_reason="usage_shed"` and dispatches nothing — same
     suppress-but-record contract as the `dispatch_blocked` / orch-realm-share
-    branches below. Precedence (hardest guard first): `usage_dispatch_blocked`,
-    then `usage_shed`, then `orch_realm_share_exceeded`.
+    branches below. Gate precedence is the single order owned by
+    `scripts/autopilot/admission.py` (#5479; `freed_slots` are the slots the
+    plan already reaps, so the just-stopped slot is not busy): `usage_dispatch_blocked`,
+    `usage_shed`, `slot_busy`, `scope_excluded`, `burned`, then
+    `orch_realm_share_exceeded`; `block_reason` carries the refusing gate code.
 
     Pure w.r.t. fs/network/Redis; reads state.slot_events + state.slots + signals.
     """
@@ -2672,6 +2691,7 @@ def _rule_escalation(
     # Shared unwrap (issue #4213, INV-3) — same helper as _rule_slot_events.
     slot_events_raw = _unwrap_events_container(state.get("slot_events")) or []
     slots = state.get("slots") or {}
+    burned = set(state.get("burned_classes") or [])
     for raw_ev in slot_events_raw:
         if not isinstance(raw_ev, dict):
             continue
@@ -2710,7 +2730,29 @@ def _rule_escalation(
         # from "the gate throttled a would-be escalation" — the latter emits a
         # `cascade_routing_blocked` observability event and dispatches nothing,
         # exactly mirroring the suppress-but-record contract.
-        if dispatch_blocked:
+        # ONE admission verdict (#5479): the gate order -- usage hard stop,
+        # usage shed, slot busy, scope excluded, burned, orch-realm share -- is
+        # owned by `scripts/autopilot/admission.py`. Suppress-but-record: ONE
+        # `cascade_routing_blocked` event whose `block_reason` is the gate code,
+        # no dispatch, no escalation event, no escalated_slots entry.
+        verdict = admission.admit(
+            slot,
+            dispatch_blocked=dispatch_blocked,
+            shed_classes=shed_classes,
+            slots=slots,
+            freed_slots=freed_slots,
+            scope=scope,
+            burned_classes=burned,
+            orch_share_exceeded=lambda: orch_realm_share_exceeded(state),
+            rows=CLASS_TAXONOMY,
+        )
+        if not verdict.admitted:
+            if verdict.gate == admission.GATE_ORCH_REALM_SHARE_EXCEEDED:
+                cap = orch_realm_share_state(state)
+                out.debug.setdefault("orch_realm_share_skipped", {
+                    "max_share": cap["max_share"],
+                    "share": cap["share"],
+                })
             out.events.append(
                 make_cascade_blocked_event(
                     state,
@@ -2718,55 +2760,7 @@ def _rule_escalation(
                     cls=slot,
                     trigger_reason=trigger_reason,
                     to_model=decision["escalate_model"],
-                    block_reason="usage_dispatch_blocked",
-                )
-            )
-            continue
-        # Usage-shed parity (issue #4441, INV-4) — evaluated AFTER the hard
-        # stop above (it wins when both fire) and BEFORE the orch-realm-share
-        # guard below (precedence documented on the docstring). `slot` here is
-        # the ESCALATION_POLICY class (e.g. cleanup_orch), the same key
-        # `_rule_pipeline_dispatch` / `_rule_signal_classes` test against
-        # `shed_classes` — no re-derivation, same set threaded from
-        # `_rule_usage_eligibility` via decide().
-        if slot in shed_classes:
-            out.events.append(
-                make_cascade_blocked_event(
-                    state,
-                    now,
-                    cls=slot,
-                    trigger_reason=trigger_reason,
-                    to_model=decision["escalate_model"],
-                    block_reason="usage_shed",
-                )
-            )
-            continue
-        # Orch-realm weekly-share guard (issue #4235) — the escalation-seam
-        # twin of the pipeline (#4161) and signal-loop call sites: the SAME
-        # verbatim predicate (`CLASS_SCOPE == "orch"` keeps it one-directional
-        # so a future target/both-scope policy row is never throttled by the
-        # orch share), the same default-disabled arming, and the same debug
-        # breadcrumb. Evaluated strictly AFTER the usage hard stop above (the
-        # harder limit wins the block_reason when both fire) and only once the
-        # reducer has said escalate (a success / saturated no_op / attempt-capped
-        # stop is not a routing decision and records nothing). Suppress-but-
-        # record, never a silent drop: ONE `cascade_routing_blocked` event, no
-        # dispatch, no escalation event, no escalated_slots entry, no attempt+1.
-        # The stop event is consumed this turn either way — no deferral queue.
-        if CLASS_SCOPE.get(slot) == "orch" and orch_realm_share_exceeded(state):
-            cap = orch_realm_share_state(state)
-            out.debug.setdefault("orch_realm_share_skipped", {
-                "max_share": cap["max_share"],
-                "share": cap["share"],
-            })
-            out.events.append(
-                make_cascade_blocked_event(
-                    state,
-                    now,
-                    cls=slot,
-                    trigger_reason=trigger_reason,
-                    to_model=decision["escalate_model"],
-                    block_reason="orch_realm_share_exceeded",
+                    block_reason=verdict.gate,
                 )
             )
             continue
@@ -3986,13 +3980,18 @@ def decide(
     #      2.45 (#5323): a Fable instant death is replayed once on opus BEFORE
     #      the escalation rule; the replayed class joins escalated_slots so no
     #      later rule double-dispatches it.
+    # Slots this plan already reaps are free for a same-class re-dispatch (INV-006);
+    # `state.slots` is not mutated by `fold`, so the occupant would otherwise read busy.
+    reaped_slots = {a["slot"] for a in plan.actions if a.get("type") == "reap" and a.get("slot")}
     replay_out, replayed_slots = _rule_instant_death_replay(
-        state, events, dispatch_blocked=dispatch_blocked, shed_classes=shed_classes
+        state, events, dispatch_blocked=dispatch_blocked, shed_classes=shed_classes,
+        scope=scope,
+        freed_slots=reaped_slots,
     )
     fold(replay_out)
     escalation_out, escalated_slots = _rule_escalation(
         state, events, now, dispatch_blocked=dispatch_blocked, shed_classes=shed_classes,
-        skip_slots=replayed_slots,
+        skip_slots=replayed_slots, scope=scope, freed_slots=reaped_slots,
     )
     fold(escalation_out)
     escalated_slots = escalated_slots | replayed_slots
