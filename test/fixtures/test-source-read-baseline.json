@@ -1,5 +1,5 @@
 {
-  "note": "Kind-tagged allowlist of test files that read a CODE path (STD-TEST-RUN-THE-CODE, #5262). Kinds: drift-guard | invariant-lint | dashboard-pin | behaviour | grandfathered. Seeded from the live tree (#5188 classification); anything structure-sensitive, mixed or uncertain is grandfathered. Grandfathered rows only shrink (reviewer rule - the test cannot see history). A new row is a deliberate one-line diff naming a sanctioned kind.",
+  "note": "Kind-tagged allowlist of test files that read a CODE path (STD-TEST-RUN-THE-CODE, #5262). Kinds: drift-guard | invariant-lint | dashboard-pin | behaviour | grandfathered. Seeded from the live tree (#5188 classification); anything structure-sensitive, mixed or uncertain is grandfathered. Grandfathered rows only shrink (reviewer rule - the test cannot see history). A new row is a deliberate one-line diff naming a sanctioned kind. pinSites (#5487) holds shrink-only per-file assertion-site counts (code = pins over code reads, STD-TEST-RUN-THE-CODE; prompt = indexOf/step pins over playbook reads, STD-TEST-PIN-PHRASE); observed > baseline fails, observed < baseline is stale: shrink with npx tsx scripts/ci/test-source-read-scan.ts --write-baseline. --init is the only growth path (landing PR; or the one named exception: a synthetic case that raises test/test-source-read-ratchet.test.mts own count).",
   "files": {
     "test/admission.test.mts": "grandfathered",
     "test/agent-dispatch-prompt-guard.test.mts": "invariant-lint",
@@ -176,5 +176,307 @@
     "test/wire-or-retire-carveout-drift.test.mts": "drift-guard",
     "test/work-page.test.mts": "grandfathered",
     "test/zizmor-scan.test.mts": "behaviour"
+  },
+  "pinSites": {
+    "test/admission.test.mts": {
+      "code": 1,
+      "prompt": 0
+    },
+    "test/aggregator-issues-waiting-projections.test.mts": {
+      "code": 1,
+      "prompt": 0
+    },
+    "test/aggregator-stuck-items.test.mts": {
+      "code": 2,
+      "prompt": 0
+    },
+    "test/api-500-catch-ratchet.test.mts": {
+      "code": 1,
+      "prompt": 0
+    },
+    "test/attention-calibration.test.mts": {
+      "code": 1,
+      "prompt": 0
+    },
+    "test/autopilot-deposit-key-resolution.test.mts": {
+      "code": 2,
+      "prompt": 0
+    },
+    "test/autopilot-dev-orch-gate.test.mts": {
+      "code": 1,
+      "prompt": 0
+    },
+    "test/autopilot-dev-target-forbidden-ending-preamble.test.mts": {
+      "code": 0,
+      "prompt": 1
+    },
+    "test/autopilot-forbidden-ending-preamble.test.mts": {
+      "code": 0,
+      "prompt": 2
+    },
+    "test/autopilot-heartbeat.test.mts": {
+      "code": 8,
+      "prompt": 0
+    },
+    "test/autopilot-invariants.test.mts": {
+      "code": 3,
+      "prompt": 0
+    },
+    "test/autopilot-qa-orch-forbidden-ending-preamble.test.mts": {
+      "code": 0,
+      "prompt": 1
+    },
+    "test/autopilot-render-dispatch.test.mts": {
+      "code": 1,
+      "prompt": 6
+    },
+    "test/autopilot-scripts.test.mts": {
+      "code": 14,
+      "prompt": 0
+    },
+    "test/autopilot-turn-runner.test.mts": {
+      "code": 6,
+      "prompt": 3
+    },
+    "test/autopilot-watchdog.test.mts": {
+      "code": 5,
+      "prompt": 0
+    },
+    "test/class-state.test.mts": {
+      "code": 1,
+      "prompt": 0
+    },
+    "test/dashboard-today-polling.test.mts": {
+      "code": 6,
+      "prompt": 0
+    },
+    "test/decide-guards.test.mts": {
+      "code": 0,
+      "prompt": 2
+    },
+    "test/derive-version-bump.test.mts": {
+      "code": 1,
+      "prompt": 0
+    },
+    "test/design-concept-reconcile-check.test.mts": {
+      "code": 5,
+      "prompt": 0
+    },
+    "test/docs-areas.test.mts": {
+      "code": 3,
+      "prompt": 0
+    },
+    "test/git-remote-fence.test.mts": {
+      "code": 1,
+      "prompt": 0
+    },
+    "test/github-issues.test.mts": {
+      "code": 1,
+      "prompt": 0
+    },
+    "test/github-pr-refs.test.mts": {
+      "code": 3,
+      "prompt": 0
+    },
+    "test/github-remote-url.test.mts": {
+      "code": 4,
+      "prompt": 0
+    },
+    "test/glm-beachhead-report.test.mts": {
+      "code": 1,
+      "prompt": 0
+    },
+    "test/glm-drainer-loop.test.mts": {
+      "code": 12,
+      "prompt": 0
+    },
+    "test/health-page.test.mts": {
+      "code": 24,
+      "prompt": 0
+    },
+    "test/hydra-branch-prune-dead-branch.test.mts": {
+      "code": 1,
+      "prompt": 0
+    },
+    "test/hydra-branch-prune-master-tracking.test.mts": {
+      "code": 3,
+      "prompt": 0
+    },
+    "test/hydra-branch-prune-merged-remote.test.mts": {
+      "code": 1,
+      "prompt": 0
+    },
+    "test/hydra-dev-reflection-deposit.test.mts": {
+      "code": 17,
+      "prompt": 0
+    },
+    "test/hydra-hitl-grill-option-table.test.mts": {
+      "code": 0,
+      "prompt": 2
+    },
+    "test/hydra-qa-needs-qa-clear.test.mts": {
+      "code": 5,
+      "prompt": 2
+    },
+    "test/hydra-qa-prompt-verdict.test.mts": {
+      "code": 40,
+      "prompt": 0
+    },
+    "test/hydra-retro-emit.test.mts": {
+      "code": 2,
+      "prompt": 0
+    },
+    "test/hydra-review-option-table.test.mts": {
+      "code": 0,
+      "prompt": 2
+    },
+    "test/hydra-review-stalled-pr-bucket.test.mts": {
+      "code": 0,
+      "prompt": 5
+    },
+    "test/hydra-target-build-anchor-preflight.test.mts": {
+      "code": 0,
+      "prompt": 7
+    },
+    "test/hydra-target-build-fence-skip-steps.test.mts": {
+      "code": 0,
+      "prompt": 9
+    },
+    "test/hydra-target-cleanup-emit.test.mts": {
+      "code": 3,
+      "prompt": 0
+    },
+    "test/hydra-target-wire-or-retire-emit.test.mts": {
+      "code": 4,
+      "prompt": 0
+    },
+    "test/launch-flow-key-contract.test.mts": {
+      "code": 4,
+      "prompt": 0
+    },
+    "test/lifecycle-dispatch-claim.test.mts": {
+      "code": 4,
+      "prompt": 0
+    },
+    "test/lifecycle-reconcile.test.mts": {
+      "code": 5,
+      "prompt": 0
+    },
+    "test/lifecycle-state-label-guard.test.mts": {
+      "code": 3,
+      "prompt": 0
+    },
+    "test/operator-actions-parity.test.mts": {
+      "code": 3,
+      "prompt": 0
+    },
+    "test/operator-actions-registry.test.mts": {
+      "code": 13,
+      "prompt": 0
+    },
+    "test/operator-channel.test.mts": {
+      "code": 2,
+      "prompt": 0
+    },
+    "test/operator-notify-cli.test.mts": {
+      "code": 7,
+      "prompt": 0
+    },
+    "test/qa-catch-rate.test.mts": {
+      "code": 1,
+      "prompt": 0
+    },
+    "test/qa-merge-guard.test.mts": {
+      "code": 2,
+      "prompt": 0
+    },
+    "test/qa-plumbing-scripts.test.mts": {
+      "code": 0,
+      "prompt": 2
+    },
+    "test/qa-reviewer-commit-a.test.mts": {
+      "code": 2,
+      "prompt": 7
+    },
+    "test/redis-db-helper.test.mts": {
+      "code": 8,
+      "prompt": 0
+    },
+    "test/review-pickup.test.mts": {
+      "code": 1,
+      "prompt": 0
+    },
+    "test/run-ledger.test.mts": {
+      "code": 3,
+      "prompt": 0
+    },
+    "test/scheduler-stop-semantics.test.mts": {
+      "code": 2,
+      "prompt": 0
+    },
+    "test/subagent-dispatch-registration.test.mts": {
+      "code": 4,
+      "prompt": 0
+    },
+    "test/suite-count-check.test.mts": {
+      "code": 14,
+      "prompt": 0
+    },
+    "test/sync-skills.test.mts": {
+      "code": 4,
+      "prompt": 20
+    },
+    "test/systemd-notify-failure-unit.test.mts": {
+      "code": 1,
+      "prompt": 0
+    },
+    "test/target-design-concept.test.mts": {
+      "code": 0,
+      "prompt": 3
+    },
+    "test/target-playbook-capability-branches.test.mts": {
+      "code": 2,
+      "prompt": 0
+    },
+    "test/target-qa-verdict.test.mts": {
+      "code": 0,
+      "prompt": 2
+    },
+    "test/target-wire-or-retire-lane-invariant.test.mts": {
+      "code": 0,
+      "prompt": 10
+    },
+    "test/taxonomy-classes.test.mts": {
+      "code": 7,
+      "prompt": 0
+    },
+    "test/turn-snapshot-picks.test.mts": {
+      "code": 2,
+      "prompt": 0
+    },
+    "test/watchdog-claude-hooks.test.mts": {
+      "code": 5,
+      "prompt": 0
+    },
+    "test/watchdog-deploy-drift.test.mts": {
+      "code": 1,
+      "prompt": 0
+    },
+    "test/watchdog-operator-channel.test.mts": {
+      "code": 5,
+      "prompt": 0
+    },
+    "test/watchdog-origin-identity.test.mts": {
+      "code": 1,
+      "prompt": 0
+    },
+    "test/watchdog-redis-backup-freshness.test.mts": {
+      "code": 13,
+      "prompt": 0
+    },
+    "test/work-page.test.mts": {
+      "code": 130,
+      "prompt": 0
+    }
   }
 }
