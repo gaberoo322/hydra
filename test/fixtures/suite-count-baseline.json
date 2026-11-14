@@ -382,6 +382,7 @@
   "test/playbook-absolute-write-target.test.mts": 1,
   "test/playbook-reference-check.test.mts": 4,
   "test/playbook-seam-var-guard.test.mts": 1,
+  "test/playbook-vocabulary-ratchet.test.mts": 5,
   "test/post-commit-status.test.mts": 5,
   "test/post-merge-health.test.mts": 19,
   "test/pr-lifecycle-bridge.test.mts": 7,

@@ -65,7 +65,8 @@ Only ONE skill is chosen. Do not batch.
 
 ## Step 2 — Propose deletions along the Pocock taxonomy
 
-Read the chosen playbook and classify every deletion candidate into exactly one
+Prune toward the playbook rules in `CODING_STANDARDS.md` (`STD-PLAYBOOK-*`).
+Classify every deletion candidate in the chosen playbook into exactly one
 Pocock bucket:
 
 - **Duplication** — the same material stated in two places (a rule restated in
@@ -75,8 +76,7 @@ Pocock bucket:
   changelog line whose fix has long merged; a "NOTE for slice #N" that shipped;
   a retired-subsystem caveat). Delete the fossil.
 - **No-op** — a paragraph whose deletion does **not** change agent behavior (a
-  motivational preamble, a "why this exists" essay that no step reads, a
-  redundant re-explanation of a rule already stated mechanically).
+  preamble, a "why this exists" essay that no step reads, a restated rule).
 
 This is **demote-or-remove-with-parity, never blind deletion** — mirror
 `hydra-cleanup`'s demote-not-delete discipline. A candidate that carries a
