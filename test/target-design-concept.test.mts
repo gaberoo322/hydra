@@ -14,6 +14,8 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import {
   shouldCaptureDesignConcept as shouldCaptureRaw,
   buildDesignConcept as buildRaw,
@@ -551,5 +553,26 @@ describe("runCli — playbook subcommands (Steps 3.3 / 4.5)", () => {
     assert.match(runCli(["should-capture", "docs/readme.md"], noStdin).out, /^(yes|no)$/);
     assert.equal(runCli(["bogus"], noStdin).code, 2);
     assert.equal(runCli(["build", "{nope"], noStdin).code, 1);
+  });
+  test("fresh/stale and select-decision with bad JSON exit 1; stale of a malformed concept is fresh", () => {
+    assert.equal(runCli(["stale", "{not json", "{nope"], noStdin).code, 1);
+    assert.equal(runCli(["select-decision"], () => "{nope").code, 1);
+    const built = runCli(["build", JSON.stringify(sampleInput())], noStdin);
+    assert.equal(runCli(["stale", "{not json", JSON.stringify(decision)], noStdin).out, "fresh");
+    assert.equal(runCli(["stale", built.out, "{nope"], noStdin).code, 1);
+  });
+
+  test("real entrypoint: spawned script builds then parses a non-empty artifact (not a silent no-op)", () => {
+    const script = fileURLToPath(new URL("../scripts/target/target-design-concept.ts", import.meta.url));
+    const run = (args: string[]) =>
+      spawnSync(process.execPath, ["--experimental-strip-types", script, ...args], { encoding: "utf8" });
+    const built = run(["build", JSON.stringify(sampleInput())]);
+    assert.equal(built.status, 0, built.stderr);
+    assert.notEqual(built.stdout.trim(), "", "build must emit a non-empty artifact");
+    const parsed = run(["parse", built.stdout]);
+    assert.equal(parsed.status, 0, parsed.stderr);
+    assert.equal(JSON.parse(parsed.stdout).anchorRef, sampleInput().anchorRef);
+    assert.equal(run(["bogus"]).status, 2);
+    assert.equal(run(["build", "{nope"]).status, 1);
   });
 });

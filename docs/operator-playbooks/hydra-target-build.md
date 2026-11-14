@@ -526,8 +526,13 @@ else
     fi
     DC_JSON=$(npx tsx "$DC_CLI" build "$DC_INPUT_JSON")
     # Persist per-anchor with a 14-day TTL so a stale anchor self-cleans.
-    docker exec hydra-redis-1 redis-cli SET "$DC_KEY" "$DC_JSON" EX 1209600 >/dev/null
-    echo "persisted design-concept for $ANCHOR_REF"
+    # Never SET an empty artifact (a failed build prints nothing).
+    if [ -n "$DC_JSON" ]; then
+      docker exec hydra-redis-1 redis-cli SET "$DC_KEY" "$DC_JSON" EX 1209600 >/dev/null
+      echo "persisted design-concept for $ANCHOR_REF"
+    else
+      echo "design-concept build produced no output; not persisted" >&2
+    fi
   fi
 fi
 ```
