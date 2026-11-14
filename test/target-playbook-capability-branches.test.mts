@@ -22,6 +22,12 @@ import * as emitter from "../scripts/ci/hydra-target-wire-or-retire-emit.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const PLAYBOOKS = [
+  "hydra-target-build.md",
+  "_fragments/hydra-target-build-anchor-preflight.md",
+  "_fragments/hydra-target-build-inline-mode.md",
+  "_fragments/hydra-target-build-merge-flow.md",
+  "_fragments/target-seam-preamble.md",
+  "_fragments/target-self-isolation-preamble.md",
   "hydra-target-qa.md",
   "hydra-target-cleanup.md",
   "hydra-target-discover.md",

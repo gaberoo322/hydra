@@ -359,14 +359,7 @@ if [ -n "${ANCHOR_NUM:-}" ]; then
   if gh api --paginate "repos/$TARGET_GH_REPO/issues/$ANCHOR_NUM/comments" >"$OD_TMP" 2>/dev/null; then
     # --paginate concatenates pages as adjacent JSON arrays; jq -s add merges
     # them into one. The pure selector tolerates the raw REST objects as-is.
-    if jq -s 'add' "$OD_TMP" >"$OD_TMP.merged" 2>/dev/null && OD_OUT=$(node --input-type=module -e '
-      import { pathToFileURL } from "node:url";
-      import { readFileSync } from "node:fs";
-      const gate = process.env.HYDRA_GATE_DIR;
-      const mod = await import(pathToFileURL(`${gate}/scripts/target/target-design-concept.ts`).href);
-      const sel = mod.selectOperatorDecision(JSON.parse(readFileSync(0, "utf8")));
-      process.stdout.write(sel ? JSON.stringify(sel) : "");
-    ' <"$OD_TMP.merged"); then
+    if jq -s 'add' "$OD_TMP" >"$OD_TMP.merged" 2>/dev/null && OD_OUT=$(npx tsx "${HYDRA_GATE_DIR:?}/scripts/target/target-design-concept.ts" select-decision <"$OD_TMP.merged"); then
       OPERATOR_DECISION_JSON="$OD_OUT"
     else
       echo "hydra-target-build: WARN: operator-decision selection FAILED for ${ANCHOR_REF:-issue-$ANCHOR_NUM} (jq/node error after a successful read) — proceeding on the issue body alone (fail-open)" >&2
@@ -497,39 +490,21 @@ diff against — proceed straight to Step 5.
 # space- or newline-separated; ANCHOR_REF is anchor.reference (e.g. "issue-1056").
 DC_KEY="hydra:target:design-concept:${ANCHOR_REF}"
 
-CAPTURE=$(node --input-type=module -e '
-  import { pathToFileURL } from "node:url";
-  const gate = process.env.HYDRA_GATE_DIR;
-  const mod = await import(pathToFileURL(`${gate}/scripts/target/target-design-concept.ts`).href);
-  const paths = process.argv.slice(1);
-  process.stdout.write(mod.shouldCaptureDesignConcept(paths) ? "yes" : "no");
-' -- $EXPECTED_PATHS)
+DC_CLI="${HYDRA_GATE_DIR:?}/scripts/target/target-design-concept.ts"
+CAPTURE=$(npx tsx "$DC_CLI" should-capture $EXPECTED_PATHS)
 
 if [ "$CAPTURE" = "no" ]; then
   echo "safe-path build — skipping design-concept artifact"
 else
   # Reuse-on-retry: if a prior attempt persisted one, read it back and reuse.
   EXISTING=$(docker exec hydra-redis-1 redis-cli GET "$DC_KEY" 2>/dev/null)
-  REUSED=$(node --input-type=module -e '
-    import { pathToFileURL } from "node:url";
-    const gate = process.env.HYDRA_GATE_DIR;
-    const mod = await import(pathToFileURL(`${gate}/scripts/target/target-design-concept.ts`).href);
-    const dc = mod.parseDesignConcept(process.argv[1] || "");
-    process.stdout.write(dc ? JSON.stringify(dc) : "");
-  ' -- "$EXISTING")
+  REUSED=$(npx tsx "$DC_CLI" parse "$EXISTING")
 
   # staleness: a persisted artifact captured BEFORE the latest
   # operator decision — or one carrying no `operatorDecision` field at all —
   # must NOT be reused. Discard and fall through to recapture.
   if [ -n "$REUSED" ] && [ -n "${OPERATOR_DECISION_JSON:-}" ]; then
-    STALE=$(node --input-type=module -e '
-      import { pathToFileURL } from "node:url";
-      const gate = process.env.HYDRA_GATE_DIR;
-      const mod = await import(pathToFileURL(`${gate}/scripts/target/target-design-concept.ts`).href);
-      const concept = mod.parseDesignConcept(process.argv[1]);
-      const decision = JSON.parse(process.argv[2]);
-      process.stdout.write(concept && mod.isStaleAgainstDecision(concept, decision) ? "stale" : "fresh");
-    ' -- "$REUSED" "$OPERATOR_DECISION_JSON")
+    STALE=$(npx tsx "$DC_CLI" stale "$REUSED" "$OPERATOR_DECISION_JSON")
     if [ "$STALE" != "fresh" ]; then  # anything but a clean "fresh" (incl. a node failure) recaptures
       echo "persisted design-concept for $ANCHOR_REF predates the latest operator decision — recapturing"
       REUSED=""
@@ -538,7 +513,7 @@ else
 
   if [ -n "$REUSED" ]; then
     echo "reusing persisted design-concept for $ANCHOR_REF (retry):"
-    printf '%s\n' "$REUSED" | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8")); console.log("  scope:", d.scope); console.log("  invariants:", d.invariants.join("; "));'
+    printf '%s\n' "$REUSED" | npx tsx "$DC_CLI" summarize
     # Fold the reused artifact into the plan you hand the executor role.
   else
     # First attempt (or corrupt prior value): the planner authors the four
@@ -549,13 +524,7 @@ else
     if [ -n "${OPERATOR_DECISION_JSON:-}" ]; then
       DC_INPUT_JSON=$(printf '%s' "$DC_INPUT_JSON" | jq --argjson od "$OPERATOR_DECISION_JSON" '. + {operatorDecision: $od}')
     fi
-    DC_JSON=$(node --input-type=module -e '
-      import { pathToFileURL } from "node:url";
-      const gate = process.env.HYDRA_GATE_DIR;
-      const mod = await import(pathToFileURL(`${gate}/scripts/target/target-design-concept.ts`).href);
-      const input = JSON.parse(process.argv[1]);
-      process.stdout.write(mod.serializeDesignConcept(mod.buildDesignConcept(input)));
-    ' -- "$DC_INPUT_JSON")
+    DC_JSON=$(npx tsx "$DC_CLI" build "$DC_INPUT_JSON")
     # Persist per-anchor with a 14-day TTL so a stale anchor self-cleans.
     docker exec hydra-redis-1 redis-cli SET "$DC_KEY" "$DC_JSON" EX 1209600 >/dev/null
     echo "persisted design-concept for $ANCHOR_REF"
@@ -773,10 +742,9 @@ TARGET_PROJECT_DIR="$TARGET_WT/$APP_SUBDIR" \
 ```
 
 Exit codes: 0 = pass (or skipped/neutral), 2 = kill-rate below the floor (block
-merge), 1 = usage/unexpected error. Tune the floor with
-`TARGET_MUTATION_KILL_FLOOR` (default 60 — higher than the Orchestrator base
-because every file the gate reaches is on the Target's declared risk surface) and the time budget
-with `MUTATION_TIME_BUDGET_MS`. A `[quick-fix]` tag in `PR_BODY` writes a
+merge), 1 = usage/unexpected error. The floor
+(`TARGET_MUTATION_KILL_FLOOR`) and time budget (`MUTATION_TIME_BUDGET_MS`) defaults live in the
+header of `scripts/target/mutation-check.ts`. A `[quick-fix]` tag in `PR_BODY` writes a
 neutral status and exits 0, mirroring the Orchestrator gate's exemption.
 
 ### 6.5. Glossary / ADR gate
