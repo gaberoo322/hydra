@@ -11,6 +11,7 @@ import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 
 import {
+  annotateReviewerFixedReport,
   checkBodyScopeEdit,
   diffHasHunkNearLine,
   decideReviewerCommit,
@@ -25,6 +26,7 @@ import { buildQaVerdictTrailer, parseQaVerdictTrailer } from "../src/qa/verdict-
 
 const ROOT = resolve(import.meta.dirname, "..");
 const PLAYBOOK = readFileSync(join(ROOT, "docs", "operator-playbooks", "_fragments", "hydra-qa-reference.md"), "utf8");
+const QA_PLAYBOOK = readFileSync(join(ROOT, "docs", "operator-playbooks", "hydra-qa.md"), "utf8");
 
 const TWO_WAY_DIFF = [
   "diff --git a/docs/guide.md b/docs/guide.md",
@@ -276,6 +278,16 @@ describe("qa-verdict phases for the reviewer commit", () => {
   }
   const phaseInput = { pr: 7, tier: 3, blocking: [{ location: "docs/guide.md:3" }] };
 
+  test("a stage supplied by route (read at the fixed point) wins over the adapter's cwd tree (issue #5415 INV-2)", async () => {
+    const f = fetchers({ rolloutStage: async () => "A" });
+    const out = (await runQaVerdictPhase("reviewer-commit", { ...phaseInput, stage: "off" }, f)) as any;
+    assert.equal(out.action, "none");
+    assert.equal(out.reason, "stage-off");
+    // sibling: with no supplied stage the adapter's value still drives the decision
+    const viaAdapter = (await runQaVerdictPhase("reviewer-commit", phaseInput, f)) as any;
+    assert.equal(viaAdapter.action, "commit-a");
+  });
+
   test("reads stage, diff and body through the port", async () => {
     const out = (await runQaVerdictPhase("reviewer-commit", phaseInput, fetchers())) as any;
     assert.equal(out.action, "commit-a");
@@ -353,12 +365,26 @@ describe("qa-verdict phases for the reviewer commit", () => {
 
 describe("playbook step 9.4 pins", () => {
   const start = PLAYBOOK.indexOf("### 9.4 Reviewer commit (class A)");
-  const end = PLAYBOOK.indexOf("### 9.5 ");
-  const step94 = PLAYBOOK.slice(start, end);
+  const step94 = PLAYBOOK.slice(start);
 
-  test("step 9.4 sits between step 9 and step 9.5", () => {
+  test("the 9.4 block lives in the sidecar, the loaded playbook carries only the branch, and the sidecar has no 9.5 trailer section", () => {
     assert.ok(start !== -1, "step 9.4 lives in the hydra-qa reference sidecar after the #5269 refactor");
-    assert.ok(end > start);
+    assert.ok(!PLAYBOOK.includes("### 9.5 "), "route owns the trailer inputs; the sidecar section is gone");
+    const branch = QA_PLAYBOOK.slice(QA_PLAYBOOK.indexOf("#### 9.4 Reviewer commit branch"), QA_PLAYBOOK.indexOf("`route.ts` makes exactly ONE pass"));
+    assert.ok(branch.includes('if [ "$NEXT" = "reviewer-commit" ]'));
+    assert.ok(branch.includes('--reviewer-fixed "$NEW_HEAD"') && branch.includes("--reviewer-commit-aborted"));
+    assert.ok(!branch.includes("git worktree"), "the full bash stays in the sidecar");
+  });
+
+  test("the executed block takes every input from route's plan and never re-derives a verdict", () => {
+    for (const v of ["REVIEWED_HEAD", "HEAD_REF", "FIXED_SHA", "RC_BLOCKING_PATHS", "RC_FOLLOWUP_PATHS", "BODY_FIX"]) {
+      assert.ok(step94.includes(`${v}=$(`), `${v} is read from the plan`);
+    }
+    assert.ok(step94.includes("$ROUTE_JSON") && step94.includes(".blockingLocations[]?"));
+    assert.ok(!/qa-verdict\.ts/.test(step94), "no qa-verdict.ts invocation");
+    assert.ok(!/\$FOLD_JSON|\$PREFLIGHT_JSON|\$REVIEW_VERDICT/.test(step94));
+    assert.ok(!/^\s*(REVIEW_VERDICT|VERDICT|REVIEW_REPORT|BLOCKERS|MAX_SEVERITY)=/m.test(step94), "route owns the verdict, report and counts");
+    assert.ok(step94.includes("NEW_HEAD=$(git rev-parse HEAD)"));
   });
 
   test("never force-pushes and uses no plus refspec", () => {
@@ -374,9 +400,9 @@ describe("playbook step 9.4 pins", () => {
     assert.ok(step94.indexOf("gh pr edit") < step94.indexOf("git push origin"));
   });
 
-  test("the phase runs only on a FAIL verdict and is gated before the RC_JSON reads", () => {
-    const gate = step94.indexOf('if [ "$REVIEW_VERDICT" = "FAIL" ]; then');
-    assert.ok(gate !== -1 && gate < step94.indexOf('qa-verdict.ts" reviewer-commit'));
+  test("the block runs only when route paused for it: gated on NEXT before any worktree is built", () => {
+    const gate = step94.indexOf('if [ "$NEXT" = "reviewer-commit" ]; then');
+    assert.ok(gate !== -1 && gate < step94.indexOf(`git worktree add --detach "$MASTER_ROOT_DIR/master"`));
   });
 
   test("only blocking paths must be staged; follow-up paths are an optional subset", () => {
@@ -416,12 +442,6 @@ describe("playbook step 9.4 pins", () => {
     assert.ok(!/PRIOR_FINDINGS|REREVIEW_DIFF_BASE/.test(step94));
   });
 
-  test("step 9.5 passes the new head and qaFixes explicitly to the trailer phase", () => {
-    const step95 = PLAYBOOK.slice(end, PLAYBOOK.indexOf("### 9.6 "));
-    assert.ok(step95.includes("qaFixes"));
-    assert.ok(step95.includes("headSha: $newhead"));
-  });
-
   test("the rollout switch ships off", () => {
     const cfg = JSON.parse(readFileSync(join(ROOT, "config", "orchestrator", "qa-rollout.json"), "utf8"));
     assert.equal(cfg["reviewer-commits"], "off");
@@ -430,12 +450,11 @@ describe("playbook step 9.4 pins", () => {
 
 describe("step 9.4 trust: scripts run from a master worktree, regenerators target the PR worktree (round 4)", () => {
   const start = PLAYBOOK.indexOf("### 9.4 Reviewer commit");
-  const step94 = PLAYBOOK.slice(start, PLAYBOOK.indexOf("\n### ", start + 10));
+  const step94 = PLAYBOOK.slice(start);
 
   test("a master worktree of FIXED_SHA is built, every script is invoked under it, and the session tree is asserted unchanged", () => {
     assert.ok(step94.includes('git worktree add --detach "$MASTER_ROOT_DIR/master" "$FIXED_SHA"'));
-    assert.ok(step94.includes('"$MASTER_WT/scripts/ci/qa-verdict.ts" reviewer-commit'));
-    assert.ok(!/ scripts\/ci\/qa-verdict\.ts reviewer-commit/.test(step94), "no relative qa-verdict path");
+    assert.ok(!/qa-verdict\.ts/.test(step94), "the decision runs in route now; no relative or absolute qa-verdict path");
     assert.ok(!step94.includes("$SESSION_ROOT/scripts"), "no script runs from the session tree");
     assert.ok(step94.includes('git -C "$SESSION_ROOT" status --porcelain'));
   });
@@ -505,11 +524,46 @@ describe("reviewer-commits rollout stage authority (INV-1, #5267 round 5)", () =
     }
   });
 
-  test("playbook runs the phase with cwd = $MASTER_WT and the pinned master tsx, not npx", () => {
+  test("the sidecar block pins the master tsx for regenerators, never npx", () => {
     const start = PLAYBOOK.indexOf("### 9.4 Reviewer commit");
-    const step94 = PLAYBOOK.slice(start, PLAYBOOK.indexOf("\n### ", start + 10));
-    assert.ok(/\(cd "\$MASTER_WT" && node [^\n]*qa-verdict\.ts" reviewer-commit\)/.test(step94));
+    const step94 = PLAYBOOK.slice(start);
     assert.ok(step94.includes('"$MASTER_WT/node_modules/.bin/tsx"'));
     assert.ok(!step94.includes("npx tsx"));
+  });
+});
+
+describe("annotateReviewerFixedReport (INV-4 / INV-10, issue #5415)", () => {
+  const report = [
+    "### Findings",
+    "",
+    "| Severity | Axis | Reviewer | File:line | Finding | Fix |",
+    "|---|---|---|---|---|---|",
+    "| medium | standards | reviewer-A | docs/guide.md:3 | stale link | update the link |",
+    "| medium | spec | reviewer-B | docs/other.md:9 | typo | fix typo |",
+    "",
+    "### Follow-ups (non-blocking)",
+    "",
+    "| Severity | Axis | Reviewer | File:line | Finding | Fix |",
+    "|---|---|---|---|---|---|",
+    "| low | standards | reviewer-A | docs/guide.md:3 | nit | tidy |",
+    "",
+    "## Standards",
+  ].join("\n");
+
+  test("suffixes only the matching BLOCKING row, never the follow-up, and appends the paragraph", () => {
+    const out = annotateReviewerFixedReport(report, ["docs/guide.md:3"], "abcdef012345");
+    const lines = out.split("\n");
+    assert.ok(lines.includes("| medium | standards | reviewer-A | docs/guide.md:3 | stale link | update the link fixed-by abcdef012345 |"));
+    assert.ok(lines.includes("| medium | spec | reviewer-B | docs/other.md:9 | typo | fix typo |"), "an unmatched row is untouched");
+    assert.ok(lines.includes("| low | standards | reviewer-A | docs/guide.md:3 | nit | tidy |"), "the follow-up table is untouched");
+    assert.ok(out.endsWith("Reviewer-fixed in abcdef012345 (QA-Fix: A): each blocking row above is fixed-by abcdef012345."));
+  });
+
+  test("never deletes, filters or re-grades a row", () => {
+    const out = annotateReviewerFixedReport(report, ["docs/guide.md:3", "docs/other.md:9"], "abcdef012345");
+    const rows = (t: string) => t.split("\n").filter((l) => l.startsWith("| ") && !l.includes("Severity")).length;
+    assert.equal(rows(out), rows(report));
+    assert.equal(out.split("\n").filter((l) => l.startsWith("| medium")).length, 2);
+    assert.ok(out.split("\n").filter((l) => l.startsWith("| medium")).every((l) => l.includes("fixed-by abcdef012345")));
   });
 });

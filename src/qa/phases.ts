@@ -241,7 +241,7 @@ export async function runQaVerdictPhase(
       const i = input as QaVerdictCliInput<"reviewer-commit">;
       // Every missing fact degrades toward `none`: stage off, an empty diff
       // (door unknown), an unreadable body (no out-of-scope list).
-      const readStage = f.rolloutStage ? await f.rolloutStage() : null;
+      const readStage = i.stage ?? (f.rolloutStage ? await f.rolloutStage() : null);
       if (readStage === null) degraded.push("rollout-stage");
       const stage: ReviewerCommitsValue = readStage ?? "off";
       // Stage off (the shipped default) answers BEFORE any diff / path / body
