@@ -1,4 +1,4 @@
-# ast-grep rule — fail-loud catch blocks (issue #4732).
+# ast-grep rule — fail-loud catch blocks (issue #4732, STD-CATCH-FAIL-LOUD).
 #
 # CLAUDE.md "Fail loud": every `catch` either logs with context or is annotated
 # `/* intentional: reason */`. Silent catches caused every major 2026-04
@@ -15,9 +15,11 @@
 # Scope: `try { … } catch …` clauses only — promise `.catch(() => …)` callbacks
 # are a different AST shape and out of scope for this rule.
 #
-# Enforcement: ADVISORY. hydra-dev runs it over the PR's changed `.ts` files
+# Enforcement: BLOCKING via the shrink-only baseline ratchet
+# (scripts/ci/fail-loud-ratchet.ts, run by test/fail-loud-ratchet.test.mts in the
+# required `test` job). hydra-dev also runs it over the PR's changed `.ts` files
 # before `gh pr create` (docs/operator-playbooks/_fragments/hydra-dev-child-flow.md,
-# "Fail-loud lint"). Existing hits on master are not a blocker. Run it on a
+# "Fail-loud lint"). Existing hits on master are baselined. Run it on a
 # file list with:
 #   npx tsx scripts/ast-search.ts --rule fail-loud-catch --path <file> [--path <file> ...]
 # Rule tests (valid/invalid fixtures): src/ast-grep-rule-tests/fail-loud-catch-test.yml

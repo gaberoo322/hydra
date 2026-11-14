@@ -505,6 +505,14 @@ done < <(git diff --name-only --diff-filter=AM origin/master...HEAD -- '*.ts')
 if [ "${#TE_ARGS[@]}" -gt 0 ]; then
   npx tsx scripts/ast-search.ts --rule typed-error-throw --text "${TE_ARGS[@]}"
 fi
+# STD-TEST-OWN-FEATURE (#5511): QA-history provenance in titles/comments of changed test files.
+TP_FILES=()
+while IFS= read -r f; do
+  [ -f "$f" ] && TP_FILES+=("$f")
+done < <(git diff --name-only --diff-filter=AM origin/master...HEAD -- 'test/*.test.mts')
+if [ "${#TP_FILES[@]}" -gt 0 ]; then
+  npx tsx scripts/ci/test-title-provenance-scan.ts --files "${TP_FILES[@]}"
+fi
 # Prints `file:line:col: <catch text>` per hit (0-based line/col); no output = clean.
 # Python/shell use `# intentional: <reason>` as the annotation.
 ```

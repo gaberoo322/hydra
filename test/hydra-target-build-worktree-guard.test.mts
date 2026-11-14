@@ -209,7 +209,11 @@ describe("hydra-target-build playbook — worktree isolation (issue #542)", () =
     // fill with stale dirs. The remove invocation is KEPT VERBATIM (issue
     // #4411 flipped it from the hardcoded `git -C ~/hydra-betting` form to
     // the seam-resolved `$TARGET_WS`); the heading is not pinned.
-    assert.match(playbook, /git -C "\$\{TARGET_WS:\?[^}]*\}" worktree remove --force "\$TARGET_WT"/);
+    // The cleanup recipe lives once, in the merge-flow fragment (Step 8.5); the
+    // main playbook points at it.
+    const mergeFlow = readRepoFile("docs/operator-playbooks/_fragments/hydra-target-build-merge-flow.md");
+    assert.match(mergeFlow, /git -C "\$\{TARGET_WS:\?[^}]*\}" worktree remove --force "\$TARGET_WT"/);
+    assert.match(playbook, /recipe[^.]*lives once, in `hydra-target-build-merge-flow\.md` Step 8\.5/);
   });
 });
 

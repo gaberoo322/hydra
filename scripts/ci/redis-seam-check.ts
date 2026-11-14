@@ -1,6 +1,6 @@
 #!/usr/bin/env -S npx tsx
 /**
- * Redis Seam check — ADR-0009 / ADR-0017 closure ratchet.
+ * Redis Seam check — ADR-0009 / ADR-0017 closure ratchet (STD-REDIS-SEAM).
  *
  * Forbids new imports of the legacy Redis surface (`redis-keys`,
  * `redis-adapter`) and the internal seam primitives (`redis/keys`,
