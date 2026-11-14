@@ -11,12 +11,6 @@
     "docs/operator-playbooks/_fragments/hydra-qa-reference.md": [
       "superseded-adr 0004"
     ],
-    "docs/operator-playbooks/_fragments/hydra-target-build-anchor-preflight.md": [
-      "path src/backlog/work-queue-hygiene.ts"
-    ],
-    "docs/operator-playbooks/_fragments/hydra-target-build-merge-flow.md": [
-      "route /api/backlog/${ITEM_ID}/move"
-    ],
     "docs/operator-playbooks/hydra-architect.md": [
       "path config/direction/goals.md",
       "route /api/backlog"
