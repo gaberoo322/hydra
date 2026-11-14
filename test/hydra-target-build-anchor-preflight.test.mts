@@ -369,6 +369,7 @@ function capabilityGenerator(packageJson: string | undefined): string {
     const scripts = (JSON.parse(packageJson) as { scripts?: Record<string, string> }).scripts ?? {};
     return scripts["deadcode:ledger"] ? "deadcode:ledger" : "";
   } catch {
+    /* intentional: malformed package.json means no generator capability, mirroring the seam probe */
     return "";
   }
 }

@@ -81,6 +81,10 @@ export const LIFECYCLE_EXEMPTIONS: ReadonlyArray<{
       p === "docs/operator-playbooks/hydra-design-qa.md",
     reason: "Target-scope playbooks: ADR-0047 scopes the seam to the Orchestrator board",
   },
+  {
+    matches: (p) => p === "scripts/target/target-reframe.ts",
+    reason: "Target board reframe write: ADR-0047 scopes the seam to the Orchestrator board",
+  },
 ];
 
 export function isExemptPath(relPath: string): boolean {

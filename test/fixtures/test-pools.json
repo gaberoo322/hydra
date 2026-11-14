@@ -46,6 +46,7 @@
     "test/silent-catch-lint.test.mts",
     "test/stale-chunk-reload.test.mts",
     "test/systemd-notify-failure-unit.test.mts",
+    "test/target-reframe.test.mts",
     "test/versions-format.test.mts",
     "test/zizmor-scan.test.mts"
   ],
