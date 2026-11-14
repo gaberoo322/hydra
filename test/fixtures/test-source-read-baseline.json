@@ -266,6 +266,10 @@
       "code": 3,
       "prompt": 0
     },
+    "test/docs-prose-drift.test.mts": {
+      "code": 4,
+      "prompt": 0
+    },
     "test/git-remote-fence.test.mts": {
       "code": 1,
       "prompt": 0
