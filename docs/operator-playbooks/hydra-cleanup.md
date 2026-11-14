@@ -91,13 +91,16 @@ Every drop appears in the report with its reason, never silently. The per-run ca
 | Demote | Still referenced inside its own file. | Drop only `export`. Never delete. |
 | Fix at the relay | The flagged line is a re-export (`from` clause); the definition is live elsewhere. | Remove only the re-export line. |
 
-`classifyExportFix()` decides delete vs demote from the symbol's own file; an undecidable case is labelled `unknown`, never silently "delete". A coupled Redis key generator (generator plus its `test/redis-keys.test.mts` assertions) is removed as one atomic set under a `scope-justification:` block.
+`classifyExportFix()` decides delete vs demote from the symbol's own file; an undecidable case is labelled `unknown`, never silently "delete". A coupled Redis key generator (generator plus its `test/redis-keys.test.mts` assertions) is removed as one atomic set under a `scope-justification:` block (the rendered issue labels this case (d), the atomic-set variant of Delete). Any live reference means demote or drop the re-export, never delete; when ambiguous, take the narrowest edit.
 
 The picking agent confirms the verdict with a probe. Use `grep -rnw`, not `rg -w`: the host `rg` shim silently ignores `-w`. A multi-line import defeats line-scoped grep, so the compiler is the proof: confirm the removal with `npm run typecheck:test` before stamping a symbol dead. If `npm test` or `tsc` goes red after a delete, revert to demote or drop-the-re-export.
 
 ```bash
+# probe 1: live uses outside the defining file
 grep -rnw "<name>" src test | grep -v "<path>"
+# probe 2: is the flagged line the definition or a re-export (`from`)
 grep -rnE "export .*\b<name>\b" "<path>"
+# probe 3: coupled Redis key generators and their test assertions
 grep -rn "<name>" src/redis test/redis-keys.test.mts
 ```
 
