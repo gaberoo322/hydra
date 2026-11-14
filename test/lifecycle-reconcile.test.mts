@@ -715,6 +715,18 @@ describe("PR-covered ready-for-agent promotion (#5489)", () => {
     assert.equal(report.prCovered.skippedQaFail, 1);
   });
 
+  test("a failed journal read defers the PR-covered promotion: no write, journal-read-failed reported (fail-closed guard)", async () => {
+    const { w, add } = world();
+    add(570, ["ready-for-agent"]);
+    w.prs = [closing(570)];
+    w.prRecords.set(1470, { number: 1470, state: "OPEN", body: "Closes #570" });
+    w.deps.seam.journal.read = async () => ({ ok: false, error: "redis down" }) as never;
+    const report = await runReconcile(w.deps);
+    assert.equal(w.edits.length, 0);
+    assert.equal(report.prCovered.promoted, 0);
+    assert.ok(report.errors.includes("journal-read-failed:#570"));
+  });
+
   test("a seam refusal counts refused with the pr-covered-refused error and no promotion", async () => {
     const { w, add } = world();
     add(550, ["ready-for-agent"]);

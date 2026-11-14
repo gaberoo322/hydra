@@ -369,6 +369,9 @@ export async function runReconcile(deps: ReconcileDeps, opts: ReconcileOptions =
       }
 
       if (current === "ready-for-agent") {
+        // A failed journal read leaves `entries` empty, which would blind the QA-FAIL guard
+        // (fail-open ping-pong); defer the arm instead (journal-read-failed is already reported).
+        if (!journalRead.ok) return;
         await promotePrCovered(issue, [...entries, ...passEntries]);
         return;
       }
