@@ -1,0 +1,1 @@
+- refactor: shrink the branch-prune playbook to a pointer over scripts/branch-prune.sh (#5502)
