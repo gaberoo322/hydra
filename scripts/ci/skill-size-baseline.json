@@ -61,7 +61,7 @@
       "description": 30
     },
     "docs/operator-playbooks/hydra-cleanup.md": {
-      "body": 7294,
+      "body": 1226,
       "description": 45
     },
     "docs/operator-playbooks/hydra-design-qa.md": {
@@ -105,7 +105,7 @@
       "description": 21
     },
     "docs/operator-playbooks/hydra-pr-rebase.md": {
-      "body": 1204,
+      "body": 572,
       "description": 15
     },
     "docs/operator-playbooks/hydra-prd.md": {

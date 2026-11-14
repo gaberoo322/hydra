@@ -270,17 +270,16 @@ describe("decide.py — cascade-routing escalation (issue #3274)", () => {
   // a standing cap on the ORDINARY per-turn pipeline dispatch
   // (`_select_for_slot`, step 4) — so even a qa_orch policy row would not
   // have bounded the busy loop. The real fix is the separate per-issue STALL
-  // CAP guard, tracking only the HEAD of the needs-qa set (full coverage in
-  // the dedicated test/decide-qa-stall-cap.test.mts). This test pins that
-  // the two mechanisms are independent: an exhausted head-issue cap
+  // CAP: since #5318 that cap is the lifecycle seam's qa-stall Live Cap, which
+  // PARKS the issue, and a parked head drops out of the needs-qa lane. This
+  // test pins that the two mechanisms are independent: a parked head issue
   // suppresses the ordinary pipeline dispatch on its own, with no
   // ESCALATION_POLICY row and no dependence on any subagent_stop event
   // having occurred this turn.
-  test("issue #3829: the qa_orch per-issue stall-cap guard is independent of ESCALATION_POLICY", () => {
+  test("issue #3829/#5318: a parked (qa-stall capped) head is independent of ESCALATION_POLICY", () => {
     const state = baseState({
-      signals: { needs_qa_orch: true, needs_qa_numbers: "3841" },
+      signals: { needs_qa_orch: true, needs_qa_numbers: "3841", orch_parked_issues: [3841] },
     });
-    (state as any).qa_orch_item_attempts = { "3841": 3 };
     const plan = runDecide(state);
     const ordinaryDispatch = (plan.actions ?? []).find(
       (a: any) => a.type === "dispatch" && a.slot === "qa_orch",
@@ -288,7 +287,7 @@ describe("decide.py — cascade-routing escalation (issue #3274)", () => {
     assert.equal(
       ordinaryDispatch,
       undefined,
-      "an exhausted head needs-qa issue suppresses the ordinary pipeline dispatch even with zero slot_events this turn — the guard does not ride on ESCALATION_POLICY's stop-event trigger",
+      "a parked head needs-qa issue suppresses the ordinary pipeline dispatch even with zero slot_events this turn — the guard does not ride on ESCALATION_POLICY's stop-event trigger",
     );
     assert.equal(
       escalationFor(plan, "qa_orch"),
@@ -1052,6 +1051,49 @@ describe("decide.py — usage-shed parity for the escalation re-dispatch path (i
     const plan = runDecide(state);
     assert.ok(escalationFor(plan, "cleanup_orch"), "no usage_eligibility payload at all — must still escalate");
     assert.equal(blockedEvents(plan).length, 0);
+  });
+});
+
+describe("decide.py — escalation honours the whole admission verdict (#5479)", () => {
+  const blocked = (plan: any): any[] =>
+    (plan.events ?? []).filter((e: any) => e && e.event === "cascade_routing_blocked");
+  const devOrchDispatches = (plan: any): any[] =>
+    (plan.actions ?? []).filter((a: any) => a.type === "dispatch" && a.slot === "dev_orch");
+
+  test("a burned class is not escalated; block_reason=burned", () => {
+    const state = baseState({ slotEvents: [stopEvent("dev_orch", "failure", "tBURN", "npm test failed")] });
+    state.burned_classes = ["dev_orch"];
+    const plan = runDecide(state);
+    assert.equal(devOrchDispatches(plan).length, 0);
+    assert.equal(eventOf(plan, "cascade_routing_escalation"), undefined);
+    assert.deepEqual(blocked(plan).map((e: any) => e.block_reason), ["burned"]);
+  });
+
+  test("a scope-excluded class is not escalated; block_reason=scope_excluded", () => {
+    const state = baseState({
+      scope: "target-only",
+      slotEvents: [stopEvent("dev_orch", "failure", "tSCOPE", "npm test failed")],
+    });
+    const plan = runDecide(state);
+    assert.equal(devOrchDispatches(plan).length, 0);
+    assert.deepEqual(blocked(plan).map((e: any) => e.block_reason), ["scope_excluded"]);
+  });
+
+  test("an occupied slot is not escalated into; block_reason=slot_busy", () => {
+    const state = baseState({
+      slotEvents: [stopEvent("dev_orch", "failure", "", "npm test failed")],
+      slots: {
+        dev_orch: { skill: "hydra-dev", task_id: "other", started: "t0", started_epoch: 1, attempt: 1 },
+        qa_orch: null, research_orch: null, dev_target: null, qa_target: null,
+        research_target: null, design_concept_orch: null,
+      },
+    });
+    const plan = runDecide(state);
+    assert.equal(
+      devOrchDispatches(plan).filter((a: any) => a.prompt_args?.escalate_model).length,
+      0,
+    );
+    assert.deepEqual(blocked(plan).map((e: any) => e.block_reason), ["slot_busy"]);
   });
 });
 }

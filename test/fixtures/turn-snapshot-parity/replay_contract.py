@@ -10,8 +10,8 @@ schema (src/schemas/turn-snapshot.ts) emits: no test reads decide.py's source.
 Each corpus line is `{"name": str, "snapshot": str, "entry": int | null,
 "overlay"?: {...}}` — a Turn Snapshot document AS THE TS EMITTER PRINTED IT,
 plus the decide() input to plan it under: `entry` indexes the plan-parity
-corpus (decide-inputs.jsonl.gz: that entry's state as plan_parity.py converts
-it, its candidates, events and clock, with the document replacing the
+corpus (decide-inputs.jsonl.gz: that entry's state (already in the JSON
+form) without its snapshot, its candidates, events and clock, with the document replacing the
 converted snapshot); null is the decide-golden idle-triage-sweep fixture
 accessor_check.py also plans over. `overlay` sets top-level state keys on that
 input (carried state a branch needs to run at all, e.g. a zero-yield streak).
@@ -86,7 +86,7 @@ def _base_input() -> tuple[dict, object, list, object]:
 
 
 def _entry_input(entry: dict) -> tuple[dict, object, object, object]:
-    state = plan_parity.to_json_form(entry["state"])
+    state = copy.deepcopy(entry["state"])
     state.pop("turn_snapshot", None)
     events = entry["events"]
     if isinstance(events, list):

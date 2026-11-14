@@ -455,10 +455,12 @@ export type ReviewerCommitReason =
   | "ineligible-finding"
   | "out-of-scope"
   | "decision-error"
-  | "class-a-fixable";
+  | "class-a-fixable"
+  | "class-b-fixable"
+  | "class-ab-fixable";
 
 export interface ReviewerCommitDecision {
-  action: "none" | "commit-a";
+  action: "none" | "commit-a" | "commit-b" | "commit-ab";
   reason: ReviewerCommitReason;
   detail: string;
   /** Class-A paths named by BLOCKING findings: every one must end up staged (empty unless commit-a). */
@@ -467,6 +469,10 @@ export interface ReviewerCommitDecision {
   followUpPaths: string[];
   /** True when a blocking finding is located at the PR body. */
   bodyFix: boolean;
+  /** Class-B (test file) paths named by BLOCKING findings (issue #5268): every one must be staged. Empty unless stage is `A+B`. */
+  blockingTestPaths: string[];
+  /** Class-B paths named only by low follow-ups: optional. Empty unless stage is `A+B`. */
+  followUpTestPaths: string[];
 }
 
 export interface ReviewerCommitInput {
@@ -492,6 +498,8 @@ const noReviewerCommit = (reason: ReviewerCommitReason, detail: string): Reviewe
   blockingPaths: [],
   followUpPaths: [],
   bodyFix: false,
+  blockingTestPaths: [],
+  followUpTestPaths: [],
 });
 
 /**
@@ -585,6 +593,9 @@ export function decideReviewerCommit(input: ReviewerCommitInput): ReviewerCommit
     }
     const blockingPaths: string[] = [];
     const followUpPaths: string[] = [];
+    const blockingTestPaths: string[] = [];
+    const followUpTestPaths: string[] = [];
+    const classBOn = input.stage === "A+B";
     let bodyFix = false;
     const consider = (location: string, blocking: boolean): ReviewerCommitDecision | null => {
       if (/^\s*pr body\s*$/i.test(String(location ?? ""))) {
@@ -595,9 +606,13 @@ export function decideReviewerCommit(input: ReviewerCommitInput): ReviewerCommit
       }
       const path = reviewerCommitLocationPath(location);
       const cls = path === null ? "deny" : classifyQaFixPath(path);
-      if (path === null || (cls !== "A" && cls !== "AB")) {
+      const isClassB = classBOn && cls === "B";
+      if (path === null || (cls !== "A" && cls !== "AB" && !isClassB)) {
         return blocking
-          ? noReviewerCommit("ineligible-finding", `blocking finding at ${JSON.stringify(location)} is not class A`)
+          ? noReviewerCommit(
+              "ineligible-finding",
+              `blocking finding at ${JSON.stringify(location)} is not ${classBOn ? "class A or B" : "class A"}`,
+            )
           : null;
       }
       if (input.outOfScope === null || isOutOfScope(path, input.outOfScope)) {
@@ -605,7 +620,9 @@ export function decideReviewerCommit(input: ReviewerCommitInput): ReviewerCommit
           ? noReviewerCommit("out-of-scope", `${path} is listed under Files out of scope or the scope is unreadable`)
           : null;
       }
-      const into = blocking ? blockingPaths : followUpPaths;
+      const into = isClassB
+        ? (blocking ? blockingTestPaths : followUpTestPaths)
+        : (blocking ? blockingPaths : followUpPaths);
       if (!into.includes(path)) into.push(path);
       return null;
     };
@@ -616,13 +633,26 @@ export function decideReviewerCommit(input: ReviewerCommitInput): ReviewerCommit
     for (const f of input.followUps ?? []) consider(f.location, false);
     // A path that is also blocking is required, never merely optional.
     const optionalPaths = followUpPaths.filter((p) => !blockingPaths.includes(p));
+    const optionalTestPaths = followUpTestPaths.filter((p) => !blockingTestPaths.includes(p));
+    // The commit classes follow the BLOCKING rows only: a low follow-up never widens the class set.
+    const hasA = bodyFix || blockingPaths.length > 0;
+    const hasB = blockingTestPaths.length > 0;
+    const action = hasA && hasB ? "commit-ab" : hasB ? "commit-b" : "commit-a";
+    const reason: ReviewerCommitReason =
+      action === "commit-ab" ? "class-ab-fixable" : action === "commit-b" ? "class-b-fixable" : "class-a-fixable";
+    const detail =
+      action === "commit-a"
+        ? `every blocking finding is class A (${blockingPaths.length} path(s)${bodyFix ? " + PR body" : ""})`
+        : `every blocking finding is class ${action === "commit-b" ? "B" : "A or B"} (${blockingPaths.length} class-A path(s)${bodyFix ? " + PR body" : ""}, ${blockingTestPaths.length} class-B path(s))`;
     return {
-      action: "commit-a",
-      reason: "class-a-fixable",
-      detail: `every blocking finding is class A (${blockingPaths.length} path(s)${bodyFix ? " + PR body" : ""})`,
+      action,
+      reason,
+      detail,
       blockingPaths,
       followUpPaths: optionalPaths,
       bodyFix,
+      blockingTestPaths,
+      followUpTestPaths: optionalTestPaths,
     };
   } catch (err) {
     logger.error({ err }, "[round-action] decideReviewerCommit failed; refusing the commit path");
@@ -630,6 +660,26 @@ export function decideReviewerCommit(input: ReviewerCommitInput): ReviewerCommit
   }
 }
 
+
+/**
+ * Count `test(` / `it(` call sites (including `.only` / `.skip` / `.todo`) in a
+ * test file's text. The class-B no-weakening check (issue #5268 INV-8): a
+ * reviewer test edit may never lower this count. Pure, total, never throws.
+ * Whole-line `//` and block-comment lines are ignored so commented-out cases do not count.
+ */
+export function countTestCases(text: string): number {
+  try {
+    let n = 0;
+    for (const line of String(text ?? "").split(/\r?\n/)) {
+      if (/^\s*(\/\/|\*|\/\*)/.test(line)) continue;
+      n += (line.match(/(?:^|[^\w.$])(?:test|it)(?:\.(?:only|skip|todo))?\s*\(/g) ?? []).length;
+    }
+    return n;
+  } catch (err) {
+    console.error("[round-action] countTestCases failed; reporting 0:", err);
+    return 0;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Deterministic re-verify helpers for playbook step 9.4 (issue #5267, round-3

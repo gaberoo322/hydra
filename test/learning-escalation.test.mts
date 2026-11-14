@@ -266,6 +266,26 @@ describe("escalation to GitHub (issue #512)", () => {
     assert.ok(!invocations.some(l => l.startsWith("issue create ")), "must NOT create a duplicate");
   });
 
+  test("restoreLifecycleLabel routes to needs-triage via the seam and is best-effort: a throwing advance never propagates (#5318)", async () => {
+    const { restoreLifecycleLabel } = await import("../src/pattern-memory/escalation.ts");
+    const calls: Array<{ issue: number; to: string; actor?: string }> = [];
+    await restoreLifecycleLabel(999, (async (input: any) => {
+      calls.push(input);
+      throw new Error("seam IO exploded");
+    }) as any);
+    assert.deepEqual(calls.map((c) => [c.issue, c.to, c.actor]), [[999, "needs-triage", "escalation"]]);
+  });
+
+  test("restoreLifecycleLabel sibling shape: a refused advance resolves and issues exactly one advance (#5318)", async () => {
+    const { restoreLifecycleLabel } = await import("../src/pattern-memory/escalation.ts");
+    let n = 0;
+    await restoreLifecycleLabel(999, (async () => {
+      n++;
+      return { ok: false, issue: 999, code: "from-mismatch", mode: "enforce", written: false };
+    }) as any);
+    assert.equal(n, 1);
+  });
+
   test("returns status=error when gh fails — never throws", async () => {
     process.env.FAKE_GH_SCENARIO = "error";
     const result = await escalatePatternToIssue({

@@ -4,6 +4,7 @@
  *
  *   npx tsx scripts/lifecycle.ts advance <issue> <to> [--evidence k=v]...
  *       [--reason R] [--rationale T] [--close-reason completed|"not planned"] [--actor A]
+ *       [--from <state>]   compare-and-set: refuse `from-mismatch` unless the issue is in <state>
  *   npx tsx scripts/lifecycle.ts claim <issue> --dispatch ID --class C --run R [--artifact-hash H]
  *   npx tsx scripts/lifecycle.ts release [<issue>] --dispatch ID [--outcome O]
  *   npx tsx scripts/lifecycle.ts claim-show <issue>
@@ -182,6 +183,7 @@ export async function main(argv: readonly string[]): Promise<number> {
         rationale: parsed.flags.rationale,
         closeReason: parsed.flags["close-reason"],
         actor: parsed.flags.actor,
+        from: parsed.flags.from,
       },
       deps,
     );

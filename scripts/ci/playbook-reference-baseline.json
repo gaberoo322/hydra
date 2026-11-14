@@ -13,20 +13,9 @@
       "superseded-adr 0004",
       "symbol src/redis/holdback.ts#windowCyclesForTier"
     ],
-    "docs/operator-playbooks/_fragments/hydra-target-build-anchor-preflight.md": [
-      "path src/backlog/work-queue-hygiene.ts"
-    ],
-    "docs/operator-playbooks/_fragments/hydra-target-build-merge-flow.md": [
-      "route /api/backlog/${ITEM_ID}/move"
-    ],
     "docs/operator-playbooks/hydra-architect.md": [
       "path config/direction/goals.md",
       "route /api/backlog"
-    ],
-    "docs/operator-playbooks/hydra-cleanup.md": [
-      "path .github/workflows/deploy.yml",
-      "path src/digest-format.ts",
-      "path src/digest.ts"
     ],
     "docs/operator-playbooks/hydra-doctor.md": [
       "path docs/agents/wiring-status.md",
