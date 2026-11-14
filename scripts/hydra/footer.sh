@@ -32,7 +32,7 @@
 # The output is exactly one line, no trailing leading whitespace beyond the
 # single space delimiters, matching the historical hand-written footer
 # byte-for-byte:
-#   - `hydra_issue_footer hydra-target-incident`        -> `Source: hydra-target-incident | 2026-...Z`
+#   - `hydra_issue_footer hydra-target-incident`  -> `Source: hydra-target-incident | 2026-...Z`
 #   - `hydra_issue_footer hydra-discover 'tier N'` -> `Source: hydra-discover (tier N) | 2026-...Z`
 
 # hydra_issue_footer <skill-label> [suffix]
