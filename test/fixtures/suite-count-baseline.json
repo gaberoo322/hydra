@@ -495,6 +495,7 @@
   "test/target-mutation-check.test.mts": 7,
   "test/target-playbook-capability-branches.test.mts": 4,
   "test/target-qa-verdict.test.mts": 5,
+  "test/target-reframe.test.mts": 2,
   "test/target-retro.test.mts": 3,
   "test/target-risk-core-check.test.mts": 12,
   "test/target-risk-surface.test.mts": 4,
