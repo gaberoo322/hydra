@@ -24,12 +24,6 @@
     "docs/operator-playbooks/_fragments/hydra-qa-reference.md": {
       "status": 8
     },
-    "docs/operator-playbooks/_fragments/hydra-target-build-anchor-preflight.md": {
-      "status": 2
-    },
-    "docs/operator-playbooks/_fragments/hydra-target-build-merge-flow.md": {
-      "status": 5
-    },
     "docs/operator-playbooks/_fragments/thermo-nuclear-proposal-format.md": {
       "status": 1,
       "line-cite": 1
@@ -92,9 +86,6 @@
     },
     "docs/operator-playbooks/hydra-sweep.md": {
       "status": 1
-    },
-    "docs/operator-playbooks/hydra-target-build.md": {
-      "status": 3
     },
     "docs/operator-playbooks/hydra-tool-scout.md": {
       "status": 3,
