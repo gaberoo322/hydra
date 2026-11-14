@@ -1,0 +1,1 @@
+**Verdict is a comment.** Post the verdict as a PR comment, never `gh pr review --approve` or `--request-changes`: the shared identity cannot self-approve, and the required CI checks are the merge gate.

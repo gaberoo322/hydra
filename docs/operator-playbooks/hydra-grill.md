@@ -13,7 +13,7 @@ dispatch. Adapts Matt Pocock's upstream `grill-with-docs` to operate against
 Hydra's own vocabulary — `CONTEXT.md`, ADRs under `docs/adr/`, and the
 anchor issue's body and comments.
 
-This skill produces the artifact for the design-concept gate (#437). The artifact
+This skill produces the artifact for the design-concept gate. The artifact
 lands in Redis via `POST /api/design-concepts` and is consumed by:
 
 - the dispatch gate: `gateDispatch` in `src/lifecycle/gates.ts` refuses to
@@ -31,6 +31,8 @@ single `gate` sub-object. There is **no `.concept` envelope** — consumers read
 
 The skill is dispatched by the autopilot (`design_concept_orch`) and is also
 invocable on demand by the operator.
+
+@include _fragments/lifecycle-seam-writes.md
 
 ## Read these first
 
@@ -57,17 +59,16 @@ arguments: [anchor, scope]
   string. Used verbatim as the Redis key (`hydra:design-concept:{anchor}`).
 - `scope` — `orch` or `target`. ONLY a second positional token that is exactly
   `orch` or `target` selects the scope; anything else — omitted, or a flag
-  such as the `--afk` observed on the #4590 dispatch — leaves the default
-  `orch` in force (#4713). `--afk` is not an argument of this skill, and
-  interactive vs non-interactive mode is never chosen positionally: it follows
-  from the session (operator-interactive vs dispatched, Step 8). The autopilot
-  passes the scope explicitly.
+  such as `--afk` — leaves the default
+  `orch` in force. `--afk` is not an argument of this skill, and interactive vs
+  non-interactive mode is never chosen positionally: it follows from the session
+  (operator-interactive vs dispatched). The autopilot passes the scope explicitly.
 
 The skill loader substitutes the named arguments into the rendered skill text
 wherever a dollar-prefixed `anchor` or `scope` token appears, so this playbook
-never uses those two tokens as shell or jq placeholders (#4713): Step 2 names
-the `scope` argument in prose, and Step 7's jq binding deliberately does not
-reuse the argument's own name. Uppercase shell variables (`$ANCHOR`, `$SCOPE`)
+never uses those two tokens as shell or jq placeholders: the load-context step
+names the `scope` argument in prose, and the write-the-artifact step's jq binding
+deliberately does not reuse the argument's own name. Uppercase shell variables (`$ANCHOR`, `$SCOPE`)
 and jq names that do not collide with an argument (`$anchorRef`,
 `$glossaryTerms`, …) render verbatim and are used freely.
 
@@ -89,16 +90,15 @@ On cap-hit, the skill **yields partial state** (writes what it has, marks
 ### Step 1 — Worktree-guard preamble (REQUIRED for the prototype sub-dispatch)
 
 `hydra-grill` itself is read-mostly + API-write — it does not need worktree
-isolation in its parent context. The prototype sub-dispatch (Step 4) DOES
+isolation in its parent context. The prototype sub-dispatch DOES
 need it: the dispatched `prototype` child writes throwaway code under
-`/tmp/hydra-prototype-<anchor>/`. Verbatim block to inject into the child
-prompt, per `feedback_bg_agent_worktree_hygiene`:
+`/tmp/hydra-prototype-<anchor>/`. Verbatim block to inject into the child prompt:
 
 ```
 ## CRITICAL SAFETY RULE — READ FIRST
 Run `pwd` and `git rev-parse --git-dir` first.
 - Worktree path AND `.git/worktrees/...` gitdir → proceed.
-- cwd == `/home/gabe/hydra` (or `/home/gabe/hydra-betting`) → ABORT.
+- cwd == `/home/gabe/hydra` (or the Target checkout `$TARGET_WS`) → ABORT.
 No fallback. No `git checkout` in the main tree.
 ```
 
@@ -120,14 +120,14 @@ seed the Q&A loop; do not exhaust all four when the first two are sufficient.
 The READ scope depends on the `scope` argument (`orch` or `target`):
 
 - `scope=orch` → orchestrator vocabulary: `~/hydra/CONTEXT.md` + `~/hydra/docs/adr/`.
-- `scope=target` → target's multi-context vocabulary (see Step 2.target below). Do NOT read `~/hydra/CONTEXT.md` for target anchors — the orchestrator's glossary describes the orchestrator, not the target.
+- `scope=target` → target's multi-context vocabulary (see the Target glossaries section below). Do NOT read `~/hydra/CONTEXT.md` for target anchors — the orchestrator's glossary describes the orchestrator, not the target.
 
 **Resolve ONE `REPO` from the scope argument, before anything below.** The
 anchor issue number lives on the artifact's own repo — `orch` →
 `gaberoo322/hydra`; `target` → `TARGET_GH_REPO` from the same
 `target-config.ts` seam the server's `getTargetGithubRepo()` reads (ADR-0013).
 Shell state does not persist across Bash tool calls, so re-run this snippet in
-every Bash call that uses `$REPO` (Step 2.4 and Step 8):
+every Bash call that uses `$REPO` (the issue-body read and the escalation):
 
 ```bash
 SCOPE="${SCOPE:?unset - set SCOPE to the scope argument (orch|target)}"
@@ -140,18 +140,18 @@ else
 fi
 ```
 
-1. **`CONTEXT.md`** (scope=orch) / **target glossaries** (scope=target — Step 2.target).
+1. **`CONTEXT.md`** (scope=orch) / **target glossaries** (scope=target — see the Target glossaries section).
    Extracts go into `glossaryTerms` only when the term is actually referenced
    by the issue body or comes up during the Q&A loop. Do not stuff the entire
    glossary into `glossaryTerms` — the artifact is a record of what *this*
    design grounded in.
 
-2. **ADRs** (scope=orch: `~/hydra/docs/adr/`; scope=target: see Step 2.target).
+2. **ADRs** (scope=orch: `~/hydra/docs/adr/`; scope=target: see the Target glossaries section).
    Start with the ones the issue body references by number or title. Then
    grep for any ADR mentioning a module path the change is likely to touch.
 
 3. **Research** — there is no research-report API route; research findings
-   live in the anchor issue's body and comments (step 4). Nothing to fetch.
+   live in the anchor issue's body and comments. Nothing to fetch.
 
 4. **Issue body**:
    ```bash
@@ -162,36 +162,32 @@ fi
    "have we done this before?" question. Use `gh issue list --search` or
    probe-search.
 
-#### Step 2.target — Multi-context target glossaries (scope=target only)
+#### Target glossaries — multi-context layout (scope=target only)
 
-The target (`~/hydra-betting`) uses a multi-context layout with one
-`CONTEXT.md` per context plus a root `CONTEXT-MAP.md` index. Read lazily,
-not eagerly — the autopilot dispatches grill sessions often and exhaustive
-reads are wasted tokens when the issue only touches one context.
+The Target checkout is `$TARGET_WS`, exported by the seam snippet in the load-context step (never
+spell its path). It uses a multi-context layout with one `CONTEXT.md` per context
+plus a root `CONTEXT-MAP.md` index. Read lazily, not eagerly: exhaustive reads are
+wasted tokens when the issue only touches one context.
 
-1. **Always** read `~/hydra-betting/CONTEXT-MAP.md` (the index).
-2. **Always** read `~/hydra-betting/docs/agents/domain.md` — it is the
-   agent-facing contract documenting both the READ layout and the WRITE
-   protocol that `hydra-target-build` will follow downstream. The Q&A loop
-   must respect both.
+1. **Always** read `$TARGET_WS/CONTEXT-MAP.md` (the index).
+2. **Always** read `$TARGET_WS/docs/agents/domain.md`, the agent-facing contract
+   documenting both the READ layout and the WRITE protocol that
+   `hydra-target-build` follows downstream. The Q&A loop must respect both.
 3. Identify which contexts the issue touches by grepping the context names
    from CONTEXT-MAP against the issue body. If no context is named, leave
    `modulesTouched[]` to be filled by the Q&A loop and ask the operator to
    name them.
-4. For each identified context, read `web/src/lib/<context>/CONTEXT.md`.
-   Some contexts are stubs marked _"to be grilled"_ — proceed silently if
-   the file is sparse, but record the gap in `glossaryGaps` if a term you
-   need is missing.
-5. **System-wide ADRs**: always read `~/hydra-betting/docs/adr/` (index
-   listing only; load specific files when the issue body or Q&A loop
-   references them).
-6. **Context-scoped ADRs**: for each identified context, list
-   `web/src/lib/<context>/docs/adr/` if it exists. Absence is fine — the
-   directory is created lazily.
+4. For each identified context, read its `CONTEXT.md` (the path is in
+   CONTEXT-MAP). Some contexts are stubs marked _"to be grilled"_: proceed
+   silently if the file is sparse, but record the gap in `glossaryGaps` if a term
+   you need is missing.
+5. **System-wide ADRs**: list `$TARGET_WS/docs/adr/` (index only; load specific
+   files when the issue body or Q&A loop references them).
+6. **Context-scoped ADRs**: for each identified context, list its `docs/adr/` if
+   it exists. Absence is fine.
 
 The artifact's `glossaryTerms[i]` entries should record the *source path*
-of the term (e.g. `web/src/lib/arbitrage/CONTEXT.md`) so downstream
-reviewers can navigate back to it.
+of the term so downstream reviewers can navigate back to it.
 
 ### Step 3 — Q&A loop
 
@@ -211,14 +207,14 @@ Separate the two kinds of open question before you ask anything:
 - **Facts** — anything answerable by *reading the codebase, `CONTEXT.md`, the
   ADRs, or the research report*. Resolve these yourself by exploring; **never**
   spend a Q&A turn asking the operator (or, in the autopilot path, asking
-  yourself) a question you can answer from the sources in Step 2. Filling
-  `modulesTouched[].depthClassification` from the Step 2 sources
+  yourself) a question you can answer from the sources loaded above. Filling
+  `modulesTouched[].depthClassification` from the loaded sources
   is a fact, not a decision.
 - **Decisions** — anything that requires a *choice the sources don't settle*
   (which alternative to take, what invariant to commit to, whether to break an
   interface). These belong to the operator: present each with a recommended
   answer and wait. In the non-interactive autopilot path, an unresolved
-  decision is a `glossaryGaps` / handoff escalation (Step 8), not a guess.
+  decision is a `glossaryGaps` / handoff escalation, not a guess.
 
 This distinction is the fix for the "the skill grills itself by re-exploring
 the codebase as if it were the operator" failure mode (pronounced on Fable):
@@ -233,7 +229,7 @@ facts get *explored*, decisions get *asked*.
 | Does the change extend or break the module's public interface? | `modulesTouched[].interfaceImpact` |
 | What invariants must hold after the change? | `invariants` |
 | What alternatives were considered and rejected? | `rejectedAlternatives` |
-| Are there terms in the issue not in `CONTEXT.md`? | `glossaryGaps` (see Step 5) |
+| Are there terms in the issue not in `CONTEXT.md`? | `glossaryGaps` (see glossary-gap handling) |
 
 The "deep or shallow?" classification uses the deep-module vocabulary
 (`mattpocock-skills:codebase-design`). A clearly shallow module (thin pass-through, no decisions of its
@@ -241,8 +237,8 @@ own) should be flagged; a deep one (carries policy, has invariants) is the
 opposite signal.
 
 When prose alone cannot resolve a question about a state machine, schema
-shape, reducer, or any other small piece of logic — escalate to Step 4
-(prototype sub-dispatch) rather than guessing.
+shape, reducer, or any other small piece of logic — escalate to the
+prototype sub-dispatch rather than guessing.
 
 ### Step 4 — Prototype sub-dispatch (LOGIC branch)
 
@@ -254,7 +250,7 @@ a tiny piece of code can.
    grilling sessions for different anchors don't collide.
 2. Invoke the upstream `prototype` skill (LOGIC branch) with a single
    clear question statement. The dispatched child receives the worktree-
-   guard preamble from Step 1.
+   guard preamble above.
 3. Capture the smallest snippet that encodes the decision (state machine,
    reducer, schema, type shape). Inline it as `prototypes[i]` in the
    artifact with `branch: 'logic'`.
@@ -276,7 +272,7 @@ be tempted to copy it into `src/`.
 
 ### Step 5 — Glossary-gap handling
 
-For each candidate gap surfaced in Step 3:
+For each candidate gap surfaced in the Q&A loop:
 
 1. **Alias detection**: grep the codebase + `CONTEXT.md` for similar-but-
    not-identical terms. If a clean match exists (e.g. the issue says
@@ -293,24 +289,23 @@ For each candidate gap surfaced in Step 3:
    **Where the PR lands depends on scope:**
    - `scope=orch` → PR against `gaberoo322/hydra`, updating
      `~/hydra/CONTEXT.md`.
-   - `scope=target` → PR against `~/hydra-betting`, updating either
-     `web/src/lib/<context>/CONTEXT.md` (term scoped to one context) or
-     `CONTEXT-MAP.md` relationships section (cross-context term). New
-     ADR? `docs/adr/NNNN-kebab-slug.md` for cross-context decisions,
-     `web/src/lib/<context>/docs/adr/NNNN-kebab-slug.md` for scoped ones.
-     The per-context CONTEXT.md is glossary-only; ADRs go in adr/.
+   - `scope=target` → PR against the Target repo (`$TARGET_GH_REPO`), updating
+     either the context's own `CONTEXT.md` (term scoped to one context) or the
+     `CONTEXT-MAP.md` relationships section (cross-context term). New ADRs go
+     under the Target's `docs/adr/` (cross-context) or the context's own
+     `docs/adr/` (scoped). The per-context CONTEXT.md is glossary-only.
 
    **Gate behaviour**: the gate fails closed on any non-empty
    `glossaryGaps` (per `gateCheck()` rule 1). There is no whitelist escape
    hatch: a grilling session that surfaces genuinely-new terms WILL
-   escalate to handoff (Step 8).
+   escalate to handoff.
    That is intentional — the operator either lands the `CONTEXT.md` PR or
    invokes the override.
 
 ### Step 6 — Glossary-purity audit
 
-While loading `CONTEXT.md` (Step 2), watch for entries that violate the
-"glossary-only" rule established in #441:
+While loading `CONTEXT.md`, watch for entries that violate the
+"glossary-only" rule:
 
 - Implementation details (file paths, function names, code snippets).
 - `(planned)` placeholders that never landed.
@@ -318,7 +313,7 @@ While loading `CONTEXT.md` (Step 2), watch for entries that violate the
 
 Each finding becomes a `glossary-purity` entry on a separate
 `ubiquitous-language` PR — do not bundle it into the design-concept
-artifact or into the gap-fix PR from Step 5. CONTEXT.md is glossary-only;
+artifact or into the gap-fix PR. CONTEXT.md is glossary-only;
 the purity audit is read-only from this skill's perspective.
 
 This step is opportunistic — if no findings surface, skip it. Do not
@@ -334,13 +329,13 @@ persisting an artifact without a confirmation beat.
 
 - **Operator-interactive runs** — summarise the resolved design (modules,
   invariants, rejected alternatives) back in one short recap and get explicit
-  confirmation before the POST. If the operator amends, loop back to Step 3.
+  confirmation before the POST. If the operator amends, loop back to the Q&A loop.
 - **Autopilot (non-interactive) runs** — there is no operator to confirm, so
-  the automated stand-in is the Step 8 content gate (`contentGateCheck()` —
+  the automated stand-in is the content gate below (`contentGateCheck()` —
   ADR-0008 rules 1-6, the half of the gate a fresh draft CAN pass): it is
   the shared-understanding gate. Never hand-wave past a gate FAIL by
   approving anyway (Safety rule 3); an unconfirmable design escalates via
-  handoff (Step 8).
+  handoff.
 
 POST the full body to `/api/design-concepts`. The store computes
 `createdAt` and `artifactHash` server-side; the skill MUST NOT supply
@@ -352,11 +347,10 @@ Use the helper at `scripts/autopilot/grill-artifact.sh`:
 # Compose the body in a temp file. Order of fields doesn't matter to
 # the API, but matters to artifactHash determinism (canonical-JSON
 # encoding inside design-concept.ts sorts keys). The scope binds under
-# the jq name `scopeArg` — NOT under the argument's own name (#4713):
+# the jq name `scopeArg` — NOT under the argument's own name:
 # the skill loader substitutes named frontmatter arguments into the
 # rendered text, so a jq binding named `scope` would be spliced with
-# whatever the caller passed as the second positional token (observed:
-# `scope: --afk,` from a `/hydra-grill #4590 --afk` invocation).
+# whatever the caller passed as the second positional token.
 BODY_PATH=$(mktemp -t hydra-grill-XXXXXX.json)
 jq -n \
   --arg anchorRef "$ANCHOR" \
@@ -385,14 +379,14 @@ rm -f "$BODY_PATH"
 ```
 
 The response is the persisted artifact including the server-computed
-`artifactHash`. Save it — Step 8 uses it.
+`artifactHash`. Save it; the next step uses it.
 
 ### Step 8 — Content-gate → auto-approve → full-gate confirm OR escalate
 
 A freshly-written artifact is always `status: 'draft'`, and the full
 gate's rule 7 requires `status === 'approved'` — so running the FULL gate
-before approving can never take its success branch; the pre-#4035
-gate-then-approve sequence was structurally dead. The reachable sequence
+before approving can never take its success branch; a
+gate-then-approve sequence is structurally dead. The reachable sequence
 checks the CONTENT rules (ADR-0008 rules 1-6) first, approves, then
 CONFIRMS with the full gate (rules 1-7):
 
@@ -432,20 +426,17 @@ the second would make `approve` a rubber stamp with no rule enforcement
 at all.
 
 **Auto-approve** (content-gate ok, then full-gate confirm ok) writes
-`approvedBy: 'auto-gate'`. The Phase B autopilot wiring will then accept
-the artifact for dispatch.
+`approvedBy: 'auto-gate'`, and the dispatch gate accepts the artifact.
 
 **Escalate** (gate fail) writes a structured handoff comment directly on the
-anchor issue — no dated queue issue is created (ADR-0034 §8.1, resolution on
-#4445). The handoff:
+anchor issue — no dated queue issue is created (ADR-0034 §8.1). The handoff:
 
 1. Is posted as a comment on the anchor issue itself (`gh issue comment
    <anchorNum>`), where `<anchorNum>` is `$ANCHOR` with any `issue-` prefix
    stripped, plus a move of that same issue to `hitl-grill` through the
    lifecycle seam (`npx tsx scripts/lifecycle.ts advance <anchorNum> hitl-grill
    --reason design-decision ...`; a design gap is not an ADR-0005 reason, so
-   `ready-for-human` would be refused, and a non-zero exit is final — never
-   fall back to a direct label write, ADR-0047 D4). Never removes
+   `ready-for-human` would be refused). Never removes
    `ready-for-agent` by hand, never adds any other label, never mutates the
    artifact's status.
 2. Always starts with the exact heading `## hydra-grill handoff` — never
@@ -457,14 +448,13 @@ anchor issue — no dated queue issue is created (ADR-0034 §8.1, resolution on
 3. References the artifact's `anchorRef` and `artifactHash` so the
    operator can pull the draft from Redis to continue from.
 
-**Post to the artifact's own repo (`$REPO`, resolved in Step 2).** `GET
+**Post to the artifact's own repo (`$REPO`, resolved in the load-context step).** `GET
 /design-concepts/:anchorRef/approve-preconditions` reads the handoff comment
-from the Target repo when `dc.scope === 'target'` (pinned in
-`test/work-page.test.mts`), so a handoff posted to the orchestrator repo can
+from the Target repo when `dc.scope === 'target'`, so a handoff posted to the orchestrator repo can
 never turn the /work queue's hash line ✓ for a target-scope draft.
 
-Concrete invocation (parent-context bash; re-run the Step 2 `REPO` snippet in
-this Bash call first):
+Concrete invocation (parent-context bash; re-run the `REPO` snippet from the
+load-context step in this Bash call first):
 
 ```bash
 ANCHOR_NUM="${ANCHOR#issue-}"
@@ -504,7 +494,7 @@ Side effects:
 - On `gate=fail`: a `## hydra-grill handoff` comment on the anchor issue plus
   the issue moved to `hitl-grill` via the lifecycle seam. No GitHub issue is created.
 - Optional: `ubiquitous-language`-labelled PR(s) for glossary gaps or
-  glossary-purity findings (Steps 5, 6).
+  glossary-purity findings.
 - Sandbox under `/tmp/hydra-prototype-<anchor>` is **always** deleted
   before this skill returns, even on failure paths.
 
@@ -512,8 +502,8 @@ Side effects:
 
 - CI merge-gate hook to require an artifact in the PR body (owned by the
   `design-concept-reconcile` workflow, not this skill).
-- Target-side READ wiring is covered by Step 2.target above; the artifact
-  carries the target vocabulary forward to `hydra-target-build`.
+- Target-side READ wiring is covered by the Target glossaries section above; the
+  artifact carries the target vocabulary forward to `hydra-target-build`.
 
 ## Manual invocation
 
@@ -536,20 +526,20 @@ bash scripts/autopilot/grill-artifact.sh approve 439 "operator:gabe"
 | Symptom | First place to look |
 |---|---|
 | Skill exits without a Redis artifact | `curl http://localhost:4000/api/design-concepts/<anchor>` — was the POST attempted? |
-| Gate fails on a freshly-approved artifact | Check `gateCheck()` reasons; the artifact was either approved before all content rules passed (a skipped Step 8 `content-gate` — re-grill) or tripped the freshness race between `content-gate` and `gate`. |
-| Prototype sandbox left behind on disk | The cleanup in Step 4 was skipped; `rm -rf /tmp/hydra-prototype-<anchor>` manually and file a bug. |
-| Handoff written as freeform prose | The skill bypassed the `## hydra-grill handoff` template — that is a regression; re-run Step 8's escalate branch. |
+| Gate fails on a freshly-approved artifact | Check `gateCheck()` reasons; the artifact was either approved before all content rules passed (a skipped `content-gate` — re-grill) or tripped the freshness race between `content-gate` and `gate`. |
+| Prototype sandbox left behind on disk | The prototype cleanup was skipped; `rm -rf /tmp/hydra-prototype-<anchor>` manually and file a bug. |
+| Handoff written as freeform prose | The skill bypassed the `## hydra-grill handoff` template — that is a regression; re-run the escalate branch. |
 | `qaTrace.length < 6` despite a long session | The skill summarised multiple turns into one entry; the rule is one entry per resolved branch, not one per topic. |
 
 ## Safety rules
 
-1. NEVER write to `~/hydra` or `~/hydra-betting` working trees. All file
+1. NEVER write to the `~/hydra` or Target (`$TARGET_WS`) working trees. All file
    IO outside the artifact is under `/tmp/hydra-prototype-<anchor>`.
-2. NEVER skip the Step 4 sandbox cleanup, even on failure.
+2. NEVER skip the prototype sandbox cleanup, even on failure.
 3. NEVER approve an artifact whose `gateCheck()` returns `ok: false` —
    the operator override path uses `approvedBy: 'operator:<name>'` and
    is explicit.
 4. NEVER write the handoff as freeform prose — always the `## hydra-grill
-   handoff` template (Step 8).
+   handoff` template.
 5. The Q&A loop is bounded — on cap-hit, yield partial state (`status:
    'draft'`); do not retry, do not extend the cap.

@@ -10,7 +10,7 @@ reference_files: [_fragments/hydra-dev-parent-flow.md, _fragments/hydra-dev-chil
 
 # Hydra Dev
 
-> **Composed skill (ADR-0030 Decision 2 / Option C, issue #3422).** This playbook is the thin Hydra **AFK overlay** on top of the vendored upstream `implement` base (`docs/operator-playbooks/_vendor/implement.md`). `scripts/sync-skills.sh` emits `~/.claude/skills/hydra-dev/SKILL.md` as **[upstream implement base] + [this overlay]**, with the vendored base's `disable-model-invocation: true` **stripped** (it hard-errors under Skill-tool dispatch). The **implement** stage of the one-lineage spine dispatches the *same* upstream skill the operator runs, in AFK mode: the upstream base sets the spirit (implement against the spec/tickets, use `/tdd` at pre-agreed seams, typecheck + single-file tests as you go, the full suite once at the end, then `/code-review`), and the worktree-isolation, verification-depth, and PR contract below are the Hydra-specific overlay that rides on it. **Contract complete (ADR-0030 Decision 5, epsilon #3424):** the standalone `hydra-dev` *fork identity* is retired as a documented concept — this is no longer a bespoke fork that re-implements `implement` inline, it **is** the composed `implement` stage. The `dev_orch` dispatch *class* and its `decide.py` `make_dispatch(…, "hydra-dev")` string literal stay live (they select this composed stage; the delta slice #3423 already migrated the learning-loop seams), but "hydra-dev the fork" no longer names a second inline copy of the pattern — a change to `implement` behaviour is made once, in the composed upstream base + this overlay.
+> **Composed skill (ADR-0030).** This playbook is the Hydra AFK overlay on the vendored upstream `implement` base (`compose_base`); `scripts/sync-skills.sh` emits the skill as base plus overlay. The base sets the cadence (implement against the spec, `/tdd` at pre-agreed seams, typecheck and single-file tests as you go, the full suite once at the end, then `/code-review`); the worktree-isolation, verification and PR contract below ride on it. The `dev_orch` class selects this stage.
 
 Autonomous implementation of GitHub issues against the Hydra orchestrator
 (`~/hydra`). Delegates to a worktree subagent for isolation.
@@ -21,7 +21,7 @@ pointers**. The full step-by-step contract for each branch lives in a sibling
 reference file that `scripts/sync-skills.sh` emits next to this SKILL.md — read
 the one that matches your branch and follow it end to end.
 
-## Am I the parent or the child? — read FIRST (issue #1900)
+## Am I the parent or the child? — read FIRST
 
 This skill runs in one of two roles. Decide which BEFORE any work:
 
@@ -35,10 +35,10 @@ This skill runs in one of two roles. Decide which BEFORE any work:
   the spawn step — they were already done for you.**
   → **CONTEXT POINTER: read `hydra-dev-child-flow.md` (sibling of this SKILL.md)
   and run its numbered child execution contract.** Do NOT spawn another agent;
-  do NOT re-select or re-label the issue. Its step 9b — the pre-PR mechanical
-  gate (reconcile dry-run, baseline regeneration, `npm test` per the
-  "Full `npm test` recipe" below + `npm run typecheck:test`, and the
-  `Merge danger:` PR-body field check, #5258) — is mandatory before `gh pr create` (#4731).
+  do NOT re-select or re-label the issue. Its pre-PR mechanical gate (reconcile
+  dry-run, baseline regeneration, `npm test` per the "Full `npm test` recipe"
+  below plus `npm run typecheck:test`, and the `Merge danger:` field check) is
+  mandatory before `gh pr create`.
 - **You are the PARENT** if you have an `Agent`/`Task` spawn tool available (or
   are being run interactively by the operator to dispatch work).
   → **CONTEXT POINTER: read `hydra-dev-parent-flow.md` (sibling of this
@@ -61,67 +61,39 @@ worktree-fence violations are safety failures.
 
 1. **NEVER run `git stash`/`checkout`/`reset`/`clean` on the main `~/hydra`
    working tree.** The operator may have uncommitted work.
-2. All implementation runs inside a worktree — Claude:
-   `Agent(isolation: "worktree")`; Codex (retired, ADR-0006): `codex exec` in a fresh
-   `git worktree add`.
+2. All implementation runs inside a worktree: `Agent(isolation: "worktree")`
+   (Codex dispatch is retired, ADR-0006).
 3. Dirty main tree is fine — worktrees are independent.
-4. **No silent fallback.** If the dispatched BG agent finds itself in `~/hydra`
-   instead of a worktree, it MUST abort. Falling back to `~/hydra` left the main
-   checkout on a feature branch on 2026-05-11 and stalled deploys for ~30 min
-   (incident: PR #245).
-5. **Run tests via `npm test`, or `npm run test:file -- test/<name>.test.mts`
-   for a single file. NEVER run a bare `node --test <file>`.** Orchestrator modules open a
-   long-lived `ioredis` connection and a scheduler `setTimeout`, so `node:test`
-   keeps the event loop alive and **hangs forever** after the assertions pass.
-   A hung test blocks the Bash tool call, which froze a whole autopilot session
-   for 11h (2026-05-28). `npm test` and `test:file` both carry `--test-force-exit`, and
-   `test:file` adds the per-run Redis DB isolation a bare `node --test` skips
-   (CLAUDE.md "Single-file test run").
-6. **To identify *which* test failed in one run, use `npm run test:debug` —
-   never re-run + grep (issue #1076).** The default reporter buffers stdout and
-   `--test-force-exit` tears the process down before the per-test `not ok`
-   diagnostic lines flush. `test:debug` runs the identical flags plus a dual
-   reporter (`tap → test-debug.tap`); read the `not ok` lines out of
-   `test-debug.tap`. The artifact is git-ignored. Do **not** edit the `test`
-   script — it declares the run to be the whole suite (`HYDRA_FULL_SUITE=1`),
-   which is what arms the file-set coverage gate (issue #4141).
-7. **NEVER end your session waiting on CI, a monitor, or a background
-   process (issue #3866).** The full rule lives ONCE, canonically, in
-   `hydra-autopilot.md`'s "Worktree-guard preamble" section — it is prepended
-   verbatim to every `dev_orch` dispatch prompt, so you receive it at dispatch
-   time regardless of this pointer. Restated here only as a cross-reference
-   (not duplicated, to avoid drift): run verification **in the foreground**
-   (rule 5 above; the full `npm test` follows the "Full `npm test` recipe"
-   below: background launch, foreground poll) and don't emit a final message until a PR is open or you are
-   reporting a hard blocker. The observed failure (#3726): dev_orch did ~9.5
-   min of real implementation, backgrounded `npm test`, then stopped talking
-   instead of finishing — no PR existed at reap time, and the tokens already
-   spent were silently re-paid by a from-scratch redispatch. (Reap-side
-   backstop for when the rule is still violated: a `dev_orch` completion with
-   no open PR referencing its anchor is now detected and relabelled
-   `needs-dev-resume` instead of being silently redispatched from zero — see
-   `scripts/autopilot/reap.py`'s `_handle_dev_orch_stall`.)
+4. **No silent fallback.** A dispatched agent that finds itself in `~/hydra`
+   instead of a worktree MUST abort.
+5. **Tests and baselines:** run them through the npm aliases in CLAUDE.md
+   "Common Pitfalls" (`npm run test:file`, `npm run test:debug`, the SUITE-COUNT
+   GATE), never a bare `node --test`. The full suite follows the "Full `npm test`
+   recipe" below.
+6. **NEVER end your session waiting on CI, a monitor, or a background
+   process.** The canonical statement is `hydra-autopilot.md`'s "Worktree-guard
+   preamble" section, prepended to every `dev_orch` dispatch prompt. Run
+   verification in the foreground and emit no final message until a PR is open or
+   you report a hard blocker. Reap relabels a `dev_orch` completion that has no
+   open PR `needs-dev-resume` (`_handle_dev_orch_stall` in
+   `scripts/autopilot/reap.py`), so an early stop re-pays the spent tokens.
 
-## Never end a turn on a pending wait (issue #3953)
+@include _fragments/lifecycle-seam-writes.md
 
-A backgrounded wait is **structurally unrecoverable**. End the turn while a
-verification is still pending — a backgrounded `npm test`, a `Monitor`, an
-`Agent`/reviewer spawned with `run_in_background: true`, a backgrounded CI
-poll — and the result is delivered to a session that has already exited. The
-only path back to it is an external `SendMessage` resume. In autopilot run
-`028f420d` (2026-08-11) **3 of 3** code-writing/QA dispatches ended exactly
-this way and each needed an operator resume; the `dev_orch` one had its changes
-**staged but uncommitted**, minutes from the hourly worktree-orphan-prune that
-would have destroyed them.
+@include _fragments/blocked-slice-labelling.md
+
+## Never end a turn on a pending wait
+
+A backgrounded wait is structurally unrecoverable: end the turn while a
+verification is pending (a backgrounded `npm test`, a `Monitor`, an `Agent`
+spawned with `run_in_background: true`, a backgrounded CI poll) and the result
+lands in a session that has already exited. Only an external `SendMessage`
+resume gets it back.
 
 **The rule: a turn ends only when the result you were waiting for is in hand
-and acted on.** If a result is not ready, either (a) keep waiting in the
-FOREGROUND — let the Bash call block (except the full `npm test`: use the
-"Full `npm test` recipe" below), or poll in a bounded `while` loop in THIS
-turn — or (b) post the partial result you can stand behind now. Do not pick a
-third option of "background it and stop". This generalises `hydra-qa`'s
-blocking-dispatch mandate (`run_in_background: false` on every spawn) to every
-backgrounding mechanism a dev dispatch can reach.
+and acted on.** If a result is not ready, either keep waiting in the FOREGROUND
+(the full `npm test` follows the "Full `npm test` recipe" below) or post the
+partial result you can stand behind now. Never "background it and stop".
 
 **Commit before you verify.** The moment the implementation is structurally
 complete — it compiles, the change is whole — `git commit` and `git push`
@@ -130,12 +102,10 @@ to "unmerged PR" (the autopilot resumes it next tick) instead of
 "staged-but-uncommitted work destroyed by the worktree-orphan-prune".
 Verification gates whether the PR merges, not whether the work survives.
 
-**Foreground bounded poll.** When you have pushed and are waiting on CI — or
-running any long verification — block in THIS turn; never background it and
-stop. The full `npm test` is the exception to "just let it block": it now
-needs ~11 min, past the Bash tool's 600 s foreground cap, so the harness
-auto-backgrounds a plain call (#5180). Run it as below; for a CI wait, poll
-foreground with the CI loop below.
+**Foreground bounded poll.** When you have pushed and are waiting on CI, or
+running any long verification, block in THIS turn. The full `npm test` runs
+longer than the Bash foreground cap, so the harness auto-backgrounds a plain
+call; run it as below. For a CI wait, poll foreground with the CI loop below.
 
 **Full `npm test` recipe (canonical — other docs point here).** Commit + push
 first. Launch ONE Bash call with `run_in_background: true` and an explicit
@@ -166,18 +136,12 @@ branch below.
 # BOUNDED FOREGROUND POLL — block in THIS turn until CI on $PR settles. This is
 # the foreground alternative to backgrounding the wait and ending the turn.
 #
-# zsh $status pitfall: name a state variable `pending`, `run_state` or `st`, never
-# `status` — zsh aliases `$status` to `$?`, so assigning a value to a variable
-# named `status` silently fails and the loop exits 1. `status` is the natural
-# spelling of this variable; that is exactly why the loop breaks. (Documented
-# CLAUDE.md pitfall.)
+# zsh: never name a loop variable `status` (CLAUDE.md "Common Pitfalls").
 #
-# Guard-compatible form (issue #3837 family): the worktree-isolation Bash guard
-# REFUSES `deadline=$((SECONDS + N)); while [ "$SECONDS" -lt "$deadline" ]`
-# ("evaluates SECONDS arithmetically inside a construct too complex to verify"),
-# and ALSO refuses the loop once a multi-line `--jq` program sits inside it — so
-# the budget is a fixed iteration count and the probe is `gh pr checks | cut -f2 | grep -cx pending`
-# (this exact form ran under the guard on 2026-10-25).
+# Guard-compatible form: the worktree-isolation Bash guard refuses a clock-budgeted
+# `while [ "$SECONDS" -lt "$deadline" ]` loop and a multi-line `--jq` program inside
+# a loop, so the budget is a fixed iteration count and the probe is
+# `gh pr checks | cut -f2 | grep -cx pending`.
 pending=unknown                        # stays "unknown" if gh never answers: never read as terminal
 for i in $(seq 1 40); do               # 40 x 15s = 10-min budget; size to your slowest check
   checks=$(gh pr checks "$PR" --repo "$REPO" 2>/dev/null)
@@ -202,7 +166,7 @@ the verification state recorded as of the last poll and a one-line note on what
 is still pending. A partial result the autopilot can resume beats a pending one
 only an external resume can finish.
 
-## Slot lifecycle events — PostToolUse hook (issue #671)
+## Slot lifecycle events — PostToolUse hook
 
 Every tool call inside this skill emits a `subagent_tool_call` event onto the
 Redis stream `hydra:autopilot:slot-events`, classified at emit-time so the

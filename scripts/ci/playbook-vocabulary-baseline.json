@@ -18,12 +18,6 @@
       "line-cite": 2,
       "avoid-term": 1
     },
-    "docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md": {
-      "target": 2
-    },
-    "docs/operator-playbooks/_fragments/hydra-qa-reference.md": {
-      "status": 8
-    },
     "docs/operator-playbooks/_fragments/hydra-target-build-anchor-preflight.md": {
       "status": 2
     },
@@ -57,14 +51,8 @@
       "status": 3,
       "target": 1
     },
-    "docs/operator-playbooks/hydra-dev.md": {
-      "status": 2
-    },
     "docs/operator-playbooks/hydra-discover.md": {
       "avoid-term": 1
-    },
-    "docs/operator-playbooks/hydra-grill.md": {
-      "target": 7
     },
     "docs/operator-playbooks/hydra-incident.md": {
       "target": 10
@@ -72,10 +60,6 @@
     "docs/operator-playbooks/hydra-prd.md": {
       "status": 3,
       "avoid-term": 1
-    },
-    "docs/operator-playbooks/hydra-qa.md": {
-      "status": 5,
-      "line-cite": 1
     },
     "docs/operator-playbooks/hydra-research.md": {
       "status": 2,
