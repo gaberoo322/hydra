@@ -58,13 +58,12 @@ if not trend: print('No metrics'); sys.exit()
 merged=sum(1 for m in trend if int(m.get('tasksMerged',0))>0)
 failed=sum(1 for m in trend if int(m.get('tasksFailed',0))>0)
 abandoned=sum(1 for m in trend if int(m.get('tasksAbandoned',0))>0)
-rolled=sum(1 for m in trend if m.get('rolledBack') in ['true',True])
 durations=[int(m.get('totalDurationMs',0)) for m in trend if int(m.get('totalDurationMs',0))>0]
 costs=[float(m.get('costUsd',0)) for m in trend if float(m.get('costUsd',0))>0]
 tests_start=int(trend[-1].get('testsAfter',0))
 tests_end=int(trend[0].get('testsAfter',0))
 anchors=Counter(m.get('anchorType','unknown') for m in trend)
-print(f'Cycles: {len(trend)} | Merged: {merged} | Failed: {failed} | Abandoned: {abandoned} | Rolled: {rolled}')
+print(f'Cycles: {len(trend)} | Merged: {merged} | Failed: {failed} | Abandoned: {abandoned}')
 print(f'Merge rate: {100*merged//max(len(trend),1)}%')
 if durations: print(f'Cycle: avg {sum(durations)//len(durations)//1000}s, median {sorted(durations)[len(durations)//2]//1000}s')
 if costs: print(f'Cost: avg \${sum(costs)/len(costs):.2f}/cycle, total \${sum(costs):.2f}')
@@ -88,17 +87,36 @@ gh issue list --repo gaberoo322/hydra --state open --limit 200 \
 
 ### Agent Quality
 ```bash
-for agent in planner executor skeptic; do
-  count=$(docker exec hydra-redis-1 redis-cli LLEN "hydra:memory:${agent}:rules" 2>/dev/null || echo 0)
-  echo "${agent}: ${count} rules"
-  [ "$count" -gt 0 ] && docker exec hydra-redis-1 redis-cli LRANGE "hydra:memory:${agent}:rules" 0 2 2>/dev/null | head -3
+# Memory is consolidated JSON in :patterns (a Redis STRING, not a list) for
+# the `learningAgent` values in scripts/autopilot/classes.json (planner, executor).
+for agent in planner executor; do
+  bytes=$(docker exec hydra-redis-1 redis-cli STRLEN "hydra:memory:${agent}:patterns" 2>/dev/null || echo 0)
+  if [ "${bytes:-0}" -gt 0 ]; then
+    docker exec hydra-redis-1 redis-cli GET "hydra:memory:${agent}:patterns" 2>/dev/null \
+      | python3 -c "
+import json,sys
+try:
+  arr=json.loads(sys.stdin.read())
+  print('$agent: %d patterns, %d total hits' % (len(arr), sum(p.get('hitCount',0) for p in arr)))
+except Exception as e: print('$agent: parse error (%s)' % e)
+"
+  else
+    echo "$agent: 0 patterns"
+  fi
 done
 ```
 
 ### Architecture Shape
 ```bash
 echo "=== Orchestrator ==="; ls ~/hydra/src/*.ts ~/hydra/src/*.mjs 2>/dev/null | wc -l; npm test 2>&1 | tail -3  # runs against $WT (your worktree cwd), never ~/hydra directly -- see Worktree Setup above
-echo "=== Target ==="; cd ~/hydra-betting/web && find src -name '*.ts' -o -name '*.tsx' | wc -l; npx vitest run 2>&1 | tail -3
+echo "=== Target ==="
+# Target seam (scripts/target/print-target-facts.ts, ADR-0002 / ADR-0013): never a
+# literal checkout path. On failure --sh prints nothing, TARGET_WS stays empty and
+# every Target collector below is skipped, never substituted with a default path.
+unset TARGET_WS TARGET_APP_DIR
+eval "$(cd ~/hydra && npx tsx scripts/target/print-target-facts.ts --sh)"
+[ -n "${TARGET_WS:-}" ] || echo "Target unresolved -- skipping Target collectors"
+if [ -n "${TARGET_APP_DIR:-}" ]; then (cd "${TARGET_APP_DIR:?}" && find src -name '*.ts' -o -name '*.tsx' | wc -l); fi
 echo "=== Config ==="; find ~/hydra/config -name '*.md' | wc -l
 ```
 
@@ -111,8 +129,17 @@ print(f'Scheduler: {\"running\" if d.get(\"running\") else \"stopped\"} | Cycles
 print(f'Daily spend: \${d.get(\"research\",{}).get(\"dailySpendUsd\",0):.2f}/\${d.get(\"research\",{}).get(\"dailyCostCapUsd\",50)}')
 "
 systemctl --user list-units --type=service --state=failed 2>/dev/null | grep hydra
-cd ~/hydra-betting && git log --oneline --since="7 days ago" --author="$(git config user.name)" 2>/dev/null | wc -l
-echo "operator commits/7d"; cd ~/hydra-betting && git log --oneline --since="7 days ago" | wc -l; echo "total commits/7d"
+# Target commit cadence -- needs the Target seam resolved in this block (see Architecture Shape).
+# Target seam (scripts/target/print-target-facts.ts, ADR-0002 / ADR-0013): never a
+# literal checkout path. On failure --sh prints nothing, TARGET_WS stays empty and
+# every Target collector below is skipped, never substituted with a default path.
+unset TARGET_WS TARGET_APP_DIR
+eval "$(cd ~/hydra && npx tsx scripts/target/print-target-facts.ts --sh)"
+[ -n "${TARGET_WS:-}" ] || echo "Target unresolved -- skipping Target collectors"
+if [ -n "${TARGET_WS:-}" ]; then
+  git -C "${TARGET_WS:?}" log --oneline --since="7 days ago" --author="$(git config user.name)" 2>/dev/null | wc -l
+  echo "operator commits/7d"; git -C "${TARGET_WS:?}" log --oneline --since="7 days ago" | wc -l; echo "total commits/7d"
+fi
 ```
 
 ### Context files (parallel)
@@ -120,7 +147,7 @@ echo "operator commits/7d"; cd ~/hydra-betting && git log --oneline --since="7 d
 - `~/hydra/config/direction/goals.md`
 - `~/hydra/config/direction/priorities.md`
 - `~/hydra/CLAUDE.md`
-- `~/hydra-betting/CLAUDE.md`
+- `$TARGET_WS/CLAUDE.md` (resolve `$TARGET_WS` via the Target seam above; skip when unresolved)
 
 ## Phase 2: External Research
 

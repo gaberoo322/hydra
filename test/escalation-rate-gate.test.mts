@@ -611,8 +611,11 @@ exit 0
     });
     assert.equal(result.status, "reopened");
     const invocations = await readInvocations();
+    // The reopen path's lifecycle seam (#5318) legitimately reads the issue's
+    // labels (`issue view --json <state fields>`); only the HISTORY fetch
+    // (`--json createdAt,body,comments`) must be absent.
     assert.ok(
-      !invocations.some(l => l.startsWith("issue view ")),
+      !invocations.some(l => l.startsWith("issue view ") && l.includes("comments")),
       "non-rate-gated cues must NOT trigger a history fetch on the reopen path either",
     );
     assert.ok(invocations.some(l => l.startsWith("issue reopen 4242")), "expected an unconditional reopen");

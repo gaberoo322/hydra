@@ -59,6 +59,7 @@ import {
   type PreflightResult,
 } from "./drainer-runner.ts";
 import { editIssueLabels, viewIssue, type IssueActionWriteResult } from "../github/issue-actions.ts";
+import { advance, defaultSeamDeps, type SeamDeps } from "../lifecycle/index.ts";
 import { createPr, listOpenPrs, type PrRow } from "../github/prs.ts";
 import {
   gitExec,
@@ -333,6 +334,14 @@ export interface FinishInput {
    * and NO attribution trailers.
    */
   provider?: WorkerProvider;
+  /**
+   * The drainer's dispatch id (its worktree name). The tick runs finish while
+   * its claim is still held, so a requeue to `ready-for-agent` carries this as
+   * `dispatch` evidence: the `claim-released` gate passes for the claim's owner
+   * and refuses `claim-held` for anyone else. Absent on the standalone `finish`
+   * mode, which holds no claim.
+   */
+  dispatchId?: string;
 }
 
 /** The `finish` driver mode's stdout line (INV-10). */
@@ -363,10 +372,24 @@ export interface FinishDeps {
   now: () => number;
   /** Journal line sink (stderr in production, `hydra-glm-drainer:` prefixed by the default). */
   log: (msg: string) => void;
+  /**
+   * Flag / PR-side label writes only (`glm-withhold`, `glm-authored`): lifecycle
+   * STATE moves go through {@link FinishDeps.advanceState} (ADR-0047 D3, #5318).
+   */
   editIssueLabels: (
     issue: number,
     labels: { remove?: string[]; add?: string[] },
   ) => Promise<IssueActionWriteResult>;
+  /**
+   * The lifecycle seam's `advance` with a `--from` compare-and-set (#5318
+   * INV-12). Default: `advance()` over `defaultSeamDeps`. A release counts
+   * toward the non-live stale-requeue arm (shadow: would-park journal only).
+   */
+  advanceState: (
+    issue: number,
+    to: string,
+    opts: { from: string; evidence?: Record<string, string> },
+  ) => Promise<{ ok: true } | { ok: false; code: string }>;
   /** The issue title, or `null` when the read fails (the caller falls back). */
   viewIssueTitle: (issue: number) => Promise<string | null>;
   createPr: (input: {
@@ -460,11 +483,19 @@ async function defensivePush(deps: FinishDeps, input: FinishInput): Promise<void
   }
 }
 
-async function releaseClaim(deps: FinishDeps, issue: number, withhold: boolean): Promise<void> {
+async function releaseClaim(
+  deps: FinishDeps,
+  issue: number,
+  withhold: boolean,
+  dispatchId: string | undefined,
+): Promise<void> {
   const r = await safe(deps, `release issue #${issue}`, () =>
-    deps.editIssueLabels(issue, { remove: [LABEL_IN_PROGRESS], add: [LABEL_READY] }),
+    deps.advanceState(issue, LABEL_READY, {
+      from: LABEL_IN_PROGRESS,
+      ...(dispatchId !== undefined ? { evidence: { dispatch: dispatchId } } : {}),
+    }),
   );
-  if (r && r.ok === false) deps.log(`WARN failed to release issue #${issue} (non-fatal)`);
+  if (r && r.ok === false) deps.log(`WARN failed to release issue #${issue} (non-fatal): ${r.code}`);
   if (withhold) {
     const w = await safe(deps, `add glm-withhold to issue #${issue}`, () =>
       deps.editIssueLabels(issue, { add: [LABEL_WITHHOLD] }),
@@ -475,12 +506,15 @@ async function releaseClaim(deps: FinishDeps, issue: number, withhold: boolean):
   }
 }
 
-async function advanceToNeedsQa(deps: FinishDeps, issue: number): Promise<void> {
+async function advanceToNeedsQa(deps: FinishDeps, issue: number, prNumber: number | null): Promise<void> {
   const r = await safe(deps, `advance issue #${issue} to needs-qa`, () =>
-    deps.editIssueLabels(issue, { remove: [LABEL_READY, LABEL_IN_PROGRESS], add: [LABEL_NEEDS_QA] }),
+    deps.advanceState(issue, LABEL_NEEDS_QA, {
+      from: LABEL_IN_PROGRESS,
+      ...(prNumber !== null ? { evidence: { pr: String(prNumber) } } : {}),
+    }),
   );
   if (r && r.ok === false) {
-    deps.log(`WARN failed to advance issue #${issue} to needs-qa (non-fatal — relabel by hand)`);
+    deps.log(`WARN failed to advance issue #${issue} to needs-qa (non-fatal): ${r.code}`);
   }
 }
 
@@ -864,7 +898,7 @@ async function finishInner(deps: FinishDeps, input: FinishInput): Promise<Finish
   switch (verdict.action) {
     case "release-not-authored": {
       await removeWorktreeIfPassed(deps, input.worktree);
-      await releaseClaim(deps, issue, false);
+      await releaseClaim(deps, issue, false, input.dispatchId);
       return {
         action: "release-not-authored",
         issue,
@@ -879,7 +913,7 @@ async function finishInner(deps: FinishDeps, input: FinishInput): Promise<Finish
       await removeWorktreeIfPassed(deps, input.worktree);
       await deleteRemoteBranchIfPushed(deps, input.branch);
       if (verdict.withhold) logCapReached(deps, issue, timeoutCount, config.timeoutResumeCap);
-      await releaseClaim(deps, issue, verdict.withhold);
+      await releaseClaim(deps, issue, verdict.withhold, input.dispatchId);
       // D17: only from evidence, only AFTER the release (issue #4841 INV-7:
       // now on EVERY ran arm, not just this one).
       const quotaBlockedUntil = recordQuotaBlockIfSessionFailed(deps, outcome, authorStdout, nowSec, input.provider);
@@ -901,7 +935,7 @@ async function finishInner(deps: FinishDeps, input: FinishInput): Promise<Finish
       // The remote branch deliberately STAYS — it is the resume record the
       // pick phase picks up next tick (issue #4337 INV-4/5).
       if (verdict.withhold) logCapReached(deps, issue, timeoutCount, config.timeoutResumeCap);
-      await releaseClaim(deps, issue, verdict.withhold);
+      await releaseClaim(deps, issue, verdict.withhold, input.dispatchId);
       // The #4593 loop fix: a 429 here must block the provider too, or every
       // tick re-launches the resumed branch into the same exhausted quota.
       const quotaBlockedUntil = recordQuotaBlockIfSessionFailed(deps, outcome, authorStdout, nowSec, input.provider);
@@ -917,7 +951,7 @@ async function finishInner(deps: FinishDeps, input: FinishInput): Promise<Finish
     case "withhold-preflight-blocked": {
       await removeWorktreeIfPassed(deps, input.worktree);
       await deleteRemoteBranchIfPushed(deps, input.branch);
-      await releaseClaim(deps, issue, true); // always withhold — the T2/T3 fence hit
+      await releaseClaim(deps, issue, true, input.dispatchId); // always withhold — the T2/T3 fence hit
       // The timeout counter is deliberately untouched (INV-4).
       const quotaBlockedUntil = recordQuotaBlockIfSessionFailed(deps, outcome, authorStdout, nowSec, input.provider);
       return {
@@ -934,7 +968,7 @@ async function finishInner(deps: FinishDeps, input: FinishInput): Promise<Finish
         `PR creation failed for issue #${issue} — releasing claim (branch/worktree left for operator inspection)`,
       );
       if (verdict.withhold) logCapReached(deps, issue, timeoutCount, config.timeoutResumeCap);
-      await releaseClaim(deps, issue, verdict.withhold);
+      await releaseClaim(deps, issue, verdict.withhold, input.dispatchId);
       const quotaBlockedUntil = recordQuotaBlockIfSessionFailed(deps, outcome, authorStdout, nowSec, input.provider);
       return {
         action: "release-after-failed-pr",
@@ -948,7 +982,7 @@ async function finishInner(deps: FinishDeps, input: FinishInput): Promise<Finish
     case "open-pr": {
       // The advance: counter reset, needs-qa relabel, daily cap, worktree.
       removeTimeoutCounter(deps, issue); // INV-6: a PR opened — the budget resets
-      await advanceToNeedsQa(deps, issue);
+      await advanceToNeedsQa(deps, issue, pr?.number ?? null);
       await safe(deps, "daily-cap increment", async () => incrementDailyCap(deps, nowMs, input.provider));
       deps.log(
         `issue #${issue}: PR opened (branch=${input.branch}), advanced to needs-qa, daily cap incremented`,
@@ -992,7 +1026,7 @@ export async function runFinish(deps: FinishDeps, input: FinishInput): Promise<F
     // editIssueLabels call.
     if (!deps.config.dryRun) {
       try {
-        await releaseClaim(deps, input.issue, false);
+        await releaseClaim(deps, input.issue, false, input.dispatchId);
       } catch (nested) {
         logger.error({ err: nested }, "[glm-finish] best-effort release also threw (non-fatal)");
       }
@@ -1027,6 +1061,7 @@ const DEFAULT_REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..",
 export function buildDefaultFinishDeps(env: NodeJS.ProcessEnv = process.env): FinishDeps {
   const config = loadDrainerConfig(env);
   const repoRoot = config.repoRoot ?? DEFAULT_REPO_ROOT;
+  let seamDeps: SeamDeps | undefined; // built on first use: dry-run never touches the seam
   return {
     config,
     repoRoot,
@@ -1035,6 +1070,14 @@ export function buildDefaultFinishDeps(env: NodeJS.ProcessEnv = process.env): Fi
       process.stderr.write(`hydra-glm-drainer: ${msg}\n`);
     },
     editIssueLabels: (issue, labels) => editIssueLabels(issue, labels, { repo: config.repo }),
+    advanceState: async (issue, to, opts) => {
+      seamDeps ??= defaultSeamDeps(repoRoot);
+      const res = await advance(
+        { issue, to, from: opts.from, evidence: opts.evidence, actor: "glm-finish" },
+        seamDeps,
+      );
+      return res.ok === true ? { ok: true } : { ok: false, code: res.code };
+    },
     viewIssueTitle: async (issue) => {
       const r = await viewIssue(issue, { repo: config.repo });
       return r.ok ? r.row.title : null;

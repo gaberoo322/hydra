@@ -49,7 +49,12 @@ import {
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import {
+  writeFakeLifecycleCli,
+  type FakeLifecycleCli,
+  type FakeLifecycleOpts,
+} from "./_helpers/fake-lifecycle-cli.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
@@ -58,11 +63,14 @@ interface FakeIssue {
   number: number;
   state: "OPEN" | "CLOSED";
   body: string;
-  /** Live labels served to the #5317 live-state guard; unset = still in the listed state. */
+  /** Live labels the fake lifecycle CLI compare-and-sets against; unset = still in the listed state. */
   labels?: string[];
+  /** The dispatcher claim `lifecycle claim-show` reports (#5318 INV-6). */
+  claim?: { dispatchId: string; openedAt: number };
 }
 
 interface FakePr {
+  number?: number;
   headRefName: string;
   body: string;
 }
@@ -85,11 +93,12 @@ function makeGhStub(
   dir: string,
   issues: FakeIssue[],
   prs: FakePr[],
-  opts: { prListFails?: boolean } = {},
+  opts: { prListFails?: boolean; lifecycle?: FakeLifecycleOpts } = {},
 ): {
   binDir: string;
   editsFile: string;
   readEdits(): string[][];
+  lifecycle: FakeLifecycleCli;
 } {
   const binDir = join(dir, "bin");
   const issuesFile = join(dir, "issues.json");
@@ -217,9 +226,12 @@ if __name__ == "__main__":
   writeFileSync(join(dir, "gh-stub.py"), helper);
   chmodSync(join(dir, "gh-stub.py"), 0o755);
 
+  const lifecycle = writeFakeLifecycleCli(dir, issuesFile, editsFile, opts.lifecycle);
+
   return {
     binDir,
     editsFile,
+    lifecycle,
     readEdits() {
       return readFileSync(editsFile, "utf-8")
         .split("\n")
@@ -238,6 +250,8 @@ function runRecoverStale(
       ...process.env,
       PATH: `${binDir}:${process.env.PATH ?? ""}`,
       HYDRA_AUTOPILOT_REPO: "gaberoo322/hydra",
+      // State writes go through the lifecycle seam CLI (#5318): inject the fake.
+      HYDRA_LIFECYCLE_BIN: join(dirname(binDir), "fake-lifecycle"),
     },
     encoding: "utf-8",
   });
@@ -411,25 +425,25 @@ describe("recover-stale.sh — open-PR guard on stale in-progress (issue #3852)"
   });
 });
 
-describe("recover-stale.sh — live-state guard (issue #5317)", () => {
-  test("listed as stale in-progress but live qa-passed + open PR → zero edits", () => {
+describe("recover-stale.sh — seam compare-and-set + claim release (issues #5317, #5318)", () => {
+  test("listed as stale in-progress but live qa-passed + open PR → seam refuses from-mismatch, zero edits", () => {
     const dir = mkdtempSync(join(tmpdir(), "recover-stale-livestate-"));
     try {
       const stub = makeGhStub(
         dir,
         [{ number: 960, state: "OPEN", body: "x", labels: ["qa-passed", "enhancement"] }],
-        [{ headRefName: "issue-960-thing", body: "Closes #960" }],
+        [{ number: 7, headRefName: "issue-960-thing", body: "Closes #960" }],
       );
       const r = runRecoverStale(stub.binDir, ["stale_in_progress", "960"]);
       assert.equal(r.status, 0, r.stderr);
       assert.deepEqual(stub.readEdits(), [], "a qa-passed issue must never be edited");
-      assert.match(r.stdout, /skip issue=960 \(live state 'qa-passed' != listed 'in-progress'\)/);
+      assert.match(r.stdout, /skip issue=960 \(seam refused or failed\)/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test("a live double-state set with a DOWNSTREAM state (in-progress + needs-qa) → skipped", () => {
+  test("a live double-state set (in-progress + needs-qa) is refused by the seam, never written", () => {
     const dir = mkdtempSync(join(tmpdir(), "recover-stale-livestate-"));
     try {
       const stub = makeGhStub(
@@ -440,38 +454,109 @@ describe("recover-stale.sh — live-state guard (issue #5317)", () => {
       const r = runRecoverStale(stub.binDir, ["stale_in_progress", "961"]);
       assert.equal(r.status, 0, r.stderr);
       assert.deepEqual(stub.readEdits(), []);
-      assert.match(r.stdout, /downstream state present/);
+      assert.match(r.stdout, /skip issue=961 \(seam refused or failed\)/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test("double-label drift WITHOUT a downstream state (in-progress + ready-for-agent) is acted on, loudly (#5317 QA)", () => {
+  test("every state write passes --from <listed state> and goes through the seam CLI (no gh issue edit)", () => {
     const dir = mkdtempSync(join(tmpdir(), "recover-stale-livestate-"));
     try {
-      const stub = makeGhStub(
-        dir,
-        [{ number: 963, state: "OPEN", body: "x", labels: ["in-progress", "ready-for-agent"] }],
-        [],
-      );
+      const stub = makeGhStub(dir, [{ number: 963, state: "OPEN", body: "x" }], []);
       const r = runRecoverStale(stub.binDir, ["stale_in_progress", "963"]);
       assert.equal(r.status, 0, r.stderr);
-      assert.match(r.stdout, /WARN state-ambiguous issue=963/);
-      assert.notDeepEqual(stub.readEdits(), [], "drift must not be skipped forever");
+      const advance = stub.lifecycle.readCalls().find((c) => c[0] === "advance");
+      assert.ok(advance, "expected a lifecycle advance call");
+      assert.deepEqual(advance.slice(0, 5), ["advance", "963", "ready-for-agent", "--from", "in-progress"]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test("an unreadable live label read skips (never writes)", () => {
+  test("a seam refusal skips the issue: no fallback label write", () => {
     const dir = mkdtempSync(join(tmpdir(), "recover-stale-livestate-"));
     try {
-      // Issue 962 is absent from the stub's table, so `gh issue view 962` exits 1.
+      const stub = makeGhStub(dir, [{ number: 964, state: "OPEN", body: "x" }], [], {
+        lifecycle: { refuse: [964] },
+      });
+      const r = runRecoverStale(stub.binDir, ["stale_in_progress", "964"]);
+      assert.equal(r.status, 0, r.stderr);
+      assert.deepEqual(stub.readEdits(), [], "a refusal must not fall back to a direct write");
+      assert.match(r.stdout, /skip issue=964 \(seam refused or failed\)/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an unreadable claim skips (never writes)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "recover-stale-livestate-"));
+    try {
+      // Issue 962 is absent from the table, so the fake's claim-show exits 1.
       const stub = makeGhStub(dir, [{ number: 1, state: "OPEN", body: "x" }], []);
       const r = runRecoverStale(stub.binDir, ["stale_in_progress", "962"]);
       assert.equal(r.status, 0, r.stderr);
       assert.deepEqual(stub.readEdits(), []);
-      assert.match(r.stdout, /live label read failed/);
+      assert.match(r.stdout, /skip issue=962 \(claim read failed\)/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a stale held claim is released with --outcome stale BEFORE the advance (#5318 INV-6)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "recover-stale-claim-"));
+    try {
+      const old = Date.now() - 3 * 60 * 60 * 1000;
+      const stub = makeGhStub(
+        dir,
+        [{ number: 965, state: "OPEN", body: "x", claim: { dispatchId: "disp-old", openedAt: old } }],
+        [],
+      );
+      const r = runRecoverStale(stub.binDir, ["stale_in_progress", "965"]);
+      assert.equal(r.status, 0, r.stderr);
+      const verbs = stub.lifecycle.readCalls().map((c) => c[0]);
+      assert.deepEqual(verbs, ["claim-show", "release", "advance"], "release precedes the flip");
+      const release = stub.lifecycle.readCalls()[1];
+      assert.ok(release.includes("--outcome") && release[release.indexOf("--outcome") + 1] === "stale");
+      assert.ok(release[release.indexOf("--dispatch") + 1] === "disp-old");
+      assert.ok(!release.includes("--held"), "no force path exists");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a held claim younger than the stale threshold means a fresh dispatch: skip, no release, no write", () => {
+    const dir = mkdtempSync(join(tmpdir(), "recover-stale-claim-"));
+    try {
+      const stub = makeGhStub(
+        dir,
+        [{ number: 966, state: "OPEN", body: "x", claim: { dispatchId: "disp-new", openedAt: Date.now() - 5 * 60 * 1000 } }],
+        [],
+      );
+      const r = runRecoverStale(stub.binDir, ["stale_in_progress", "966"]);
+      assert.equal(r.status, 0, r.stderr);
+      assert.deepEqual(stub.lifecycle.readCalls().map((c) => c[0]), ["claim-show"]);
+      assert.deepEqual(stub.readEdits(), []);
+      assert.match(r.stdout, /skip issue=966 \(claim younger than 90 min/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the needs-qa route carries --evidence pr=<N> from pr-refs.py --pairs (#5318 INV-10)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "recover-stale-claim-"));
+    try {
+      const stub = makeGhStub(
+        dir,
+        [{ number: 967, state: "OPEN", body: "x" }],
+        [{ number: 4242, headRefName: "issue-967-thing", body: "Closes #967" }],
+      );
+      const r = runRecoverStale(stub.binDir, ["stale_in_progress", "967"]);
+      assert.equal(r.status, 0, r.stderr);
+      const advance = stub.lifecycle.readCalls().find((c) => c[0] === "advance");
+      assert.ok(advance);
+      assert.equal(advance[2], "needs-qa");
+      assert.equal(advance[advance.indexOf("--evidence") + 1], "pr=4242");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

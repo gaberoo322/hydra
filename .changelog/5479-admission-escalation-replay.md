@@ -1,0 +1,1 @@
+- refactor: escalation and instant-death replay now honour every dispatch-admission gate (#5479)

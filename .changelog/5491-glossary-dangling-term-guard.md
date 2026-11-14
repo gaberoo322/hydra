@@ -1,0 +1,1 @@
+- feat: add a dangling-term check to the docs prose-drift guard so a bolded glossary term with no definition fails CI (#5491)

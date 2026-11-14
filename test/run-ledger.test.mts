@@ -319,7 +319,7 @@ function py(code: string, args: string[] = []) {
 }
 
 describe("run ledger decide-owned diff seam (#5074)", () => {
-  test("INV-3: DECIDE_OWNED_KEYS is exactly the twelve keys of the deleted persist pairs plus last_dispatch_by_class (#5323)", () => {
+  test("INV-3: DECIDE_OWNED_KEYS is the surviving keys of the deleted persist pairs plus last_dispatch_by_class (#5323; qa_orch_item_attempts and red_forward_fix_attempts retired by #5318)", () => {
     const r = py("print(json.dumps(sorted(r.DECIDE_OWNED_KEYS)))");
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(JSON.parse(r.stdout), [
@@ -327,9 +327,7 @@ describe("run ledger decide-owned diff seam (#5074)", () => {
       "dev_target_resume_inflight",
       "last_dispatch_by_class",
       "orch_triage_item_stamps",
-      "qa_orch_item_attempts",
       "quota_baseline",
-      "red_forward_fix_attempts",
       "research_force_counter",
       "signal_last_fired",
       "target_blocked_item_stamps",

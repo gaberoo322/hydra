@@ -14,7 +14,7 @@ Comprehensive health check of the Hydra autonomous orchestrator. You have full c
 
 If the operator provided a focus area (`$focus`), weight your analysis toward that.
 
-> Prefer `bin/hydra` over raw curl where commands exist. Fall back to `hydra raw GET <path>` for endpoints not yet wrapped.
+> Prefer `bin/hydra` over raw curl where commands exist. Fall back to `hydra raw GET <path>` for endpoints without a command.
 
 ## Phase 1: Collect (run in parallel)
 
@@ -76,13 +76,13 @@ curl -s -o /dev/null -w "External: %{http_code}\n" https://admin.clawstreetbets.
 #
 # The verdict is the load-bearing line:
 #   in-sync  — deployed == origin/master. Healthy.
-#   settling — drift younger than the grace window (~15m). A deploy is
+#   settling — drift younger than the grace window (DEPLOY_DRIFT_GRACE_SECONDS, src/health/deployed-sha.ts). A deploy is
 #              likely mid-flight; re-check next run, don't act yet.
 #   drift    — deployed != origin/master past the grace window. LOUD: prod
 #              is running STALE code. Deploy-on-merge did NOT restart the
 #              service. If a `probable cause: ... dirty tree` note is shown,
-#              a spurious tracked modification (e.g. docker/ov.conf) tripped
-#              deploy.sh's dirty-tree guard — reset/commit it first.
+#              a tracked modification tripped deploy.sh's dirty-tree guard —
+#              REPORT it to the operator; never reset/commit it yourself.
 #   unknown  — a SHA couldn't be resolved (service down / detached origin).
 #              Information-only.
 cd ~/hydra && npx tsx scripts/deploy-drift-check.ts --text --alert 2>/dev/null \
@@ -90,13 +90,14 @@ cd ~/hydra && npx tsx scripts/deploy-drift-check.ts --text --alert 2>/dev/null \
 ```
 A `drift` verdict is the durable backstop for the "prod is stale but health
 says ok" failure mode (`reference_deploy_concurrency_cancels_master`): the
-per-2-min `hydra-watchdog.sh` DEPLOY DRIFT block (#734) may already be
-converging prod automatically, but its journald WARN is invisible to a
-`hydra doctor` reader — this line renders the same drift as an explicit
-doctor finding. **Fix (Phase 3):** run `scripts/deploy.sh` from the
-`~/hydra` master checkout (rebuilds dashboard + restarts the service); if a
-dirty-tree cause is shown, `git reset`/commit the tracked change first so
-deploy.sh's guard doesn't re-abort.
+per-2-min `scripts/hydra-watchdog.ts` deploy-drift check (#734) only auto-deploys when `HYDRA_WATCHDOG_AUTODEPLOY=1`; otherwise its deploy-drift
+check is advisory and its journald WARN is invisible to a `hydra doctor` reader —
+this line renders the same drift as an explicit doctor finding, so a `drift`
+verdict is the operator's cue to run `scripts/deploy.sh`. **Fix (Phase 3):** run
+`scripts/deploy.sh` from the `~/hydra` master checkout (rebuilds dashboard +
+restarts the service); if a dirty-tree cause is shown, REPORT it to the operator
+(the guard exists so uncommitted work is never swept into a deploy) — do not
+reset or commit it.
 
 ### Cycle Performance (last 20 metrics — richer than cycle/history)
 ```bash
@@ -107,13 +108,12 @@ trend=d.get('trend',d.get('metrics',[]))
 if not trend: print('No metrics'); sys.exit()
 merged=sum(1 for m in trend if int(m.get('tasksMerged',0))>0)
 failed=sum(1 for m in trend if int(m.get('tasksFailed',0))>0)
-rolled=sum(1 for m in trend if m.get('rolledBack')=='true' or m.get('rolledBack')==True)
 abandoned=sum(1 for m in trend if int(m.get('tasksAbandoned',0))>0)
 durations=[int(m.get('totalDurationMs',0)) for m in trend if int(m.get('totalDurationMs',0))>0]
 tests=[int(m.get('testsAfter',0)) for m in trend if int(m.get('testsAfter',0))>0]
 fixes=sum(1 for m in trend if m.get('anchorType') in ('prior-failure','failing-test') and int(m.get('tasksMerged',0))>0)
 feats=merged-fixes
-print(f'Cycles: {len(trend)} | Merged: {merged} | Failed: {failed} | Rolled back: {rolled} | Abandoned: {abandoned}')
+print(f'Cycles: {len(trend)} | Merged: {merged} | Failed: {failed} | Abandoned: {abandoned}')
 print(f'Merge rate: {100*merged//max(len(trend),1)}%')
 if durations: print(f'Cycle time: avg {sum(durations)//len(durations)//1000}s, max {max(durations)//1000}s')
 if tests: print(f'Tests: {tests[-1]} -> {tests[0]} (latest)')
@@ -231,9 +231,10 @@ journalctl --user -u hydra-orchestrator.service --no-pager --since "1 hour ago" 
 
 ### Agent Memory
 ```bash
-# Memory is consolidated JSON in :patterns (Redis string), NOT :rules.
+# Memory is consolidated JSON in :patterns (a Redis STRING, not a list).
 # Per CLAUDE.md learning system: "Consolidated patterns in hydra:memory:{agent}:patterns"
-for agent in planner executor skeptic; do
+# Agents = the `learningAgent` values in scripts/autopilot/classes.json (planner, executor).
+for agent in planner executor; do
   bytes=$(docker exec hydra-redis-1 redis-cli STRLEN "hydra:memory:${agent}:patterns" 2>/dev/null || echo 0)
   if [ "$bytes" -gt 0 ]; then
     docker exec hydra-redis-1 redis-cli GET "hydra:memory:${agent}:patterns" 2>/dev/null \
@@ -402,9 +403,9 @@ grep -n "hydra-postgres\|grep -v" ~/.local/bin/hydra-docker-cleanup.sh 2>/dev/nu
 
 Only report issues actually present — don't speculate.
 
-- **Cycle health**: Merge rate, fix:feat ratio trend, rollback clusters, repeated task titles
+- **Cycle health**: Merge rate, fix:feat ratio trend, repeated task titles
 - **Deployed-build drift**: Is the drift verdict `drift`? Prod is running STALE code — deploy-on-merge did not restart the service (the "uptime 22h, status ok" trap). NEVER report a `drift` verdict as healthy. `settling` is a mid-flight deploy (re-check next run). `unknown` is information-only (service unreachable / detached origin). If a dirty-tree probable-cause is shown, that tracked modification is what blocked deploy.sh.
-- **Blockers**: Dirty working tree blocking grounding? Grounding timeout (0/0 tests)? Stale cycles?
+- **Blockers**: Dirty working tree blocking deploy.sh? Stale cycles?
 - **External access**: Did the external health check return non-200? Tunnel down?
 - **Services**: Any in failed state? Crash loops? Missing module errors?
 - **Failed service root cause**: Don't just report "service X failed" — read the actual error. Classify:
@@ -417,28 +418,30 @@ Only report issues actually present — don't speculate.
 - **Database health**: Postgres in the compose project? Connections exhausted? (Target table freshness is `hydra-target-discover`'s probe, not the doctor's.)
 - **Docker conflicts**: Could cleanup scripts kill production containers?
 - **Backlog**: Empty queue? Duplicate items? Stale blocked items?
-- **Memory bloat**: Any agent at 25+ rules? Duplicate rules?
-- **Alerts**: Stale alerts from resolved issues? Pattern alerts (consecutive_failures, low_merge_rate, file_rework, rollback_cluster)?
+- **Memory bloat**: Any agent's `:patterns` string unusually large (STRLEN)? Duplicate patterns?
+- **Alerts**: Stale alerts from resolved issues? Alerts that contradict the live state?
 - **Tool currency**: Any tool reporting `outdated` (warning) — does the operator need to upgrade `gh`, switch Node, etc.? `unknown` is information-only — it means the doctor couldn't reach the upstream feed, not that something is wrong.
 - **Disk pressure**: NVMe below 20GB? SSD filling up?
 - **Redis**: Memory growing? Key count unusual?
 
 ## Phase 3: Fix (default — always apply quick wins)
 
+REPORT-ONLY findings (never act on them): a dirty `~/hydra` working tree, stray or
+stale containers (the 4 CI runners share this host — never kill by name/grep
+pattern; CLAUDE.md), and duplicate agent-memory patterns. Surface them in the report
+for the operator.
+
 Quick wins to apply automatically:
 - Restart hydra-tunnel if external health check returns non-200
-- Commit dirty working tree files (if they're Hydra executor changes)
 - Restart failed services (after diagnosing root cause)
 - Start postgres if missing: `cd ~/hydra && docker compose up -d postgres`
-- Kill stale test containers: `docker ps --format '{{.Names}}' | grep test | xargs -r docker kill`
 - Converge a `drift` verdict (prod stale): run `scripts/deploy.sh` from the
   `~/hydra` master checkout (rebuilds the dashboard + restarts the
-  service). If the drift check reported a dirty-tree probable-cause, first
-  `git -C ~/hydra reset`/commit that tracked change so deploy.sh's dirty-tree
-  guard doesn't re-abort — `docker/ov.conf` is a known spurious offender.
+  service). If the drift check reported a dirty-tree probable-cause, do NOT
+  reset or commit it — REPORT the dirty path for the operator (the main
+  checkout may hold their uncommitted work; hydra-sweep rule 1).
   (`settling` needs no action — re-check next run; `unknown` is a service
   reachability issue, not stale code.)
-- Deduplicate agent memory rules
 - Close duplicate board issues: `gh issue close <N> --repo gaberoo322/hydra --comment "Duplicate of #<other>" --reason "not planned"`
   (issue #3745 — `hydra backlog rm <id>` was never a real subcommand; the
   board is GitHub Issues, not the retired Redis backlog)
