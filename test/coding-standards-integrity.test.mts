@@ -46,13 +46,36 @@ function stripComments(text: string): string {
     .join("\n");
 }
 
-/** A ci.yml line (comments stripped) that runs `p` as its own token, not inside echo / continue-on-error. */
+/** Split YAML text into step blocks: a `- ` line plus every following line indented deeper than the dash. */
+function stepBlocks(text: string): string[][] {
+  const blocks: string[][] = [];
+  let cur: string[] | null = null;
+  let dashIndent = -1;
+  for (const l of text.split("\n")) {
+    const m = /^(\s*)-\s/.exec(l);
+    const indent = l.length - l.trimStart().length;
+    if (m && (cur === null || indent <= dashIndent)) {
+      cur = [l];
+      dashIndent = m[1].length;
+      blocks.push(cur);
+    } else if (cur && l.trim() !== "" && indent > dashIndent) {
+      cur.push(l);
+    } else if (l.trim() !== "") {
+      cur = null;
+    }
+  }
+  return blocks;
+}
+
+/** A ci.yml step (comments stripped) that runs `p` as its own token, not via echo and not in a step block carrying continue-on-error. */
 export function ciRunsPath(ci: string, p: string): boolean {
   const esc = p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const token = new RegExp(`(^|[\\s"'=/])${esc}($|[\\s"';])`);
-  return stripComments(ci)
-    .split("\n")
-    .some((l) => token.test(l) && !/continue-on-error|^\s*-?\s*(run:\s*)?(echo|printf)\b/.test(l));
+  return stepBlocks(stripComments(ci)).some(
+    (block) =>
+      !block.some((l) => /continue-on-error/.test(l)) &&
+      block.some((l) => token.test(l) && !/^\s*-?\s*(run:\s*)?(echo|printf)\b/.test(l)),
+  );
 }
 
 /** The witness test text imports or spawns `runner` (comments stripped; a bare string mention fails). */
@@ -137,6 +160,9 @@ describe("wiring predicates", () => {
   it("ciRunsPath ignores an echo line and a prefix-extended path", () => {
     assert.equal(ciRunsPath(ci, "scripts/ci/e.ts"), false);
     assert.equal(ciRunsPath(ci, "scripts/ci/y"), false);
+  });
+  it("ciRunsPath rejects a step whose continue-on-error is a sibling key", () => {
+    assert.equal(ciRunsPath(ci, "scripts/ci/z.ts"), false);
   });
   it("ciRunsPath accepts a real run step", () => {
     assert.equal(ciRunsPath(ci, "scripts/ci/y.ts"), true);
