@@ -67,6 +67,18 @@ describe("test-title-provenance: title and comment extraction", () => {
     assert.deepEqual(scanSource("test/x.test.mts", `const x = ${JSON.stringify(WORD_ROUND + " 4")};`), []);
   });
 
+  test("a member call such as re.test(...) or obj.it(...) is not a title call", () => {
+    const t = `${WORD_ROUND} 4`;
+    assert.deepEqual(scanSource("test/x.test.mts", `/x/.test(${JSON.stringify(t)});`), []);
+    assert.deepEqual(scanSource("test/x.test.mts", `obj.it(${JSON.stringify(t)});`), []);
+    assert.deepEqual(scanSource("test/x.test.mts", `mytest(${JSON.stringify(t)});`), []);
+  });
+
+  test("a prettier-wrapped call with the title on the next line is scanned", () => {
+    const src = `it(\n  ${JSON.stringify(`${WORD_ROUND} 4 wrapped`)},\n  () => {},\n);`;
+    assert.deepEqual(scanSource("test/x.test.mts", src).map((h) => h.kind), ["title"]);
+  });
+
   test("line and block comments are scanned", () => {
     const src = ["// QA " + WORD_ROUND + " note", "/*", " * fix" + "-forward remark", " */", "const x = 1;"].join("\n");
     const hits = scanSource("test/x.test.mts", src);

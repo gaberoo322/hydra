@@ -73,7 +73,7 @@ export function matchesProvenance(text: string): boolean {
   return PROVENANCE_PATTERNS.some((re) => re.test(text));
 }
 
-const TITLE_CALL = /\b(?:describe|it|test)(?:\.(?:skip|only|todo))?\(\s*(["'`])((?:\\.|(?!\1).)*)\1/g;
+const TITLE_CALL = /(?<![.\w$])(?:describe|it|test)(?:\.(?:skip|only|todo))?\(\s*(["'`])((?:\\.|(?!\1).)*)\1/g;
 
 /**
  * Comment text per line: the characters `stripComments` blanked out. It is
@@ -104,12 +104,12 @@ export function commentLines(source: string): string[] {
 export function scanSource(file: string, source: string): ProvenanceHit[] {
   const hits: ProvenanceHit[] = [];
   const stripped = stripComments(source);
-  for (const line of stripped.split("\n")) {
-    TITLE_CALL.lastIndex = 0;
-    for (let m = TITLE_CALL.exec(line); m; m = TITLE_CALL.exec(line)) {
-      const title = m[2] ?? "";
-      if (matchesProvenance(title)) hits.push({ kind: "title", file, text: title });
-    }
+  // Whole-source scan: `\(\s*` spans newlines, so a prettier-wrapped
+  // `it(\n  "title"` is found too.
+  TITLE_CALL.lastIndex = 0;
+  for (let m = TITLE_CALL.exec(stripped); m; m = TITLE_CALL.exec(stripped)) {
+    const title = m[2] ?? "";
+    if (matchesProvenance(title)) hits.push({ kind: "title", file, text: title });
   }
   for (const c of commentLines(source)) {
     if (matchesProvenance(c)) hits.push({ kind: "comment", file, text: c });
