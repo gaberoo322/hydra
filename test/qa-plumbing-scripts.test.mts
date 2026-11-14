@@ -33,6 +33,7 @@ const FIXTURE = join(ROOT, "test", "fixtures", "pr-4754-status-check-rollup.json
 const ROLLUP = JSON.parse(readFileSync(FIXTURE, "utf8")).statusCheckRollup as Array<Record<string, unknown>>;
 const CONTEXTS = ["test", "dashboard-build", "tier-gate", "mutation-test", "scope-check", "secret-scan", "deep-qa-gate", "design-concept-reconcile"];
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
+const H12 = HEAD.slice(0, 12);
 const BASE_SHA = "b".repeat(40);
 
 // ---------------------------------------------------------------------------
@@ -173,12 +174,19 @@ describe("preflight (steps 1-6.7 in one read-only call)", () => {
     PreflightResultSchema.parse(r);
   });
 
+  test("preflight: changedPaths comes from fixedSha...headSha, never the worktree HEAD (#5520)", async () => {
+    const h = harness({ ghHandler: preflightGh(), gitHandler: preflightGit(), http: httpFound(2) });
+    await runPreflight(PRE_OPTS, h.ports);
+    assert.ok(h.git.some((a) => a.join(" ") === `diff --no-renames --name-only ${BASE_SHA}...${HEAD}`));
+    assert.ok(!h.git.flat().some((a) => a === "HEAD" || a.endsWith("...HEAD")), "no git argv names the literal HEAD");
+  });
+
   test("preflight performs no write: the fake gh records only read verbs", async () => {
     const h = harness({ ghHandler: preflightGh(), gitHandler: preflightGit(), http: httpFound(2) });
     await runPreflight({ ...PRE_OPTS, pr: undefined }, h.ports);
     assert.ok(h.gh.length > 0, "preflight must have read through gh");
     assert.deepEqual(h.writes(), [], "no label, comment, merge or POST/DELETE api call");
-    assert.ok(h.git.every((a) => ["fetch", "rev-parse", "diff"].includes(a[0] as string)), "git: only fetch/rev-parse/diff — no checkout");
+    assert.ok(h.git.every((a) => ["fetch", "rev-parse", "diff", "cat-file"].includes(a[0] as string)), "git: only fetch/rev-parse/diff/cat-file — no checkout, switch, reset or worktree");
   });
 
   test("preflight: a T2 prompt-free diff with a persisted artifact is ready, single-tier standard fan-out, spec found", async () => {
@@ -385,7 +393,7 @@ describe("packet (steps 7.0 / 7.0a / 7.0b)", () => {
       if (argv[0] === "diff" && argv.includes("--name-only") && argv.includes("--no-renames")) return ok("src/a.ts\nsrc/gone.ts\n");
       if (argv[0] === "diff" && argv.includes("--name-only")) return ok("src/a.ts\nsrc/gone.ts\n");
       if (argv[0] === "diff") return ok("DIFF-BODY\n\n");
-      if (argv[0] === "show" && argv[1] === "HEAD:src/a.ts") return ok("A-BODY\n\n");
+      if (argv[0] === "show" && argv[1] === `${HEAD}:src/a.ts`) return ok("A-BODY\n\n");
       if (argv[0] === "show") return fail("fatal: path does not exist");
       if (argv[0] === "rev-parse") return ok(`${HEAD}\n`);
       return undefined;
@@ -393,6 +401,49 @@ describe("packet (steps 7.0 / 7.0a / 7.0b)", () => {
   }
   const prBodyGh = (body: string) => (argv: string[]): CmdResult | undefined =>
     argv[0] === "pr" && argv[1] === "view" ? ok(body) : undefined;
+
+  test("packet: every git revision is the PR head sha, never the worktree HEAD, and nothing mutates the worktree (#5520)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "qa-packet-test-"));
+    try {
+      const h = harness({
+        gitHandler: (argv) => (argv.join(" ") === "diff --no-renames PRIOR123 " + HEAD ? ok("SINCE\n") : packetGit()(argv)),
+        ghHandler: prBodyGh("Merge danger: two-way — docs\n"),
+        phase: async (p) =>
+          p === "prior-context"
+            ? { priorFindings: "F", context: { includeFindings: true, includeDiff: true, baseSha: "PRIOR123", reason: "r" }, degraded: [] }
+            : {},
+      });
+      await runPacket(readyPre(), "gaberoo322/hydra", h.ports, { loadStandards: standardsOk, outDir: dir });
+      const flat = h.git.flat();
+      assert.ok(!flat.some((a) => a === "HEAD" || a.endsWith("...HEAD") || a.endsWith("..HEAD") || a.startsWith("HEAD:")), "no git argv names the literal HEAD");
+      assert.ok(h.git.some((a) => a.join(" ") === "fetch origin refs/pull/77/head"), "the PR head ref is fetched");
+      assert.ok(h.git.some((a) => a.join(" ") === `diff ${BASE_SHA}...${HEAD}`), "the diff is fixedSha...headSha");
+      const mutating = ["checkout", "switch", "reset", "worktree", "clean", "stash"];
+      assert.ok(!h.git.some((a) => mutating.includes(a[0] as string)), "no worktree-mutating verb");
+      assert.ok(!h.gh.some((a) => a[0] === "pr" && a[1] === "checkout"), "no gh pr checkout");
+      assert.ok(!readFileSync(join(dir, "review-packet.txt"), "utf8").includes("HEAD"), "packet text never says HEAD");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("packet: an unreachable PR head exits 1 before any packet file is written (#5520)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "qa-packet-test-"));
+    try {
+      const h = harness({
+        gitHandler: (argv) => (argv[0] === "cat-file" ? fail("fatal: Not a valid object name") : argv[0] === "fetch" ? fail("fatal: couldn't find remote ref") : packetGit()(argv)),
+        ghHandler: prBodyGh(""),
+      });
+      await assert.rejects(
+        runPacket(readyPre(), "gaberoo322/hydra", h.ports, { loadStandards: standardsOk, outDir: dir }),
+        /not resolvable locally/,
+      );
+      assert.deepEqual(readdirSync(dir), [], "no packet file for a head that does not resolve");
+      assert.ok(!h.git.some((a) => a[0] === "diff"), "no diff is built against a missing head");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   test("packet: standards catalog read failure exits 1 and writes no packet", async () => {
     const dir = mkdtempSync(join(tmpdir(), "qa-packet-test-"));
@@ -420,9 +471,9 @@ describe("packet (steps 7.0 / 7.0a / 7.0b)", () => {
       const packet = readFileSync(r.reviewPacketPath, "utf8");
       assert.ok(
         packet.startsWith(
-          `Diff (${BASE_SHA.slice(0, 12)}…HEAD):\n\nDIFF-BODY\n\nFull contents of every changed file at HEAD:\n\n` +
-            "===== src/a.ts @ HEAD =====\nA-BODY\n\n" +
-            "===== src/gone.ts @ HEAD =====\n(file deleted or absent at HEAD — see the diff above)\n\n",
+          `Diff (${BASE_SHA.slice(0, 12)}…${H12}):\n\nDIFF-BODY\n\nFull contents of every changed file at ${H12}:\n\n` +
+            `===== src/a.ts @ ${H12} =====\nA-BODY\n\n` +
+            `===== src/gone.ts @ ${H12} =====\n(file deleted or absent at the PR head — see the diff above)\n\n`,
         ),
         packet,
       );
@@ -440,14 +491,14 @@ describe("packet (steps 7.0 / 7.0a / 7.0b)", () => {
     const dir = mkdtempSync(join(tmpdir(), "qa-packet-test-"));
     try {
       const h = harness({
-        gitHandler: packetGit({ "show HEAD:src/a.ts": fail("fatal: unable to read tree (index lock)") }),
+        gitHandler: packetGit({ [`show ${HEAD}:src/a.ts`]: fail("fatal: unable to read tree (index lock)") }),
         ghHandler: prBodyGh(""),
       });
       const r = await runPacket(readyPre(), "gaberoo322/hydra", h.ports, { loadStandards: standardsOk, outDir: dir });
       const packet = readFileSync(r.reviewPacketPath, "utf8");
       assert.ok(r.degraded.includes("changed-file-unreadable"));
-      assert.ok(!packet.includes("===== src/a.ts @ HEAD =====\n(file deleted"), "a transient error is not the deleted sentinel");
-      assert.ok(packet.includes("===== src/gone.ts @ HEAD =====\n(file deleted or absent at HEAD"), "sibling: a genuinely missing path keeps the sentinel");
+      assert.ok(!packet.includes(`===== src/a.ts @ ${H12} =====\n(file deleted`), "a transient error is not the deleted sentinel");
+      assert.ok(packet.includes(`===== src/gone.ts @ ${H12} =====\n(file deleted or absent at the PR head`), "sibling: a genuinely missing path keeps the sentinel");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -473,7 +524,7 @@ describe("packet (steps 7.0 / 7.0a / 7.0b)", () => {
     const dir = mkdtempSync(join(tmpdir(), "qa-packet-test-"));
     try {
       const h = harness({
-        gitHandler: (argv) => (argv.join(" ") === "diff --no-renames PRIOR123 HEAD" ? ok("SINCE-DIFF\n") : packetGit()(argv)),
+        gitHandler: (argv) => (argv.join(" ") === `diff --no-renames PRIOR123 ${HEAD}` ? ok("SINCE-DIFF\n") : packetGit()(argv)),
         ghHandler: prBodyGh(""),
         phase: async (p) =>
           p === "prior-context"
@@ -485,7 +536,7 @@ describe("packet (steps 7.0 / 7.0a / 7.0b)", () => {
       assert.equal(r.priorFindings, "### Findings\n\n| medium | x |");
       assert.equal(r.rereviewDiffBase, "PRIOR123");
       assert.match(packet, /\n\nRE-REVIEW CONTEXT — the previous QA round FAILed with the findings below\. Review the FULL change above as usual\./);
-      assert.match(packet, /Changes since the prior verdict \(PRIOR123\.\.HEAD\), context only:\n\nSINCE-DIFF/);
+      assert.match(packet, /Changes since the prior verdict \(PRIOR123\.\.0123456789ab\), context only:\n\nSINCE-DIFF/);
       assert.ok(packet.indexOf("Full contents of every changed file") < packet.indexOf("RE-REVIEW CONTEXT"), "the full diff stays first");
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -1346,7 +1397,7 @@ describe("spawned CLIs (production adapter, fake gh on PATH)", () => {
       fakeBin(
         dir,
         "git",
-        ['case "$1" in', "  fetch) exit 0 ;;", `  rev-parse) echo ${BASE_SHA} ;;`, "  diff) echo src/a.ts ;;", "  *) exit 1 ;;", "esac"].join("\n"),
+        ['case "$1" in', "  fetch|cat-file) exit 0 ;;", `  rev-parse) echo ${BASE_SHA} ;;`, "  diff) echo src/a.ts ;;", "  *) exit 1 ;;", "esac"].join("\n"),
       );
       const r = spawnScript("preflight.ts", ["--issue", "5269", "--pr", "77"], {
         dir,
