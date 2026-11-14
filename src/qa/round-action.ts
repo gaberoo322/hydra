@@ -676,7 +676,7 @@ export function countTestCases(text: string): number {
     }
     return n;
   } catch (err) {
-    console.error("[round-action] countTestCases failed; reporting 0:", err);
+    logger.error({ err }, "[round-action] countTestCases failed; reporting 0");
     return 0;
   }
 }

@@ -56,7 +56,7 @@ enforced-by: src/ast-grep-rules/fail-loud-catch.yml, src/ast-grep-rules/fail-lou
 
 All logging in `src/` goes through `logger` from `src/logger.ts` — never `console.*`, never `pino()` directly (ADR-0027). Exempt: `scripts/` and the `src/index.ts` process bootstrap. A `console.error` inside a `catch` is fail-loud-compliant only outside `src/`.
 
-enforced-by: reviewer, src/ast-grep-rules/logger-seam.yml
+enforced-by: reviewer, src/ast-grep-rules/logger-seam.yml (advisory)
 
 ## Tests
 
