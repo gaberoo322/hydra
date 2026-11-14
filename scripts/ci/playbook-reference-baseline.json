@@ -14,8 +14,7 @@
       "symbol src/redis/holdback.ts#windowCyclesForTier"
     ],
     "docs/operator-playbooks/hydra-architect.md": [
-      "path config/direction/goals.md",
-      "route /api/backlog"
+      "path config/direction/goals.md"
     ],
     "docs/operator-playbooks/hydra-cleanup.md": [
       "path .github/workflows/deploy.yml",
