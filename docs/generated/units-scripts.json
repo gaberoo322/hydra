@@ -201,6 +201,30 @@
       "description": "operator-notify — the Operator Channel CLI for bash and systemd callers"
     },
     {
+      "path": "scripts/ops-collect-logic.ts",
+      "name": "ops-collect-logic.ts",
+      "execStart": null,
+      "triggers": null,
+      "schedule": null,
+      "source": {
+        "path": "scripts/ops-collect-logic.ts"
+      },
+      "kind": "ts",
+      "description": "scripts/ops-collect-logic.ts — pure collectors behind the operator"
+    },
+    {
+      "path": "scripts/ops-collect.ts",
+      "name": "ops-collect.ts",
+      "execStart": null,
+      "triggers": null,
+      "schedule": null,
+      "source": {
+        "path": "scripts/ops-collect.ts"
+      },
+      "kind": "ts",
+      "description": "scripts/ops-collect.ts — operator diagnostics collector CLI."
+    },
+    {
       "path": "scripts/osv-scan.sh",
       "name": "osv-scan.sh",
       "execStart": null,

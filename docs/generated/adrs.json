@@ -917,7 +917,6 @@
         "docs/adr/0033-openviking-knowledge-plane-retired.md",
         "docs/adr/0037-hydra-adrs-are-agent-facing-normative-specs.md",
         "docs/adr/0047-work-item-lifecycle-is-data.md",
-        "docs/operator-playbooks/hydra-architect.md",
         "docs/operator-playbooks/hydra-autopilot.md",
         "docs/operator-playbooks/hydra-digest.md",
         "docs/operator-playbooks/hydra-doctor.md",
