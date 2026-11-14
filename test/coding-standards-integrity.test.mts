@@ -25,6 +25,8 @@ const readText = (p: string): string | null => {
   }
 };
 
+const CI_TEXT = readText(".github/workflows/ci.yml") ?? "";
+
 /**
  * Runner script -> the required-suite test file that imports it. The witness
  * test file's text must contain the runner path, so a stale entry fails below.
@@ -32,15 +34,41 @@ const readText = (p: string): string | null => {
 const REQUIRED_RUNNERS: Record<string, string> = {
   "scripts/ci/fail-loud-ratchet.ts": "test/fail-loud-ratchet.test.mts",
   "scripts/ci/playbook-vocabulary-ratchet.ts": "test/playbook-vocabulary-ratchet.test.mts",
+  "scripts/ci/test-title-provenance-scan.ts": "test/test-title-provenance-ratchet.test.mts",
 };
+
+/** Drop YAML/JS comments so a mention in a comment never counts as wiring. */
+function stripComments(text: string): string {
+  return text
+    .split("\n")
+    .filter((l) => !/^\s*(#|\/\/|\*|\/\*)/.test(l))
+    .map((l) => l.replace(/\s#\s.*$/, ""))
+    .join("\n");
+}
+
+/** A ci.yml line (comments stripped) that runs `p` as its own token, not inside echo / continue-on-error. */
+export function ciRunsPath(ci: string, p: string): boolean {
+  const esc = p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const token = new RegExp(`(^|[\\s"'=/])${esc}($|[\\s"';])`);
+  return stripComments(ci)
+    .split("\n")
+    .some((l) => token.test(l) && !/continue-on-error|^\s*-?\s*(run:\s*)?(echo|printf)\b/.test(l));
+}
+
+/** The witness test text imports or spawns `runner` (comments stripped; a bare string mention fails). */
+export function witnessImportsRunner(witnessText: string, runner: string): boolean {
+  const esc = runner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(import|from|require|spawn\\w*|exec\\w*)\\s*\\(?\\s*["'][^"']*${esc}["']`).test(
+    stripComments(witnessText),
+  );
+}
 
 /** Does a required job (the `test` suite or ci.yml) run this cited path? */
 function requiredWiring(p: string): boolean {
   if (/^test\/.+\.test\.mts$/.test(p)) return true;
-  const ci = readText(".github/workflows/ci.yml") ?? "";
-  if (ci.includes(p)) return true;
+  if (ciRunsPath(CI_TEXT, p)) return true;
   const witness = REQUIRED_RUNNERS[p];
-  if (witness) return (readText(witness) ?? "").includes(p);
+  if (witness) return witnessImportsRunner(readText(witness) ?? "", p);
   if (p.startsWith("src/ast-grep-rules/") && p.endsWith(".yml")) {
     const id = /^id:\s*(\S+)/m.exec(readText(p) ?? "")?.[1];
     return !!id && (FAIL_LOUD_RULE_IDS as readonly string[]).includes(id);
@@ -87,7 +115,7 @@ describe("CODING_STANDARDS.md live integrity", () => {
 
   it("every REQUIRED_RUNNERS witness still imports its runner", () => {
     for (const [runner, witness] of Object.entries(REQUIRED_RUNNERS)) {
-      assert.ok((readText(witness) ?? "").includes(runner), `${witness} no longer references ${runner}`);
+      assert.ok(witnessImportsRunner(readText(witness) ?? "", runner), `${witness} no longer imports ${runner}`);
     }
   });
 
@@ -98,6 +126,27 @@ describe("CODING_STANDARDS.md live integrity", () => {
       "CLAUDE.md": countWords(claude),
     });
     assert.deepEqual(problems.map((p) => p.message), []);
+  });
+});
+
+describe("wiring predicates", () => {
+  const ci = "jobs:\n  test:\n    steps:\n      # run scripts/ci/x.ts later\n      - run: npx tsx scripts/ci/y.ts\n      - run: npx tsx scripts/ci/z.ts\n        continue-on-error: true\n      - run: echo scripts/ci/e.ts\n";
+  it("ciRunsPath ignores a path mentioned only in a comment", () => {
+    assert.equal(ciRunsPath(ci, "scripts/ci/x.ts"), false);
+  });
+  it("ciRunsPath ignores an echo line and a prefix-extended path", () => {
+    assert.equal(ciRunsPath(ci, "scripts/ci/e.ts"), false);
+    assert.equal(ciRunsPath(ci, "scripts/ci/y"), false);
+  });
+  it("ciRunsPath accepts a real run step", () => {
+    assert.equal(ciRunsPath(ci, "scripts/ci/y.ts"), true);
+  });
+  it("witnessImportsRunner rejects a comment or string mention", () => {
+    assert.equal(witnessImportsRunner('// import("../scripts/ci/r.ts")\nconst s = "scripts/ci/r.ts";', "scripts/ci/r.ts"), false);
+  });
+  it("witnessImportsRunner accepts a dynamic or static import", () => {
+    assert.equal(witnessImportsRunner('const m = await import("../scripts/ci/r.ts");', "scripts/ci/r.ts"), true);
+    assert.equal(witnessImportsRunner('import { a } from "../scripts/ci/r.ts";', "scripts/ci/r.ts"), true);
   });
 });
 
