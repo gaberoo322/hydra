@@ -106,6 +106,8 @@
     "title\ttest/qa-reviewer-commit-a.test.mts\tHYDRA_REPO_ROOT retargets the trusted regenerators (round 4)",
     "title\ttest/qa-reviewer-commit-a.test.mts\treviewer-commits rollout stage authority (INV-1, #5267 round 5)",
     "title\ttest/qa-reviewer-commit-a.test.mts\tstep 9.4 trust: scripts run from a master worktree, regenerators target the PR worktree (round 4)",
+    "title\ttest/qa-reviewer-commit-b.test.mts\tcommit graduation: harvest source (QA round 1 finding 1)",
+    "title\ttest/qa-reviewer-commit-b.test.mts\thydra-qa step 9.4: a reviewer-added new test file (QA round 1 finding 2)",
     "title\ttest/qa-round-action.test.mts\tT1-T3 FAIL round 1 bounces, equal to decideQaRoundAction, with no deep-QA or summary",
     "title\ttest/qa-verdict-cli.test.mts\ttrailer + round-action: unreadable prior bodies degrade (no round-1 reset of the cap)",
     "title\ttest/retro-bundle.test.mts\taction status completed + durable record merged + under 5 min is upgraded to merged and unflagged (INV-5, #4856 QA round 1)",
