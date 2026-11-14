@@ -163,7 +163,7 @@ Preflight is **read-only** and fails closed exactly as the old bash did: no tier
 What the preflight fields mean for the reviewers:
 
 - `.spec.input` is the flat design-concept artifact for the Spec sub-agent; `.spec.skippedReason` is the audit reason when the Spec axis is skipped (`design-concept-exempt` on the PR, `cleanup-scan`/`design-concept-exempt` on the parent issue, the Tier-1 prompt-only bypass, or the `warn`-mode missing-artifact skip). A skip MUST be recorded as an audit line in `specSummary` (Aggregate section).
-- `.fanout.mode` sizes the review: `single` → the single-reviewer section (one reviewer, both axes; only when the preflight selects it); `standard` → the standard-pass section; `adversarial` → the adversarial fan-out section. The preflight, not this playbook, decides which mode applies. `.fanout.reviewers` is the exact list of reviewer names to spawn and to check in the completeness check.
+- `.fanout.mode` sizes the review: `single` → the single-reviewer section (one reviewer, both axes; only when the preflight selects it); `standard` → the standard-pass section; `adversarial` → the adversarial fan-out section. A T4 PR or a `code` PR always gets the full fan-out (the preflight decides). `.fanout.reviewers` is the exact list of reviewer names to spawn and to check in the completeness check.
 - `.tier.num` is the tier (`null` = classifier unreachable); `.tier.adversarial` is false in `single` mode so the fold reads one reviewer's verdict.
 
 ### 5. Collect current CI state — manual fallback only
