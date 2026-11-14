@@ -32,8 +32,7 @@ import {
 import {
   COHORT_BASELINE_PATH,
   QA_ROLLOUT_CONFIG_PATH,
-  resolveRolloutSwitches,
-  tripFromBaseline,
+  resolveReviewerCommitsStageFromTexts,
   type ReviewerCommitsValue,
 } from "../../src/qa/rollout-switches.ts";
 import { parseQaFixCommitTrailer } from "../../src/qa/verdict-trailer.ts";
@@ -306,19 +305,10 @@ if (isMain) {
         return undefined;
       }
     };
-    const cfgText = showAtBase(QA_ROLLOUT_CONFIG_PATH);
-    let raw: unknown = undefined;
-    if (cfgText !== undefined) {
-      try {
-        raw = JSON.parse(cfgText);
-      } catch {
-        /* intentional: unparsable config resolves to config-malformed => off */
-        raw = "malformed";
-      }
-    }
-    const baselineText = showAtBase(COHORT_BASELINE_PATH);
-    const trip = baselineText === undefined ? "unknown" : tripFromBaseline(baselineText);
-    const stage: ReviewerCommitsValue = resolveRolloutSwitches(raw, trip).effective["reviewer-commits"];
+    const stage: ReviewerCommitsValue = resolveReviewerCommitsStageFromTexts(
+      showAtBase(QA_ROLLOUT_CONFIG_PATH),
+      showAtBase(COHORT_BASELINE_PATH),
+    );
 
     const result = evaluateQaFixProof({ commits, changedFiles, stage });
     if (!result.ok) emit({ ...result, stage }, 1);

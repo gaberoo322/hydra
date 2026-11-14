@@ -263,37 +263,33 @@ pinned behavior.
 
 ### 9.4 Reviewer commit (class A) (issue #5267, ADR-0046 Decision 2)
 
-> **Wiring status (issue #5267, after the #5269 plumbing refactor).** `route.ts` now runs fold -> trailer -> round action in-process, so this block is no longer a step of `hydra-qa.md`. The `reviewer-commit` engine phase, the class-A path classifier and the `QA-Fix:` trailer support are live and covered by `test/qa-reviewer-commit-a.test.mts`; the rollout switch `reviewer-commits` ships `off`, so no QA pass runs this block today. Enabling the switch requires wiring this block in before `route` (inputs: `$PREFLIGHT_JSON` from `preflight`, `$FOLD_JSON`, `$REVIEW_VERDICT`, `$FIXED_SHA`) and passing `$QA_FIXES`/`$NEW_HEAD` to the trailer phase. That wiring is a follow-up that must land before the switch is flipped (tracked as follow-up issue #5415; the design artifact's INV-11 `hydra-qa.md` placement is deferred to it). **Recorded INV-5 deviation:** the PR head is checked out in a nested `git worktree add --detach` (rather than a detached checkout inside the session tree) so the session tree stays untouched while the trusted scripts run from a separate master worktree; the session tree is asserted unchanged on exit.
+> **Wired (issue #5415, after the #5269 plumbing refactor).** `scripts/qa/route.ts` runs the `reviewer-commit` engine phase in-process, between the fold and the trailer, on a reviewed FAIL only. It reads the `reviewer-commits` stage at the FIXED point (`git show <fixedSha>:config/orchestrator/qa-rollout.json`, never the session tree). When the decision is `commit-a` it PAUSES before any effect: pass 1 returns `nextStep: "reviewer-commit"` plus a `reviewerCommit` plan and writes nothing. The agent runs the block below with every input taken from that plan, then re-calls `route` with `--reviewer-fixed <sha40>` (route verifies the pushed commit, then posts PASS-pending-CI at the new head with the `QA-Fix: A` trailer inputs) or `--reviewer-commit-aborted` (the original FAIL, after a head-unchanged check). The rollout switch `reviewer-commits` still ships `off`, so no QA pass reaches this block today; flipping it is a separate operator-merged item. **Recorded INV-5 deviation:** the PR head is checked out in a nested `git worktree add --detach` (rather than a detached checkout inside the session tree) so the session tree stays untouched while the trusted scripts run from a separate master worktree; the session tree is asserted unchanged on exit.
 
-Runs only when step 9 produced `REVIEW_VERDICT=FAIL`. It is gated by the `reviewer-commits` rollout switch, which ships `off` in `config/orchestrator/qa-rollout.json`: with the switch off the `reviewer-commit` phase answers `none` (`reason=stage-off`) and this step changes nothing. The switch is read by the phase running from a dedicated detached worktree of `$FIXED_SHA` (origin/master), never the PR tree; with the switch off the phase answers before it reads the diff, the changed paths or the body, and the block below does not call it at all unless the verdict is FAIL. The PR head is checked out into a SEPARATE worktree and treated as data: the proof, the regenerators and the re-verify checks always run from that master worktree (`$MASTER_WT`) with `HYDRA_REPO_ROOT` pointing the regenerators at the PR worktree, never from PR-authored scripts; the session tree is asserted unchanged on exit.
+Runs only when the step-9 `route` call returned `nextStep == "reviewer-commit"` (a reviewed FAIL whose every blocking finding is class A, with the stage `A` or `A+B` at the fixed point). With the switch off, `route` never pauses and this block never runs. The PR head is checked out into a SEPARATE worktree and treated as data: the proof, the regenerators and the re-verify checks always run from the master worktree (`$MASTER_WT`, built from the plan's `fixedSha`) with `HYDRA_REPO_ROOT` pointing the regenerators at the PR worktree, never from PR-authored scripts; the session tree is asserted unchanged on exit. The block reads its inputs from `$ROUTE_JSON.reviewerCommit` only and exports `RC_OK` and (on success) `NEW_HEAD`.
 
-The `reviewer-commit` phase returns `commit-a` only when ALL of these hold: the stage is `A` or `A+B`; the tier is 1-3; no changed file is Verifier Core; the one-way-door detector says `two-way` (`one-way` and `unknown` both refuse); and EVERY blocking finding of the fold sits in a class-A location (the PR body, or a path `classifyQaFixPath` calls `A`/`AB` that is not listed under the PR body's `## Files out of scope`). One blocking finding anywhere else makes the whole round `none`: nothing is committed, nothing is pushed, and steps 9.5-10 run unchanged on the original FAIL. The phase never edits, filters or re-grades a finding.
+The `reviewer-commit` phase returns `commit-a` only when ALL of these hold: the stage is `A` or `A+B`; the tier is 1-3; no changed file is Verifier Core; the one-way-door detector says `two-way` (`one-way` and `unknown` both refuse); and EVERY blocking finding of the fold sits in a class-A location (the PR body, or a path `classifyQaFixPath` calls `A`/`AB` that is not listed under the PR body's `## Files out of scope`). One blocking finding anywhere else makes the whole round `none`: nothing is committed, nothing is pushed, and `route` runs the ordinary FAIL routing unchanged on the original FAIL. The phase never edits, filters or re-grades a finding.
 
 ```bash
-QA_FIXES=""
-RC_JSON=""
+RC_PLAN=$(printf '%s' "$ROUTE_JSON" | jq -c '.reviewerCommit // {}')
+NEW_HEAD=""
+RC_OK=0
 MASTER_WT=""
 MASTER_ROOT_DIR=""
 SESSION_ROOT=$(git rev-parse --show-toplevel)
 SESSION_HEAD=$(git rev-parse HEAD)
 SESSION_STATUS=$(git status --porcelain)
-# Gate FIRST: a PASS verdict (or any non-FAIL) never reads the diff, the changed paths or the body.
-if [ "$REVIEW_VERDICT" = "FAIL" ]; then
+FIXED_SHA=$(printf '%s' "$RC_PLAN" | jq -r '.fixedSha // ""')
+# Gate FIRST: only when route paused for this block. Anything else never builds a worktree.
+if [ "$NEXT" = "reviewer-commit" ]; then
   # TRUST: every script below runs from a dedicated detached worktree of $FIXED_SHA (origin/master),
   # NOT from this session tree (whose HEAD is the PR head, i.e. PR-authored code). Fail closed.
   MASTER_ROOT_DIR=$(mktemp -d) && [ -n "$FIXED_SHA" ] && git worktree add --detach "$MASTER_ROOT_DIR/master" "$FIXED_SHA" >/dev/null 2>&1 \
     && MASTER_WT="$MASTER_ROOT_DIR/master" && { [ ! -d "$SESSION_ROOT/node_modules" ] || ln -sfn "$SESSION_ROOT/node_modules" "$MASTER_WT/node_modules"; }
 fi
-if [ "$REVIEW_VERDICT" = "FAIL" ] && [ -n "$MASTER_WT" ]; then
-  RC_JSON=$(printf '%s' "$FOLD_JSON" | jq --argjson pr "$pr_number" --argjson tier "${PR_TIER_NUM:-null}" \
-    '{pr: $pr, tier: $tier, blocking: .fold.blocking, followUps: .fold.followUps}' \
-    | (cd "$MASTER_WT" && node --no-warnings --experimental-strip-types "$MASTER_WT/scripts/ci/qa-verdict.ts" reviewer-commit)) || RC_JSON=""   # cwd = master: rolloutStage() reads process.cwd() (INV-1)
-fi
-RC_ACTION=$(printf '%s' "$RC_JSON" | jq -r '.action // "none"')
-if [ "$REVIEW_VERDICT" = "FAIL" ] && [ "$RC_ACTION" = "commit-a" ]; then
-  # The head the fold REVIEWED: captured by the step-3 call, never re-read for the checkout.
-  REVIEWED_HEAD=$(printf '%s' "$PREFLIGHT_JSON" | jq -r '.pr.headSha // ""')
-  HEAD_REF=$(printf '%s' "$PREFLIGHT_JSON" | jq -r '.pr.headRefName')
+if [ "$NEXT" = "reviewer-commit" ] && [ -n "$MASTER_WT" ]; then
+  # The head the fold REVIEWED: route's plan, never re-read for the checkout.
+  REVIEWED_HEAD=$(printf '%s' "$RC_PLAN" | jq -r '.reviewedHead // ""')
+  HEAD_REF=$(printf '%s' "$RC_PLAN" | jq -r '.headRef // ""')
   RC_OK=1
   CHECKED_OUT=0
   PR_WT=""
@@ -302,10 +298,10 @@ if [ "$REVIEW_VERDICT" = "FAIL" ] && [ "$RC_ACTION" = "commit-a" ]; then
   # from. The PR is checked out into a SEPARATE worktree and treated as data; the proof, the regenerators
   # and the checks below are invoked by absolute path under MASTER_WT, never from a PR-authored tree.
   ORIG_BODY_FILE=$(mktemp); RC_BODY_FILE=$(mktemp)   # private tempfiles
-  BODY_FIX=$(printf '%s' "$RC_JSON" | jq -r '.bodyFix // false')
-  RC_BLOCKING_PATHS=$(printf '%s' "$RC_JSON" | jq -r '.blockingPaths[]?')
-  RC_FOLLOWUP_PATHS=$(printf '%s' "$RC_JSON" | jq -r '.followUpPaths[]?')
-  [ -n "$REVIEWED_HEAD" ] || RC_OK=0
+  BODY_FIX=$(printf '%s' "$RC_PLAN" | jq -r '.bodyFix // false')
+  RC_BLOCKING_PATHS=$(printf '%s' "$RC_PLAN" | jq -r '.blockingPaths[]?')
+  RC_FOLLOWUP_PATHS=$(printf '%s' "$RC_PLAN" | jq -r '.followUpPaths[]?')
+  { [ -n "$REVIEWED_HEAD" ] && [ -n "$HEAD_REF" ]; } || RC_OK=0
   # Abort if the PR moved while the review ran: never stack a commit on an unreviewed head.
   [ "$RC_OK" = 1 ] && { [ "$(gh pr view $pr_number --repo gaberoo322/hydra --json headRefOid --jq .headRefOid)" = "$REVIEWED_HEAD" ] || RC_OK=0; }
   # Isolation guard: only ever inside this session's own worktree.
@@ -364,9 +360,9 @@ if [ "$REVIEW_VERDICT" = "FAIL" ] && [ "$RC_ACTION" = "commit-a" ]; then
       else
         git diff --cached -U0 -- "$ROW_FILE" | node --experimental-strip-types "$MASTER_WT/scripts/ci/qa-commit-checks.ts" row-hunk-check "$ROW_LINE" || RC_OK=0
       fi
-    done < <(printf '%s' "$FOLD_JSON" | jq -r '.fold.blocking[].location')
+    done < <(printf '%s' "$RC_PLAN" | jq -r '.blockingLocations[]?')
     # A body-only round stages nothing: it still makes an EMPTY `QA-Fix: A` commit (INV-6), so the push
-    # fires `synchronize` and body-reading gates see the corrected body. QA_FIXES is set only from a commit made here.
+    # fires `synchronize` and body-reading gates see the corrected body. NEW_HEAD is set only from a commit made here.
     if [ "$RC_OK" = 1 ]; then
       git commit -q --allow-empty -m "fix(qa): reviewer class-A fixes for PR #$pr_number" -m "QA-Fix: A" || RC_OK=0
     fi
@@ -384,19 +380,12 @@ if [ "$REVIEW_VERDICT" = "FAIL" ] && [ "$RC_ACTION" = "commit-a" ]; then
   [ "$RC_OK" = 1 ] && { git push origin "HEAD:refs/heads/$HEAD_REF" || RC_OK=0; }
   if [ "$RC_OK" = 1 ]; then
     NEW_HEAD=$(git rev-parse HEAD)
-    [ "$NEW_HEAD" != "$REVIEWED_HEAD" ] && QA_FIXES=${NEW_HEAD:0:12} || RC_OK=0
+    [ "$NEW_HEAD" != "$REVIEWED_HEAD" ] || RC_OK=0
   fi
-  if [ "$RC_OK" = 1 ]; then
-    REVIEW_VERDICT=PASS; VERDICT=PASS-pending-CI; BLOCKERS=0; MAX_SEVERITY=none
-    REVIEW_REPORT="${REVIEW_REPORT}
-
-Reviewer-fixed in ${QA_FIXES} (QA-Fix: A): each blocking row above is fixed-by ${QA_FIXES}."
-    # INV-4: annotate each blocking row of the findings table in $REVIEW_REPORT with
-    # "fixed-by ${QA_FIXES}" in its Fix cell; never delete, filter or re-grade a row.
-  else
+  if [ "$RC_OK" != 1 ]; then
     # Nothing pushed: restore the original body if we changed it. A failed restore is LOUD, never silent.
     [ "$BODY_EDITED" = 1 ] && { gh pr edit $pr_number --repo gaberoo322/hydra --body-file "$ORIG_BODY_FILE" || echo "ERROR: QA body restore FAILED for PR #$pr_number; report it in the verdict comment" >&2; }
-    QA_FIXES=""   # the original FAIL stands at the original head
+    NEW_HEAD=""   # the original FAIL stands at the original head: the playbook re-calls route with the abort flag
   fi
   # EVERY exit path: return to the session tree, drop the PR worktree (only if one was created) and the tempfiles.
   cd "$SESSION_ROOT" || echo "ERROR: could not return to $SESSION_ROOT" >&2
@@ -411,17 +400,4 @@ if [ -n "$MASTER_WT" ]; then git worktree remove -f "$MASTER_WT" || echo "ERROR:
 [ "$(git -C "$SESSION_ROOT" status --porcelain)" = "$SESSION_STATUS" ] || echo "ERROR: session tree status changed during step 9.4" >&2
 ```
 
-A reviewer-commit round is one `round=` like any other and never counts as a FAIL round; the round cap and the T4 2-strike rule are untouched. Bare `PASS` is unreachable on such a round: the verdict is `PASS-pending-CI` at the NEW head, and the autopilot's auto-merge goes through `qa-merge-guard`, which holds with `qa-fix-proof-not-green` until the `qa-fix-proof` workflow is green on that head. Step 9.5 passes `$QA_FIXES` and the new head SHA explicitly to the `trailer` phase.
-
-### 9.5 Trailer inputs after a reviewer commit (issue #5267)
-
-When step 9.4 committed, the trailer phase receives the new head and the QA-Fix sha explicitly:
-
-```bash
-TRAILER_JSON=$(jq -n --argjson pr "$pr_number" --arg verdict "$VERDICT" \
-  --argjson blockers "${BLOCKERS:-0}" --arg severity "${MAX_SEVERITY:-none}" \
-  --arg qafix "${QA_FIXES:-}" --arg newhead "${NEW_HEAD:-}" \
-  '{pr: $pr, verdict: $verdict, blockers: $blockers, maxSeverity: $severity}
-   + (if $qafix != "" then {headSha: $newhead, qaFixes: [$qafix]} else {} end)' \
-  | node --no-warnings --experimental-strip-types scripts/ci/qa-verdict.ts trailer)
-```
+A reviewer-commit round is one `round=` like any other and never counts as a FAIL round; the round cap and the T4 2-strike rule are untouched. After the block, the playbook re-calls `route` with `--reviewer-fixed "$NEW_HEAD"` when `RC_OK=1`, else `--reviewer-commit-aborted`. Pass 2a re-runs the fold from the same findings files, requires a fresh `commit-a` decision, and verifies the pushed commit with ONE `gh api repos/<repo>/commits/<sha>` read (first parent is the reviewed head, the message carries the line `QA-Fix: A`) plus the live `headRefOid`; any miss is a pre-verdict exit (`QA-Verdict-Error ... reason=reviewer-fixed-unverified`, `needs-qa` untouched) and the next dispatch re-reviews at the new head. Only then does `route` render the verdict PASS-pending-CI, pass `headSha` and `qaFixes` to the trailer phase itself, and annotate each blocking row `fixed-by <sha12>`. Bare `PASS` is unreachable on such a round: `route` never returns `arm-auto-merge` for it, and the autopilot's auto-merge goes through `qa-merge-guard`, which holds with `qa-fix-proof-not-green` until the `qa-fix-proof` workflow is green on that head.

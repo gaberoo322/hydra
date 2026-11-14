@@ -469,6 +469,7 @@
           "ReflectionsQuerySchema",
           "RetroArtifactSchema",
           "RetroBundleParamsSchema",
+          "ReviewerCommitPlanSchema",
           "RouteEffectSchema",
           "RouteResultSchema",
           "SERVER_EVALUATED_CHECKS",

@@ -11,6 +11,7 @@ import type { ReviewVerdict } from "./admission.ts";
 import { classifyQaFixPath } from "./fix-proof.ts";
 import { detectOneWayDoor, requiresOneWayDepth } from "./one-way-door.ts";
 import type { ReviewerCommitsValue } from "./rollout-switches.ts";
+import { FOLLOW_UPS_HEADING } from "./fold.ts";
 import { qaVerdictHistory } from "./prior-round.ts";
 import { CAP_DEFAULTS, countReviewedFailRoundsSinceReset } from "../lifecycle/caps.ts";
 import { isFailVerdict, nextQaVerdictRound, type FinalVerdict, type QaVerdictTrailer } from "./verdict-trailer.ts";
@@ -700,4 +701,33 @@ export function diffHasHunkNearLine(diffU0: string, line: number): boolean {
     if ((line >= oa - 1 && line <= oa + ol) || (line >= na - 1 && line <= na + nl)) return true;
   }
   return false;
+}
+
+/**
+ * INV-4 / INV-10 (issue #5415): the report of a reviewer-fixed round. Each
+ * BLOCKING table row whose File:line cell matches one of `blockingLocations`
+ * gets ` fixed-by <sha12>` suffixed onto its Fix cell, and one
+ * `Reviewer-fixed in <sha12> (QA-Fix: A)` paragraph is appended. A row is never
+ * deleted, filtered or re-graded; the follow-ups table is left untouched.
+ * Pure and total.
+ */
+export function annotateReviewerFixedReport(
+  report: string,
+  blockingLocations: readonly string[],
+  sha12: string,
+): string {
+  const norm = (s: string): string => String(s ?? "").replace(/\s+/g, " ").trim().replace(/\|/g, "\\|");
+  const wanted = new Set(blockingLocations.map(norm));
+  let inFollowUps = false;
+  const lines = String(report ?? "")
+    .split("\n")
+    .map((line) => {
+      if (line.trim() === FOLLOW_UPS_HEADING) inFollowUps = true;
+      if (inFollowUps || !line.startsWith("|")) return line;
+      const cells = line.split(/(?<!\\)\|/);
+      // cells: ["", severity, axis, reviewer, file:line, finding, fix, ""]
+      if (cells.length !== 8 || !wanted.has((cells[4] as string).trim())) return line;
+      return line.replace(/ \|$/, ` fixed-by ${sha12} |`);
+    });
+  return `${lines.join("\n")}\n\nReviewer-fixed in ${sha12} (QA-Fix: A): each blocking row above is fixed-by ${sha12}.`;
 }

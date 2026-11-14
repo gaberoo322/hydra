@@ -106,6 +106,24 @@ export const RouteEffectSchema = z.object({
 });
 export type RouteEffect = z.infer<typeof RouteEffectSchema>;
 
+/**
+ * The reviewer-commit decision route carries on its result (#5415): on pass 1 with
+ * `action: 'commit-a'` it is the plan the agent-executed step-9.4 block reads; on every
+ * other path it is the audit of why no reviewer commit ran.
+ */
+export const ReviewerCommitPlanSchema = z.object({
+  action: z.enum(["none", "commit-a"]),
+  reason: z.string(),
+  reviewedHead: z.string().optional(),
+  headRef: z.string().optional(),
+  fixedSha: z.string().nullable().optional(),
+  blockingPaths: z.array(z.string()).optional(),
+  followUpPaths: z.array(z.string()).optional(),
+  bodyFix: z.boolean().optional(),
+  blockingLocations: z.array(z.string()).optional(),
+});
+export type ReviewerCommitPlan = z.infer<typeof ReviewerCommitPlanSchema>;
+
 export const RouteResultSchema = z.object({
   verdict: finalVerdict.nullable(),
   reason: z.string(),
@@ -117,7 +135,8 @@ export const RouteResultSchema = z.object({
   round: z.number().int().nullable(),
   deepQa: z.unknown().nullable(),
   effects: z.array(RouteEffectSchema),
-  nextStep: z.enum(["arm-auto-merge", "none"]),
+  nextStep: z.enum(["arm-auto-merge", "reviewer-commit", "none"]),
+  reviewerCommit: ReviewerCommitPlanSchema.optional(),
   dryRun: z.boolean(),
   degraded: z.array(z.string()),
 });

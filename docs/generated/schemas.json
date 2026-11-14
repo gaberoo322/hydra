@@ -881,6 +881,15 @@
       }
     },
     {
+      "name": "ReviewerCommitPlanSchema",
+      "file": "src/schemas/qa-plumbing-cli.ts",
+      "importedBy": [],
+      "routes": [],
+      "source": {
+        "path": "src/schemas/qa-plumbing-cli.ts"
+      }
+    },
+    {
       "name": "RouteEffectSchema",
       "file": "src/schemas/qa-plumbing-cli.ts",
       "importedBy": [],

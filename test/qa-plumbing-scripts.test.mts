@@ -19,7 +19,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, w
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-import type { QaVerdictFetchers } from "../src/qa/phases.ts";
+import { runQaVerdictPhase, type QaVerdictFetchers } from "../src/qa/phases.ts";
 import { phaseRunner, type AdvanceResult, type CmdResult, type PlumbingPorts } from "../scripts/qa/_lib.ts";
 import { runPreflight, type PreflightOptions } from "../scripts/qa/preflight.ts";
 import { NO_STANDARDS_SENTINEL, runPacket } from "../scripts/qa/packet.ts";
@@ -552,15 +552,19 @@ interface Canned {
   foldThrows?: boolean;
   trailerThrows?: boolean;
   roundThrows?: boolean;
+  /** Fold blocking rows (the reviewer-commit decision reads their locations). */
+  blocking?: Array<{ location: string }>;
+  /** Canned `reviewer-commit` phase answer (default: `none` / `stage-off`). */
+  reviewerCommit?: Record<string, unknown>;
 }
 
 /** Canned engine output, so every posted byte is determined by the route templates alone. */
 function cannedPhase(c: Canned): PlumbingPorts["phase"] {
-  return async (phase) => {
+  return async (phase, input) => {
     if (phase === "fold") {
       if (c.foldThrows) throw new Error("fold down");
       return {
-        fold: { reviewVerdict: c.reviewVerdict ?? "PASS", worstFinding: c.worst ?? "", blocking: [], followUps: [] },
+        fold: { reviewVerdict: c.reviewVerdict ?? "PASS", worstFinding: c.worst ?? "", blocking: c.blocking ?? [], followUps: [] },
         counts: { blockers: c.blockers ?? 0, maxSeverity: c.maxSeverity ?? "none" },
         report: "REPORT",
         verdict: { verdict: c.verdict, reason: "REASON" },
@@ -568,9 +572,13 @@ function cannedPhase(c: Canned): PlumbingPorts["phase"] {
         degraded: [],
       };
     }
+    if (phase === "reviewer-commit") {
+      return c.reviewerCommit ?? { action: "none", reason: "stage-off", detail: "off", blockingPaths: [], followUpPaths: [], bodyFix: false, degraded: [] };
+    }
     if (phase === "trailer") {
       if (c.trailerThrows) throw new Error("trailer down");
-      return { trailer: c.trailer ?? (c.verdict.startsWith("PASS") ? PASS_TRAILER : TRAILER), round: 1, degraded: [] };
+      const verdictIn = String((input as { verdict?: unknown }).verdict ?? c.verdict);
+      return { trailer: c.trailer ?? (verdictIn.startsWith("PASS") ? PASS_TRAILER : TRAILER), round: 1, degraded: [] };
     }
     if (c.roundThrows) throw new Error("round-action down");
     return {
@@ -1425,5 +1433,244 @@ describe("spawned CLIs (production adapter, fake gh on PATH)", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Route: reviewer commit class A wired into the executed path (issue #5415)
+// ---------------------------------------------------------------------------
+
+describe("route: reviewer commit class A (issue #5415, executed-path order pins)", () => {
+  const NEW_HEAD = "f".repeat(40);
+  const NEW12 = "f".repeat(12);
+  const FAIL_CANNED: Canned = {
+    verdict: "FAIL",
+    reviewVerdict: "FAIL",
+    blockers: 1,
+    maxSeverity: "medium",
+    worst: "w",
+    blocking: [{ location: "docs/guide.md:3" }],
+  };
+  const COMMIT_A = {
+    action: "commit-a",
+    reason: "class-a-fixable",
+    detail: "d",
+    blockingPaths: ["docs/guide.md"],
+    followUpPaths: [],
+    bodyFix: true,
+    degraded: [],
+  };
+
+  /** Records the phase order and every phase input around a canned engine. */
+  function recording(c: Canned) {
+    const inner = cannedPhase(c);
+    const order: string[] = [];
+    const inputs: Record<string, unknown[]> = {};
+    const phase: PlumbingPorts["phase"] = async (p, input) => {
+      order.push(p);
+      (inputs[p] ??= []).push(input);
+      return inner(p, input);
+    };
+    return { phase, order, inputs };
+  }
+
+  /** gh answers: PR state OPEN, the live head, and the commit object of NEW_HEAD. */
+  const rcGh = (live: string, parent = HEAD, message = "fix(qa): x\n\nQA-Fix: A") => (argv: string[]): CmdResult | undefined => {
+    if (argv[0] === "pr" && argv[1] === "view" && argv.includes("headRefOid")) return ok(`${live}\n`);
+    if (argv[0] === "api" && argv[1] === `repos/gaberoo322/hydra/commits/${NEW_HEAD}`) {
+      return ok(JSON.stringify({ parents: [{ sha: parent }], commit: { message } }));
+    }
+    return withState("OPEN")(argv);
+  };
+
+  test("FAIL + none: phase order is fold, reviewer-commit, trailer, round-action and the FAIL effect order is unchanged", async () => {
+    const rec = recording(FAIL_CANNED);
+    const h = harness({ ghHandler: withState("OPEN"), phase: rec.phase });
+    const r = await runRoute(ROUTE_OPTS, readyPre(), h.ports, realDeps());
+    assert.deepEqual(rec.order, ["fold", "reviewer-commit", "trailer", "round-action"]);
+    assert.deepEqual(h.writes().map((a) => `${a[0]} ${a[1]}`), ["pr merge", "pr comment", "lifecycle advance", "issue comment"]);
+    assert.equal(r.nextStep, "none");
+    assert.deepEqual(r.reviewerCommit, { action: "none", reason: "stage-off" });
+  });
+
+  test("a PASS fold never invokes the reviewer-commit phase", async () => {
+    const rec = recording({ verdict: "PASS" });
+    const h = harness({ ghHandler: withState("OPEN"), phase: rec.phase });
+    const r = await runRoute(ROUTE_OPTS, readyPre(), h.ports, realDeps());
+    assert.deepEqual(rec.order, ["fold", "trailer", "round-action"]);
+    assert.equal(r.reviewerCommit, undefined);
+  });
+
+  test("skip-required-failed and --defer never invoke the reviewer-commit phase", async () => {
+    const rec = recording(FAIL_CANNED);
+    const skip = readyPre({ gate: { action: "skip-required-failed", reason: "r", redRequired: ["test"], skipVerdict: { verdict: "FAIL", reason: "x" }, skipCiSummary: "CI" } });
+    await runRoute({ ...ROUTE_OPTS, findingsPath: undefined, summariesPath: undefined }, skip, harness({ ghHandler: withState("OPEN"), phase: rec.phase }).ports, realDeps());
+    const defer = recording(FAIL_CANNED);
+    const deferPre = readyPre({ gate: { action: "defer", reason: "r", redRequired: [], skipVerdict: null, skipCiSummary: null } });
+    await runRoute({ ...ROUTE_OPTS, defer: true, findingsPath: undefined, summariesPath: undefined }, deferPre, harness({ ghHandler: withState("OPEN"), phase: defer.phase }).ports, realDeps());
+    assert.ok(!rec.order.includes("reviewer-commit"));
+    assert.deepEqual(defer.order, []);
+  });
+
+  test("a commit-a decision pauses pass 1 BEFORE any effect: zero writes, no trailer call, a full plan", async () => {
+    const rec = recording({ ...FAIL_CANNED, reviewerCommit: COMMIT_A });
+    const h = harness({ ghHandler: withState("OPEN"), phase: rec.phase });
+    const r = await runRoute(ROUTE_OPTS, readyPre(), h.ports, realDeps());
+    assert.deepEqual(rec.order, ["fold", "reviewer-commit"]);
+    assert.deepEqual(h.writes(), []);
+    assert.deepEqual(r.effects, []);
+    assert.equal(r.verdict, null);
+    assert.equal(r.reviewVerdict, "FAIL");
+    assert.equal(r.nextStep, "reviewer-commit");
+    assert.deepEqual(r.reviewerCommit, {
+      action: "commit-a",
+      reason: "class-a-fixable",
+      reviewedHead: HEAD,
+      headRef: "worktree-agent-abc",
+      fixedSha: BASE_SHA,
+      blockingPaths: ["docs/guide.md"],
+      followUpPaths: [],
+      bodyFix: true,
+      blockingLocations: ["docs/guide.md:3"],
+    });
+    // Pass 1 is idempotent: a second run writes nothing either.
+    const again = harness({ ghHandler: withState("OPEN"), phase: recording({ ...FAIL_CANNED, reviewerCommit: COMMIT_A }).phase });
+    await runRoute(ROUTE_OPTS, readyPre(), again.ports, realDeps());
+    assert.deepEqual(again.writes(), []);
+  });
+
+  test("the stage is read at fixedSha, never the session tree: a tree saying A while fixedSha says off decides stage-off", async () => {
+    const sessionSaysA: QaVerdictFetchers = fixtureFetchers({ async rolloutStage() { return "A"; } });
+    const inner = cannedPhase(FAIL_CANNED);
+    const phase: PlumbingPorts["phase"] = (p, input) => (p === "reviewer-commit" ? runQaVerdictPhase(p, input, sessionSaysA) : inner(p, input));
+    const h = harness({
+      ghHandler: withState("OPEN"),
+      phase,
+      gitHandler: (argv) => {
+        if (argv[0] !== "show") return undefined;
+        if (argv[1] === `${BASE_SHA}:config/orchestrator/qa-rollout.json`) return ok(JSON.stringify({ "two-way-pair": "off", "reviewer-commits": "off" }));
+        if (argv[1] === `${BASE_SHA}:test/fixtures/qa-cohort-baseline.json`) return ok(JSON.stringify({ metrics: { tripped: false } }));
+        return undefined;
+      },
+    });
+    const r = await runRoute(ROUTE_OPTS, readyPre(), h.ports, realDeps());
+    assert.deepEqual(h.git.filter((a) => a[0] === "show").map((a) => a[1]), [
+      `${BASE_SHA}:config/orchestrator/qa-rollout.json`,
+      `${BASE_SHA}:test/fixtures/qa-cohort-baseline.json`,
+    ]);
+    assert.equal(r.reviewerCommit?.action, "none");
+    assert.equal(r.reviewerCommit?.reason, "stage-off");
+    assert.equal(r.nextStep, "none");
+    // Sibling: the same fixed point saying A lets the phase proceed past the stage fence.
+    const a = harness({
+      ghHandler: withState("OPEN"),
+      phase: (p, input) => (p === "reviewer-commit" ? runQaVerdictPhase(p, input, fixtureFetchers({ async changedFiles() { return ["docs/guide.md"]; } })) : inner(p, input)),
+      gitHandler: (argv) => (argv[0] === "show" && String(argv[1]).endsWith("qa-rollout.json") ? ok(JSON.stringify({ "reviewer-commits": "A" })) : argv[0] === "show" ? ok(JSON.stringify({ metrics: { tripped: false } })) : undefined),
+    });
+    const ra = await runRoute(ROUTE_OPTS, readyPre(), a.ports, realDeps());
+    assert.notEqual(ra.reviewerCommit?.reason, "stage-off");
+  });
+
+  test("a null fixedSha or a failed show yields stage off and degraded rollout-stage", async () => {
+    const nullSha = harness({ ghHandler: withState("OPEN"), phase: cannedPhase(FAIL_CANNED) });
+    const rn = await runRoute(ROUTE_OPTS, readyPre({ fixedSha: null }), nullSha.ports, realDeps());
+    assert.ok(rn.degraded.includes("rollout-stage"));
+    const failed = harness({ ghHandler: withState("OPEN"), phase: cannedPhase(FAIL_CANNED), gitHandler: (argv) => (argv[0] === "show" ? fail("fatal") : undefined) });
+    const rf = await runRoute(ROUTE_OPTS, readyPre(), failed.ports, realDeps());
+    assert.ok(rf.degraded.includes("rollout-stage"));
+  });
+
+  test("pass 2a appends review-findings rows at the trailer's NEW sha and round; a plain FAIL round keeps its own sha/round (sibling)", async () => {
+    const rows: unknown[][] = [];
+    const trailer = `QA-Verdict: PASS-pending-CI pr=77 round=2 sha=${NEW12} blockers=0 max_severity=none`;
+    const full = [{ severity: "medium", axis: "standards", location: "docs/guide.md:3", finding: "f", reviewers: ["reviewer-A-standards"] }] as unknown as Canned["blocking"];
+    const h = harness({ ghHandler: rcGh(NEW_HEAD), phase: cannedPhase({ ...FAIL_CANNED, blocking: full, reviewerCommit: COMMIT_A, trailer }) });
+    const r2a = await runRoute({ ...ROUTE_OPTS, reviewerFixed: NEW_HEAD }, readyPre(), h.ports, realDeps(rows));
+    assert.ok(!r2a.degraded.includes("review-findings"));
+    assert.equal(rows.length, 1);
+    const appended = rows[0] as Array<{ row: { sha: string; round: number } }>;
+    assert.ok(appended.length > 0);
+    assert.ok(appended.every((r) => r.row.sha === NEW12 && r.row.round === 2), "rows carry the NEW head sha and trailer round");
+    const rows1: unknown[][] = [];
+    const plain = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "medium" }) });
+    await runRoute(ROUTE_OPTS, readyPre(), plain.ports, realDeps(rows1));
+    assert.equal(rows1.length, 1);
+    assert.equal(rows1[0]?.length, 0, "a fold with no findings appends an empty row set at its own round");
+  });
+
+  test("pass 2a: a verified reviewer commit yields PASS-pending-CI at the new head; the trailer input carries headSha and qaFixes; bare PASS is unreachable", async () => {
+    const rec = recording({ ...FAIL_CANNED, reviewerCommit: COMMIT_A });
+    const h = harness({ ghHandler: rcGh(NEW_HEAD), phase: rec.phase });
+    const r = await runRoute({ ...ROUTE_OPTS, reviewerFixed: NEW_HEAD }, readyPre(), h.ports, realDeps());
+    assert.deepEqual(rec.order, ["fold", "reviewer-commit", "trailer", "round-action"]);
+    assert.deepEqual(rec.inputs.trailer?.[0], { pr: 77, verdict: "PASS-pending-CI", blockers: 0, maxSeverity: "none", headSha: NEW_HEAD, qaFixes: [NEW12] });
+    assert.deepEqual(h.writes().map((a) => `${a[0]} ${a[1]}`), ["pr comment", "lifecycle advance"], "pending comment, then qa-passed");
+    assert.deepEqual(h.advances.map((a) => a[1]), ["qa-passed"]);
+    const body = argAfter(h.writes()[0] as string[], "--body") as string;
+    assert.match(body, /Verdict: `PASS-pending-CI`/);
+    assert.ok(body.includes(`Reviewer-fixed in ${NEW12} (QA-Fix: A)`));
+    assert.ok(!h.writes().some((a) => a[1] === "merge"), "no disarm: this is not a FAIL round");
+    assert.equal(r.verdict, "PASS-pending-CI");
+    assert.equal(r.nextStep, "none", "arm-auto-merge is unreachable on a reviewer-fixed round");
+    assert.equal(r.blockers, 0);
+    assert.equal(r.maxSeverity, "none");
+  });
+
+  test("pass 2a is refused (pre-verdict exit, one QA-Verdict-Error comment, nothing else) when the commit is not the reviewed head's QA-Fix: A child at the live head", async () => {
+    const cases: Array<[string, (argv: string[]) => CmdResult | undefined]> = [
+      ["wrong parent", rcGh(NEW_HEAD, "e".repeat(40))],
+      ["missing trailer", rcGh(NEW_HEAD, HEAD, "fix(qa): x")],
+      ["head moved on", rcGh("d".repeat(40))],
+    ];
+    for (const [name, ghHandler] of cases) {
+      const h = harness({ ghHandler, phase: cannedPhase({ ...FAIL_CANNED, reviewerCommit: COMMIT_A }) });
+      await assert.rejects(runRoute({ ...ROUTE_OPTS, reviewerFixed: NEW_HEAD }, readyPre(), h.ports, realDeps()), /not verified/, name);
+      const w = h.writes();
+      assert.equal(w.length, 1, `${name}: exactly one write`);
+      assert.match(argAfter(w[0] as string[], "--body") as string, /QA-Verdict-Error: pr=77 reason=reviewer-fixed-unverified/, name);
+      assert.equal(h.advances.length, 0, `${name}: needs-qa untouched`);
+    }
+  });
+
+  test("pass 2a without a fresh commit-a decision (or on a PASS fold) is a pre-verdict exit", async () => {
+    const none = harness({ ghHandler: rcGh(NEW_HEAD), phase: cannedPhase(FAIL_CANNED) });
+    await assert.rejects(runRoute({ ...ROUTE_OPTS, reviewerFixed: NEW_HEAD }, readyPre(), none.ports, realDeps()), /no fresh commit-a decision/);
+    const pass = harness({ ghHandler: rcGh(NEW_HEAD), phase: cannedPhase({ verdict: "PASS" }) });
+    await assert.rejects(runRoute({ ...ROUTE_OPTS, reviewerFixed: NEW_HEAD }, readyPre(), pass.ports, realDeps()), /requires a reviewed FAIL/);
+    assert.equal(none.advances.length + pass.advances.length, 0);
+  });
+
+  test("pass 2b: --reviewer-commit-aborted re-routes the ORIGINAL FAIL at the reviewed head and never re-runs the decision", async () => {
+    const rec = recording({ ...FAIL_CANNED, reviewerCommit: COMMIT_A });
+    const h = harness({ ghHandler: rcGh(HEAD), phase: rec.phase });
+    const r = await runRoute({ ...ROUTE_OPTS, reviewerCommitAborted: true }, readyPre(), h.ports, realDeps());
+    assert.deepEqual(rec.order, ["fold", "trailer", "round-action"]);
+    assert.deepEqual(h.writes().map((a) => `${a[0]} ${a[1]}`), ["pr merge", "pr comment", "lifecycle advance", "issue comment"]);
+    assert.equal(r.verdict, "FAIL");
+    assert.equal(r.reviewerCommit?.reason, "reviewer-commit-aborted");
+  });
+
+  test("pass 2b: a moved head is a pre-verdict exit with reason reviewer-commit-aborted-head-moved", async () => {
+    const h = harness({ ghHandler: rcGh("d".repeat(40)), phase: cannedPhase({ ...FAIL_CANNED, reviewerCommit: COMMIT_A }) });
+    await assert.rejects(runRoute({ ...ROUTE_OPTS, reviewerCommitAborted: true }, readyPre(), h.ports, realDeps()), /head moved/);
+    assert.equal(h.writes().length, 1);
+    assert.match(argAfter(h.writes()[0] as string[], "--body") as string, /reason=reviewer-commit-aborted-head-moved/);
+  });
+
+  test("the two pass-2 flags are mutually exclusive, exclude --defer, and --reviewer-fixed needs a 40-hex sha (UsageError)", async () => {
+    const h = harness({ ghHandler: withState("OPEN"), phase: cannedPhase(FAIL_CANNED) });
+    await assert.rejects(runRoute({ ...ROUTE_OPTS, reviewerFixed: NEW_HEAD, reviewerCommitAborted: true }, readyPre(), h.ports, realDeps()), /mutually exclusive/);
+    await assert.rejects(runRoute({ ...ROUTE_OPTS, reviewerFixed: NEW_HEAD, defer: true }, readyPre(), h.ports, realDeps()), /cannot be combined with --defer/);
+    await assert.rejects(runRoute({ ...ROUTE_OPTS, reviewerCommitAborted: true, defer: true }, readyPre(), h.ports, realDeps()), /cannot be combined with --defer/);
+    await assert.rejects(runRoute({ ...ROUTE_OPTS, reviewerFixed: "abc123" }, readyPre(), h.ports, realDeps()), /40-hex/);
+    assert.equal(h.writes().length, 0, "usage errors post nothing");
+  });
+
+  test("a throwing reviewer-commit phase never takes the verdict down: the original FAIL routes and the miss is degraded", async () => {
+    const inner = cannedPhase(FAIL_CANNED);
+    const h = harness({ ghHandler: withState("OPEN"), phase: async (p, input) => { if (p === "reviewer-commit") throw new Error("engine down"); return inner(p, input); } });
+    const r = await runRoute(ROUTE_OPTS, readyPre(), h.ports, realDeps());
+    assert.equal(r.verdict, "FAIL");
+    assert.ok(r.degraded.includes("reviewer-commit"));
   });
 });
