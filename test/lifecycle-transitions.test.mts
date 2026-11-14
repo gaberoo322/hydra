@@ -23,6 +23,13 @@ import {
 } from "../src/lifecycle/index.ts";
 import { RELABEL_TARGETS } from "../src/schemas/autopilot-board.ts";
 
+describe("transition table rows added for the writer migration (#5318 INV-10)", () => {
+  test("blocked -> needs-qa exists exactly once: reconcile-fired, gated on an open PR", () => {
+    const rows = TRANSITIONS.filter((t) => t.from === "blocked" && t.to === "needs-qa");
+    assert.deepEqual(rows, [{ from: "blocked", to: "needs-qa", firedBy: "reconcile", gate: "pr-open" }]);
+  });
+});
+
 describe("lifecycle state set (INV-1)", () => {
   test("is exactly the 13 open states plus closed", () => {
     assert.deepEqual([...LIFECYCLE_STATES].sort(), [

@@ -150,6 +150,8 @@
     "test/sync-target-gate.test.mts": "behaviour",
     "test/systemd-notify-failure-unit.test.mts": "grandfathered",
     "test/target-board-labels.test.mts": "grandfathered",
+    "test/target-capabilities.test.mts": "drift-guard",
+    "test/target-playbook-capability-branches.test.mts": "drift-guard",
     "test/target-coupling-check.test.mts": "grandfathered",
     "test/target-design-concept.test.mts": "grandfathered",
     "test/target-qa-verdict.test.mts": "grandfathered",

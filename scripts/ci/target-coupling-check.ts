@@ -85,7 +85,7 @@ import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { loadJsonBaseline, writeJsonBaseline } from "./seam-check-lib.ts";
+import { isCliEntrypoint, loadJsonBaseline, writeJsonBaseline } from "./seam-check-lib.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -657,10 +657,14 @@ async function main(): Promise<number> {
   return 0;
 }
 
-main().then(
-  code => process.exit(code),
-  err => {
-    console.error("[target-coupling-check] crash:", err);
-    process.exit(2);
-  },
-);
+// Guarded so importing the pure exports (classifyFile, HISTORICAL_EXEMPT_RE)
+// never runs the scan, exits the importer, or honours its --write-baseline.
+if (isCliEntrypoint(import.meta.url)) {
+  main().then(
+    code => process.exit(code),
+    err => {
+      console.error("[target-coupling-check] crash:", err);
+      process.exit(2);
+    },
+  );
+}

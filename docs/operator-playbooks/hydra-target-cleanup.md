@@ -12,11 +12,37 @@ arguments: [apply]
 
 @include _fragments/target-seam-preamble.md
 
-`hydra-target-cleanup` is the **Target mirror of `/hydra-cleanup`**: a non-interactive, deterministic dead-code detector for **`$TARGET_WS`**. It runs `knip` over `$TARGET_APP_DIR`, filters the findings down to the **demote-only** class the Target's own policy authorises, and files each surviving file as a **GitHub issue on `$TARGET_GH_REPO`** (ADR-0031 — the Target tracker is now the GitHub-Issues board, exactly like the orch sweep, not the retired Redis backlog) whose acceptance criterion is self-checking: *"drop the `export` keyword AND `npm test` / `npm run typecheck` / `npm run deadcode:check` still pass with a tightened baseline"*. Filing is `gh issue create --repo $TARGET_GH_REPO`, deduped by a lexical `gh issue list --search` against the open board (ADR-0031 Decision 5 — lexical, not the retired OpenViking (retired, ADR-0033) semantic dedup).
+`hydra-target-cleanup` is the **Target mirror of `/hydra-cleanup`**: a non-interactive, deterministic dead-code detector for **`$TARGET_WS`**. It runs `knip` over `$TARGET_APP_DIR`, filters the findings down to the **demote-only** class the Target's own policy authorises, and files each surviving file as a **GitHub issue on `$TARGET_GH_REPO`** (ADR-0031 — the Target tracker is now the GitHub-Issues board, exactly like the orch sweep, not the retired Redis backlog) whose acceptance criterion is self-checking: *"drop the `export` keyword AND `npm test` / `npm run typecheck` / the Target's dead-code check (`$TARGET_CAP_DEADCODE_CHECK`) still pass with a tightened baseline"*. Filing is `gh issue create --repo $TARGET_GH_REPO`, deduped by a lexical `gh issue list --search` against the open board (ADR-0031 Decision 5 — lexical, not the retired OpenViking (retired, ADR-0033) semantic dedup).
 
-It is **step 2 of the Target dead-code cleanup plan** (step 1 — the deadcode ratchet + CLAUDE.md policy). The Target accumulates dead exports structurally: Hydra builds modules with tests first and wires them into runtime later, so knip-with-tests-as-usage findings are the high-confidence, mechanically-verifiable backlog this skill drains.
+It is **step 2 of the Target dead-code cleanup plan** (step 1 — the Target's dead-code ratchet + policy). The Target accumulates dead exports structurally: Hydra builds modules with tests first and wires them into runtime later, so knip-with-tests-as-usage findings are the high-confidence, mechanically-verifiable backlog this skill drains.
 
-> Historical: step 1 shipped as hydra-betting PR #93 (~440 findings at the 2026-06-10 baseline) — the archived Target's own history, kept for provenance only.
+## Capability gate (issue #5498 — run before Step 1)
+
+This skill assumes the Target ships a dead-code ratchet. The seam preamble
+reports whether it does: `$TARGET_CAP_DEADCODE_CHECK` / `$TARGET_CAP_DEADCODE_UPDATE`
+(the Target's npm script names), `$TARGET_CAP_DEADCODE_BASELINE` (baseline path
+relative to `$TARGET_WS`) and, for the wire-or-retire phase,
+`$TARGET_CAP_WIRING_LEDGER` + `$TARGET_CAP_WIRING_LEDGER_GENERATOR`. Each phase
+branches on its own capability and prints an explicit skip when it is absent:
+
+```bash
+DEMOTE_PHASE=1; WIRE_PHASE=1
+if [ -z "$TARGET_CAP_DEADCODE_CHECK" ] || [ -z "$TARGET_CAP_DEADCODE_UPDATE" ]; then
+  DEMOTE_PHASE=0
+  echo "demote-emit phase: skipped (Target declares no dead-code check/baseline-update script)"
+fi
+if [ -z "$TARGET_CAP_KNIP_CONFIG" ]; then
+  DEMOTE_PHASE=0
+  echo "knip: skipped (Target carries no knip config)"
+fi
+if [ -z "$TARGET_CAP_WIRING_LEDGER" ] && [ -z "$TARGET_CAP_WIRING_LEDGER_GENERATOR" ]; then
+  WIRE_PHASE=0
+  echo "wire-or-retire phase: skipped (Target declares no wiring ledger or generator)"
+fi
+```
+
+Run Steps 1-2 only when `DEMOTE_PHASE=1` and section 3.5 only when `WIRE_PHASE=1`. A skipped phase files nothing and the run continues with the other phase; when
+both are skipped the run reports both lines and exits cleanly.
 
 ## How this differs from `/hydra-cleanup` (the orch sweep)
 
@@ -25,24 +51,24 @@ It is **step 2 of the Target dead-code cleanup plan** (step 1 — the deadcode r
 | Surface | `~/hydra` | `$TARGET_APP_DIR` |
 | Findings sink | GitHub issues (`gaberoo322/hydra`) | GitHub issues (`$TARGET_GH_REPO`) via `gh issue create` (labels `cleanup-scan` + `ready-for-agent`) — ADR-0031 |
 | Fix classes emitted | demote AND delete (classified per finding) | **demote ONLY** — delete-class and whole-file findings are dropped and deferred to the wire-or-retire phase |
-| Grace period | none | **45-day wiring grace, 90-day introduction ceiling** (Target CLAUDE.md rule 3): a finding defers only when its file is BOTH touched within 45 days AND introduced within 90 days (issue #3727 — the ceiling makes the gate monotonic, since a relocation/docs/cleanup commit can reset the touch clock but never the introduction date) |
-| Item granularity | one issue per finding | **one backlog item per FILE** (all demote-class symbols batched) — `addToBacklog()` fuzzy-title dedup rejects near-identical per-symbol titles, and the picker ships one small PR per file anyway |
+| Grace period | none | **45-day wiring grace, 90-day introduction ceiling** (the Target's own cleanup policy, when `$TARGET_CAP_AGENT_INSTRUCTIONS` names one): a finding defers only when its file is BOTH touched within 45 days AND introduced within 90 days (issue #3727 — the ceiling makes the gate monotonic, since a relocation/docs/cleanup commit can reset the touch clock but never the introduction date) |
+| Item granularity | one issue per finding | **one backlog item per FILE** (all demote-class symbols batched) — near-identical per-symbol titles would collide in the lexical title dedup, and the picker ships one small PR per file anyway |
 | Picked up by | `hydra-dev` | `hydra-target-build` (a normal `dev_target` pickup) |
 
 Everything else mirrors the orch sweep deliberately: deterministic detection (knip's output, never the model's guess), a deterministic emit runner (never a hand-rolled loop — the #1449 lesson), an identity-keyed dedup against the open board, a per-run cap, and a saturation back-stop.
 
 ## Why demote-only is safe (and the Target policy that gates it)
 
-The Target's `CLAUDE.md` forbids ad-hoc cleanup commits, with one carve-out (rule 3): a cleanup commit citing a `npm run deadcode` finding, in code untouched for 45+ days, scoped to the finding — and `<target>/src/lib/providers/` is **demote-only** (rule 1 forbids deleting provider files, not demoting visibility). This skill emits only work that satisfies the carve-out by construction:
+A Target's agent-instruction file (`$TARGET_CAP_AGENT_INSTRUCTIONS`, when present — read it, never assume its rule numbering) may forbid ad-hoc cleanup commits with a carve-out for a commit that cites a dead-code finding in code untouched for 45+ days and is scoped to the finding, and may mark some source areas demote-only. This skill emits only work that satisfies such a carve-out by construction, whatever the Target declares:
 
 - `classifyExportFix()` (shared with the orch sweep) keeps a finding only when the symbol is **still referenced within its own file** — so dropping the `export` keyword compiles by construction and changes no behavior.
 - knip runs with tests-as-usage, so an emitted symbol has **no importer anywhere, not even a test** — demoting it cannot break the suite.
-- The Target's deadcode ratchet (`npm run deadcode:check`, CI-gated) pins each demote: the picked-up PR tightens `web/deadcode-baseline.json`, so the improvement is locked in.
+- The Target's dead-code ratchet (`$TARGET_CAP_DEADCODE_CHECK`, CI-gated) pins each demote: the picked-up PR tightens the baseline at `$TARGET_CAP_DEADCODE_BASELINE`, so the improvement is locked in.
 
 ## What this skill is NOT
 
 - **NOT a code-writer.** It never edits the Target, never opens a PR. The actual demote is a later `hydra-target-build` pickup of the backlog item it files.
-- **NOT a deleter.** It emits zero deletions — not of exports, not of files, not in `<target>/src/lib/providers/`, not anywhere. Delete-class export findings are counted in the report and deferred; module-level retirements only ever happen downstream of a wire-or-retire decision item that triage explicitly resolved to RETIRE (and `ready-for-human` when intent is unclear).
+- **NOT a deleter.** It emits zero deletions — not of exports, not of files, not in any Target area, not anywhere. Delete-class export findings are counted in the report and deferred; module-level retirements only ever happen downstream of a wire-or-retire decision item that triage explicitly resolved to RETIRE (and `ready-for-human` when intent is unclear).
 - **NOT interactive.** Zero `AskUserQuestion` calls.
 - **NOT a heuristic pass.** Findings are whatever `knip` reports; the classification is `classifyExportFix()` on the symbol's own source. Never file a "this looks dead" finding the tool didn't report.
 
@@ -74,14 +100,18 @@ git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" merge-
   || { echo "hydra-target-cleanup: working tree not fast-forwardable onto origin/main — aborting (stale/diverged base)"; exit 1; }
 ```
 
-Then run knip in the Target's app workspace (knip is a Target devDependency; `knip.json` in `$TARGET_APP_DIR` is the committed config):
+Then run knip in the Target's app workspace (knip is a Target devDependency; its committed config is `$TARGET_CAP_KNIP_CONFIG`, relative to `$TARGET_WS` — when empty the knip step is a real skip, not a run against defaults):
 
 ```bash
 _target_seam_sh="$(cd "$HOME/hydra" && npx tsx scripts/target/print-target-facts.ts --sh)" \
   || { echo "hydra-target-cleanup: target seam unresolved — aborting" >&2; exit 1; }
 eval "$_target_seam_sh"; unset _target_seam_sh
-cd "${TARGET_APP_DIR:?unset - re-run the seam preamble in this Bash call}" \
-  && npx knip --reporter json --no-exit-code > /tmp/knip-target-report.json 2>/dev/null || true
+if [ -n "$TARGET_CAP_KNIP_CONFIG" ]; then
+  cd "${TARGET_APP_DIR:?unset - re-run the seam preamble in this Bash call}" \
+    && npx knip --reporter json --no-exit-code > /tmp/knip-target-report.json 2>/dev/null || true
+else
+  echo "knip: skipped (Target carries no knip config) — demote-emit phase files nothing"
+fi
 ```
 
 If knip is not installed, print a one-line hint (`npm ci` in `$TARGET_APP_DIR`) and exit cleanly — do NOT fall back to a heuristic scan.
@@ -108,13 +138,13 @@ The runner (`planTargetCleanupEmit()`, pure + tested) owns the whole pipeline:
 4. **Group per file**, dedup per file against the open `cleanup-scan` board (identity = the path parsed from the canonical title; the board read is a lexical `gh issue list --search` on `$TARGET_GH_REPO`, ADR-0031 Decision 5/6 — REST-first, never `gh --json`/GraphQL), cap at 8 files per run, largest demote batch first.
 5. **Render** title + body from the same group in one pass (the #1449/#1005 drift guard) and file via `gh issue create --repo $TARGET_GH_REPO --label cleanup-scan --label ready-for-agent`.
 
-Every emitted item carries labels **`cleanup-scan` + `ready-for-agent`** (the label is the saturation/dedup count seam; the routing is the confidence decision — the acceptance check is deterministic, so no triage gate is needed) and instructs the picker to: demote each listed symbol, run `npm test` + `npm run typecheck`, run `npm run deadcode:update-baseline`, and commit with the scan citation the Target's CLAUDE.md rule 3 requires.
+Every emitted item carries labels **`cleanup-scan` + `ready-for-agent`** (the label is the saturation/dedup count seam; the routing is the confidence decision — the acceptance check is deterministic, so no triage gate is needed) and instructs the picker to: demote each listed symbol, run `npm test` + `npm run typecheck`, run the Target's baseline-update script (`$TARGET_CAP_DEADCODE_UPDATE`), and commit with the scan citation the Target's cleanup policy requires.
 
 ### 3.5 Wire-or-retire decision items (the judgment phase — step 4 of the plan)
 
-After the demote emit, run the second deterministic emitter. Its input is the Target's **committed wiring-status ledger** (`<target>/docs/agents/wiring-status.md`, generated Target-side by `npm run deadcode:ledger`). Never regenerate the ledger from this skill: the scan must not mutate the Target's working tree; staleness is handled by each item's verify-first step plus dedup.
+After the demote emit, run the second deterministic emitter. Its input is the Target's **committed wiring-status ledger** (`$TARGET_CAP_WIRING_LEDGER`, relative to `$TARGET_WS`, generated Target-side by its `$TARGET_CAP_WIRING_LEDGER_GENERATOR` script). Never regenerate the ledger from this skill: the scan must not mutate the Target's working tree; staleness is handled by each item's verify-first step plus dedup.
 
-> Historical: this ledger command shipped as hydra-betting PR #98 — the archived Target's own history, kept for provenance only.
+When the capability gate reported the wiring phase skipped, do not run the emitter below. The emitter additionally re-checks the Target itself and prints its own skip line (`Target declares no wiring ledger ... nothing filed`) when neither a ledger nor a generator exists.
 
 ```bash
 # Dry-run (prints the plan, files nothing):
@@ -126,7 +156,7 @@ npx tsx scripts/ci/hydra-target-wire-or-retire-emit.ts --apply
 
 The runner (`planWireOrRetireEmit()`, pure + tested) keeps only ledger rows with status `wire-or-retire` (modules past the 45-day grace with no runtime importer — `awaiting-wiring` and `protected-provider` rows are never eligible), dedups per module against open `wire-or-retire`-labelled issues (lexical `gh issue list --search` on the Target repo), caps at **3 per run** (oldest last-touched first; saturation back-stop at 5 open items), and files each via `gh issue create --repo $TARGET_GH_REPO --label needs-triage --label wire-or-retire`, rendering title + body from the same row.
 
-**Confidence routing — this is the judgment half of the gate.** Where a demote is mechanically verifiable (→ `ready-for-agent`), wire-vs-retire is an *opinion*: the module was built with intent that either stalled or died, and deciding which requires recovering that intent. So these items file with **`needs-triage` + `wire-or-retire`** labels (mirroring how `hydra-architecture-scan` routes judgment candidates on the orch side), and `hydra-wire-or-retire` (autonomous) / `/hydra-review` (operator, per-Target drain) resolve them off the board. The issue body carries the three-way decision protocol for the resolver or operator: **(a) WIRE** — intent live → relabel `ready-for-agent` with a concrete wiring task; **(b) RETIRE** — intent gone → relabel `ready-for-agent` with a retirement task citing the scan (Target CLAUDE.md rule 3); **(c) UNCLEAR** — relabel `ready-for-human` and stop. **Ambiguity never resolves to deletion** (rule 6); nothing is deleted while an issue carries `wire-or-retire` + `needs-triage`.
+**Confidence routing — this is the judgment half of the gate.** Where a demote is mechanically verifiable (→ `ready-for-agent`), wire-vs-retire is an *opinion*: the module was built with intent that either stalled or died, and deciding which requires recovering that intent. So these items file with **`needs-triage` + `wire-or-retire`** labels (mirroring how `hydra-architecture-scan` routes judgment candidates on the orch side), and `hydra-wire-or-retire` (autonomous) / `/hydra-review` (operator, per-Target drain) resolve them off the board. The issue body carries the three-way decision protocol for the resolver or operator: **(a) WIRE** — intent live → relabel `ready-for-agent` with a concrete wiring task; **(b) RETIRE** — intent gone → relabel `ready-for-agent` with a retirement task citing the scan (the Target's cleanup policy); **(c) UNCLEAR** — relabel `ready-for-human` and stop. **Ambiguity never resolves to deletion** (fail closed); nothing is deleted while an issue carries `wire-or-retire` + `needs-triage`.
 
 **Pairing invariant (this is additive, not a swap).** This emit path is the only place `wire-or-retire` is ever added, and it is always added *together with* `needs-triage` in the same `gh issue create` call above — never onto an item that lacks `needs-triage`, and never as a lane of its own. Once filed, the pair is inert to every board writer except `hydra-wire-or-retire`: `hydra-target-sweep`'s triage step explicitly exempts any `wire-or-retire`-carrying item from its auto-promote test rather than stripping `needs-triage` off it (`docs/operator-playbooks/hydra-target-sweep.md` Step 2), and `hydra-wire-or-retire`'s own work-finding query requires co-presence of both labels (`docs/operator-playbooks/hydra-wire-or-retire.md`), so only this resolver can retire the pairing.
 
@@ -138,7 +168,7 @@ hydra-target-cleanup-emit — Target ($TARGET_APP_DIR) — <ISO> — apply
 knip raw findings:   441
 After filter+dedup:  8 file-items to emit (cap 8)
 Dropped findings:    433
-• cleanup(target): demote `SomeExportedSymbol` +6 more in src/lib/providers/example-client.ts  [7 demote(s), file 51d old]
+• cleanup(target): demote `SomeExportedSymbol` +6 more in src/lib/example-client.ts  [7 demote(s), file 51d old]
 ...
 dropped 210: delete-class (no in-file reference) — deferred to wire-or-retire
 dropped 180: within the 45-day wiring grace period (...)
@@ -148,7 +178,7 @@ dropped 180: within the 45-day wiring grace period (...)
 ## Rules
 
 - **Zero `AskUserQuestion`.**
-- **Demote-only.** This skill never emits a deletion of any kind. `<target>/src/lib/providers/` is demote-only by Target rule 1; this sweep treats the whole Target that way.
+- **Demote-only.** This skill never emits a deletion of any kind. Some Targets mark areas demote-only in their own policy file; this sweep treats the whole Target that way.
 - **45-day wiring grace with a 90-day introduction ceiling, fail closed (issue #3727).** Unknown last-touch age is never swept. A file only defers on grace when BOTH recently touched AND young by introduction (unknown introduction still defers) — this makes the gate monotonic against relocation/docs/cleanup commits that reset only the last-touch date.
 - **Deterministic detection + emit.** knip's report through the tested runner — never a hand-rolled loop, never a model guess.
 - **GitHub Issues, not Redis (ADR-0031).** The Target's tracker is the GitHub-Issues board on `$TARGET_GH_REPO`; items are filed with `gh issue create` and dedup/saturation reads use lexical `gh issue list --search` (REST-first, never `gh --json`/GraphQL).
@@ -162,7 +192,7 @@ dropped 180: within the 45-day wiring grace period (...)
 /hydra-target-cleanup --apply    # files ready-for-agent backlog items
 ```
 
-Expected: demote-class findings batch one-item-per-file with the symbol-led title; delete-class/whole-file/young/unknown findings appear only in the drop summary; re-running `--apply` files nothing new for paths already open (file-keyed dedup, plus `addToBacklog`'s exact-title dedup as belt-and-braces); a saturated board (>10 open `cleanup-scan` items) emits nothing. Pinned in `test/hydra-target-cleanup-emit.test.mts`.
+Expected: demote-class findings batch one-item-per-file with the symbol-led title; delete-class/whole-file/young/unknown findings appear only in the drop summary; re-running `--apply` files nothing new for paths already open (file-keyed dedup); a saturated board (>10 open `cleanup-scan` items) emits nothing. Pinned in `test/hydra-target-cleanup-emit.test.mts`.
 
 ## Files
 
@@ -172,10 +202,10 @@ Expected: demote-class findings batch one-item-per-file with the symbol-led titl
 - `test/hydra-target-wire-or-retire-emit.test.mts` — ledger parse, eligibility (only wire-or-retire rows), dedup, cap, decision-protocol rendering, fail-closed ambiguity.
 - `scripts/ci/hydra-cleanup-render.ts` — shared pure helpers (`parseKnipReport`, `validateFinding`, `classifyExportFix`).
 - `scripts/ci/hydra-knip-source.ts` — the shared knip-report source loader (issue #4523): `loadKnipReport()` (exists → staleness → parse, Result-shaped, never throws) + `KNIP_REPORT_MAX_AGE_MS`. Shared with `scripts/ci/hydra-cleanup-emit.ts` (Orchestrator) so the #1766 staleness guard is lane-symmetric.
-- `test/hydra-target-cleanup-emit.test.mts` — demote-only filter, grace gate, per-file batching, dedup, cap, title/body coherence, fuzzy-dedup title diversity.
+- `test/hydra-target-cleanup-emit.test.mts` — demote-only filter, grace gate, per-file batching, dedup, cap, title/body coherence, title diversity.
 - `scripts/autopilot/decide.py` — the `cleanup_target` signal class + selector that dispatches this skill.
 - The Turn Snapshot collectors (`src/autopilot/turn-snapshot/`) — emit `target_backfill_idle` + `target_cleanup_board_saturated`.
-- `$TARGET_WS/CLAUDE.md` — the Target policy this sweep enforces (rule 3 carve-out, rule 1 demote-only providers, the deadcode ratchet section).
+- `$TARGET_CAP_AGENT_INSTRUCTIONS` (relative to `$TARGET_WS`, when present) — the Target policy this sweep enforces (its cleanup carve-out, demote-only areas, and dead-code ratchet section). When empty, the Target declares no policy file: this sweep stays demote-only regardless.
 
 ## Tier
 

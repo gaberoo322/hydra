@@ -2,15 +2,14 @@
   "rule": "lifecycle-seam",
   "note": "Shrink-only ratchet (ADR-0047, #5311): per-file count of direct lifecycle state-label write sites. Never raise a row; migrate the site to scripts/lifecycle.ts then run: npx tsx scripts/ci/lifecycle-seam-check.ts --shrink-baseline",
   "files": {
-    "scripts/autopilot/reap_stall.py": 13,
-    "scripts/autopilot/recover-stale.sh": 4,
+    "scripts/autopilot/reap_stall.py": 2,
     "scripts/ci/hydra-cleanup-emit.ts": 1,
     "scripts/ci/hydra-target-cleanup-emit.ts": 2,
     "scripts/ci/hydra-target-wire-or-retire-emit.ts": 2,
     "scripts/qa/pair-graduation.ts": 1,
-    "src/glm/finish.ts": 6,
+    "src/glm/finish.ts": 1,
     "src/operator-actions/registry.ts": 6,
-    "src/pattern-memory/escalation.ts": 2,
+    "src/pattern-memory/escalation.ts": 1,
     "src/scheduler/chores/glm-eligibility-sweep.ts": 1,
     "src/scheduler/chores/wiring-liveness-dark-alarm.ts": 1
   }

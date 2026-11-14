@@ -373,4 +373,4 @@ Going forward, auto-merge `--delete-branch` (enabled 2026-05-28) prevents new zo
 
 ## Tier
 
-Tier 2 (new automation; new test). No Untouchable Core changes — verified against `src/untouchable.ts`. The live tier classifier is the authoritative answer; the PR body carries `Tier:` from the API.
+Tier 2 (new automation; new test). No Verifier Core changes — verified against `src/untouchable.ts`. The live tier classifier is the authoritative answer; the PR body carries `Tier:` from the API.

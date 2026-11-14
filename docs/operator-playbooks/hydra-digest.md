@@ -39,7 +39,10 @@ gh issue list --repo gaberoo322/hydra --state open --limit 200 \
   --json labels --jq '[.[] | .labels[].name] | group_by(.) | map({(.[0]): length}) | add'
 docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:work-queue
 
-cd ~/hydra-betting && git log --oneline --since="24 hours ago"
+# Target commits -- resolved via the Target seam, never a literal checkout path.
+unset TARGET_WS TARGET_APP_DIR
+eval "$(cd ~/hydra && npx tsx scripts/target/print-target-facts.ts --sh)"
+if [ -n "${TARGET_WS:-}" ]; then git -C "${TARGET_WS:?}" log --oneline --since="24 hours ago"; else echo "Target unresolved -- skipping Target commits"; fi
 cd ~/hydra && git log --oneline --since="24 hours ago"
 
 hydra alerts ls --limit 20
@@ -193,12 +196,11 @@ For each cycle in period:
 - merged = `tasksMerged > 0`
 - failed = `tasksFailed > 0`
 - empty = title starts with "Planner produced no task" or "Skipped:"
-- rolled_back = `rolledBack == true`
 - cost = `costUsd`
 - test_delta = `testsAfter - testsBefore`
-- anchor_type, source
+- anchor_type
 
-Aggregate: total_cycles, merged_count, failed_count, empty_count, rollback_count, merge_rate, total_cost, cost_per_merge, test_growth, top_anchor_types. Split by source (Codex rows predate its ADR-0006 retirement). Collect merged_titles for highlight reel.
+Aggregate: total_cycles, merged_count, failed_count, empty_count, merge_rate, total_cost, cost_per_merge, test_growth, top_anchor_types. Collect merged_titles for highlight reel.
 
 ### 3. Format
 
@@ -215,7 +217,6 @@ Aggregate: total_cycles, merged_count, failed_count, empty_count, rollback_count
 | Merged | N (X%) |
 | Failed | N |
 | Empty (no task) | N (X%) |
-| Rolled back | N |
 | Total cost | $X.XX |
 | Cost per merge | $X.XX |
 
@@ -238,12 +239,6 @@ to ~13% — do NOT rank classes on it; re-fetch the default (no-date)
 `transcript-24h` arm. `Quota weight` is 0 when the per-family weight env is
 uncalibrated — read it as a raw-token ranking then, not a quota ranking.>
 
-### By Source
-| Source | Cycles | Merged | Rate |
-|--------|--------|--------|------|
-| Codex | N | N | X% |
-| Claude Code | N | N | X% |
-
 ### Test Suite
 | Metric | Value |
 |--------|-------|
@@ -260,13 +255,14 @@ uncalibrated — read it as a raw-token ranking then, not a quota ranking.>
 ### Backlog Flow
 | Lane | Count |
 |------|-------|
-| Work queue | N |
-| Queued | N |
-| In progress | N |
-| Blocked | N |
-| Triage | N |
-| Prior failures | N |
-| Reframe | N |
+| `needs-triage` | N |
+| `ready-for-agent` | N |
+| `in-progress` | N |
+| `blocked` | N |
+| `needs-qa` | N |
+| Work queue (`hydra:anchors:work-queue`) | N |
+| Prior failures (`hydra:anchors:prior-failures`) | N |
+| Reframe (`hydra:anchors:reframe-queue`) | N |
 
 ### Kill-chain (dead-code kill-chain #2720)
 | Signal | Value |

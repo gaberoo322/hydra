@@ -185,6 +185,41 @@ describe("decide.py - Fable instant-death replay (#5323)", () => {
     assert.ok(plan.reasons.includes("instant-death-replay-suppressed:dev_target:usage_dispatch_blocked"), plan.reasons.join());
   });
 
+  test("a burned class is not replayed; the skip names the burned gate and the reap survives (#5479)", () => {
+    const { plan } = decide(baseState({ burned_classes: ["dev_target"] }), [death()]);
+    assert.equal(replays(plan).length, 0);
+    assert.ok(plan.reasons.includes("instant-death-replay-suppressed:dev_target:burned"), plan.reasons.join());
+    assert.ok(plan.actions.some((a: any) => a.type === "reap" && a.slot === "dev_target"), "the reap is still emitted");
+  });
+
+  test("a scope-excluded class is not replayed; the skip names the scope_excluded gate (#5479)", () => {
+    const st = baseState();
+    st.limits.scope = "orch-only";
+    const { plan } = decide(st, [death()]);
+    assert.equal(replays(plan).length, 0);
+    assert.ok(plan.reasons.includes("instant-death-replay-suppressed:dev_target:scope_excluded"), plan.reasons.join());
+    assert.ok(plan.actions.some((a: any) => a.type === "reap" && a.slot === "dev_target"), "the reap is still emitted");
+  });
+
+  test("an orch-realm class over its weekly share is not replayed; the skip names orch_realm_share_exceeded and the reap survives (#5479 INV-3)", () => {
+    const mk = (share: number) => {
+      const st = baseState({
+        slots: { dev_target: null },
+        signals: { orch_realm_weekly_share: share },
+        last_dispatch_by_class: { retro_orch: { turn: 2, skill: "hydra-retro", prompt_args: {}, worktreeBranch: BRANCH } },
+      });
+      st.limits.orch_realm_weekly_share_cap = 0.5;
+      return st;
+    };
+    const over = decide(mk(0.9), [death({ slot: "retro_orch" })]).plan;
+    assert.equal(over.actions.filter((a: any) => a.type === "dispatch" && a.slot === "retro_orch").length, 0);
+    assert.ok(over.reasons.includes("instant-death-replay-suppressed:retro_orch:orch_realm_share_exceeded"), over.reasons.join());
+    assert.ok(over.actions.some((a: any) => a.type === "reap" && a.slot === "retro_orch"), "the reap is still emitted");
+    // Sibling shape: under the cap the same orch class still replays.
+    const under = decide(mk(0.1), [death({ slot: "retro_orch" })]).plan;
+    assert.equal(under.actions.filter((a: any) => a.type === "dispatch" && a.slot === "retro_orch").length, 1, under.reasons.join());
+  });
+
   test("an `inherit` class has no dispatch_model on the reap action", () => {
     const st = baseState({
       slots: { dev_target: null },

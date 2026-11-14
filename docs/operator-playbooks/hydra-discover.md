@@ -193,12 +193,11 @@ Include the cited `impactPerCost` (and the flags) verbatim in any finding's
 Evidence section.
 
 ### 2b. Cost & efficiency
-From metrics: cost/merged feature, cost of empty cycles, plan cache hit rate, grounding duration trend, thread reuse rate.
+From metrics: cost/merged feature, cost of empty cycles.
 
 Alerts:
 - Cost/merge >$5 → efficiency finding
 - Empty-cycle cost >30% of total → waste finding
-- Grounding duration up >20% over 20 cycles → performance finding
 
 ### 2c. Backlog & queue health
 ```bash
@@ -363,7 +362,7 @@ Otherwise log in summary, don't create.
 Tier 3:
 ```
 [hydra-discover] Tier 1+2+3 (iteration N). Deep dive triggered by: high empty rate.
-  Explored: anchor-selection.ts, planner-prompt.ts, codex-runner.ts
+  Explored: <files explored>
   Research: classifier cascade techniques (3 sources)
   Findings: 1 arch (planner context missing anchor-type-specific enrichment)
   Created: #48. Skipped: 0.

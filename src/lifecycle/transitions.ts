@@ -117,6 +117,8 @@ export const TRANSITIONS: readonly Transition[] = [
   { from: "ready-for-agent", to: "ready-for-human", firedBy: "agent", gate: "adr5" },
   { from: "ready-for-agent", to: "closed", firedBy: "agent", gate: "close" },
   { from: "blocked", to: "ready-for-agent", firedBy: "reconcile", gate: "unblocked" },
+  // A stale blocked issue with an open PR goes straight to review (#4806, #5318 INV-10).
+  { from: "blocked", to: "needs-qa", firedBy: "reconcile", gate: "pr-open" },
   ...rows("blocked", "agent", "judgment", ["needs-triage", "parked"]),
   { from: "blocked", to: "closed", firedBy: "agent", gate: "close" },
   // Work in flight.

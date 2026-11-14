@@ -167,6 +167,14 @@ jobs:
       # the map rendered a checked-in snapshot and could never reflect live
       # state, which is why the whole surface died.
 
+      # ── never-throw-scan (issue #5490) ─────────────────────────────────────
+      # STD-VERIFY-NEVER-THROW: a function whose own doc claims never-throw must
+      # not leak an await/throw/known-thrower call outside a try/catch. Shrink-only
+      # baseline scripts/ci/never-throw-baseline.json; advisory (not in ci.yml).
+      - name: Never-throw scan (STD-VERIFY-NEVER-THROW ratchet, #5490)
+        if: always()
+        run: npx tsx scripts/ci/never-throw-scan.ts
+
       # ── coupling-check (issue #731) ────────────────────────────────────────
       # Target-coupling gate (ADR-0013 swap-seam guard). Fails on any NEW
       # hardcoded target reference in src/. Includes a classifier self-test.
