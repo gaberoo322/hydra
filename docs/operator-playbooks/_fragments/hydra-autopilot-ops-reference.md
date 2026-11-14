@@ -8,7 +8,7 @@ state loss, or merge-rate anomaly.
 
 
 - Wrong dispatch for a class → `decide.py:_select_for_slot` / `_select_for_signal`
-- Tier-0 non-mechanical PR merged anyway → INV-001 violation; run log
+- PR merged without a PASS verdict → the merge-verdict invariant documented in the `assert_invariants.py` docstring; run log
 - Burned class still got dispatched → INV-003; `burned_classes` in `state.json`
 - Failure pattern keeps retrying → `self_heal.py` + `state.failure_log` + Phase 3 backstop
 - A subagent in flight wedged → Phase 2 reap or `subagent-hard-max-tokens`
@@ -24,10 +24,9 @@ run — `pid`, `turn`, `dispatches`, `slots`, `burned_classes`
 (the concurrent-run PID guard and the #1352 slot re-seeding DEPEND on those
 resetting). Only the **cross-run durable subset** must survive:
 
-- `signal_last_fired` (the per-class cooldown timestamps — the 5 long-cooldown
-  classes `retro_orch` / `architecture_orch` / `cleanup_orch` / `scout_orch` /
-  `wire_or_retire_target` (the last added by #2722) are the load-bearing ones;
-  the 5 always-on classes re-arm to 0 each run by design). It also carries the
+- `signal_last_fired` (the per-class cooldown timestamps — the long-cooldown
+  classes, i.e. the `classes.json` rows with a large `cooldownSeconds`, are the
+  load-bearing ones; the short-cooldown classes re-arm to 0 each run by design). It also carries the
   `research_target` **pipeline re-fire stamp** (#4611) — decide.py writes it at
   plan time to enforce that slot's 6h minimum re-fire interval
   (`HYDRA_RESEARCH_TARGET_REFIRE_SEC`), and bootstrap carries it forward with
@@ -228,8 +227,7 @@ is older than `subagent_max_wall_seconds` (default `3600`, env override
 `reap.py wait-or-reap <slot> <task_id>` from the playbook's `wait_or_reap`
 action-table row (liveness by transcript mtime, then the forced reap). A transcript `stat()` failure stays `verdict=unknown` (no reap) only until the slot has been occupied past `subagent_max_wall_seconds`; after that it is treated as dead and reaped.
 
-`reap.py` survives in the tree but is now the **fallback path**, not
-the primary; see its module docstring.
+`reap.py` is the reap executor: the playbook's `reap` and `wait_or_reap` action rows both call it.
 
 ### Best-effort guarantees
 
@@ -251,7 +249,7 @@ regression test `test/autopilot-hooks.test.mts` enforces this.
 | `HYDRA_AUTOPILOT_SUBAGENT_MAX_WALL_SECONDS` | `3600` | Silent-wedge fallback cap (`decide.py` only) |
 | `HYDRA_AUTOPILOT_DAILY_SPEND_CAP_USD` | `50.0` | **No reader since #5175 (gate removed).** Total daily spend cap (issue #532; bootstrap writes into `state.limits.daily_spend_cap_usd`) |
 | `HYDRA_AUTOPILOT_SCOUT_COST_SHARE` | `0.04` | **No reader since #5175 (gate removed).** Scout slice of the daily cap (issue #532; `0` = kill-switch). Writes `state.limits.scout_cost_share` |
-| `HYDRA_USAGE_5H_THROTTLE_T1` | `0.60` | Graduated 5h-utilization throttle Tier-1 threshold (issue #1087), a fraction in (0,1). At/above this `percentLast5h` (authoritative OAuth meter only), `projectEligibility` sheds the lowest-value pipeline + backfill classes (`research_orch`/`research_target`/`architecture_orch`/`retro_orch`/`cleanup_orch`/`discover_orch`). Inert on the transcript estimate; set-but-invalid → default (fail-loud). Read by `src/cost/usage-tracker.ts` |
+| `HYDRA_USAGE_5H_THROTTLE_T1` | `0.60` | Graduated 5h-utilization throttle Tier-1 threshold (issue #1087), a fraction in (0,1). Inert while the OAuth meter reports no 5h window (none on the current plan). At/above this `percentLast5h` (authoritative OAuth meter only), `projectEligibility` sheds the lowest-value pipeline + backfill classes (`research_orch`/`research_target`/`architecture_orch`/`retro_orch`/`cleanup_orch`/`discover_orch`). Inert on the transcript estimate; set-but-invalid → default (fail-loud). Read by `src/cost/usage-tracker.ts` |
 | `HYDRA_USAGE_5H_THROTTLE_T2` | `0.75` | Tier-2 threshold (issue #1087). At/above this `percentLast5h` it ADDITIONALLY sheds `design_concept_orch` + `dev_orch` (the largest 5h consumer); `qa_*` + `dev_target` are never shed. Mis-set below T1 is clamped up so the T2 cut never inverts. Read by `src/cost/usage-tracker.ts` |
 | `HYDRA_EXTRA_USAGE_POLICY` | `block` | How the admission verdict treats an account with paid overage ("extra usage") armed (issue #4560; the signal is #4075's `reasons.extraUsageArmed`, read off the OAuth meter). `block`: armed → `allow=false` at ANY burn level until it is disabled in the Claude console. `allow`: armed is reported but not folded into `allow` (`reasons.extraUsageBlocking` stays `false`); the 5h/weekly hard-stops are the brake. For an account whose overage is plan-level (not the operator's to switch off) and capped at an insignificant amount. Set-but-invalid → default (fail-loud). Read by `src/cost/config.ts`; `pace-gate.sh` keys its skip arm off `extraUsageBlocking` |
 | `HYDRA_USAGE_EMERGENCY_STOP_PERCENT` | `90` | The 5h + weekly hard-stop threshold, % of a window's quota in (0, 100], that `deriveHardStop` compares the OAuth meter against (issue #4560; the constant is #2041's `EMERGENCY_STOP_PERCENT`). The check runs BETWEEN dispatches and in-flight subagents keep burning after it trips, so keep a margin below 100. Set-but-invalid → default (fail-loud). Read by `src/cost/config.ts` |

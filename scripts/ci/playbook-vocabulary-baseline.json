@@ -15,7 +15,6 @@
     },
     "docs/operator-playbooks/_fragments/hydra-autopilot-phase6-ops.md": {
       "status": 2,
-      "line-cite": 2,
       "avoid-term": 1
     },
     "docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md": {
@@ -41,8 +40,7 @@
     },
     "docs/operator-playbooks/hydra-autopilot.md": {
       "status": 2,
-      "target": 2,
-      "avoid-term": 1
+      "target": 2
     },
     "docs/operator-playbooks/hydra-branch-prune.md": {
       "status": 6

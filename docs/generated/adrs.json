@@ -540,6 +540,7 @@
         "docs/evals.md",
         "docs/operations/watchdog.md",
         "docs/operator-playbooks/hydra-architecture-scan.md",
+        "docs/operator-playbooks/hydra-autopilot.md",
         "docs/operator-playbooks/hydra-epic-sprint.md",
         "docs/operator-playbooks/hydra-qa.md",
         "docs/quality-gates.md",
