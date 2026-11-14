@@ -285,7 +285,7 @@
   "test/hydra-footer.test.mts": 2,
   "test/hydra-hitl-grill-option-table.test.mts": 4,
   "test/hydra-knip-source.test.mts": 1,
-  "test/hydra-pr-rebase.test.mts": 6,
+  "test/hydra-pr-rebase.test.mts": 7,
   "test/hydra-prd-template.test.mts": 12,
   "test/hydra-qa-needs-qa-clear.test.mts": 4,
   "test/hydra-qa-prompt-verdict.test.mts": 9,
