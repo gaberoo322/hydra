@@ -5,7 +5,6 @@
       "route /api/autopilot/inflight"
     ],
     "docs/operator-playbooks/_fragments/hydra-autopilot-phase6-ops.md": [
-      "path src/api/autopilot.ts",
       "superseded-adr 0004"
     ],
     "docs/operator-playbooks/_fragments/hydra-qa-reference.md": [
@@ -15,11 +14,6 @@
     ],
     "docs/operator-playbooks/hydra-architect.md": [
       "path config/direction/goals.md"
-    ],
-    "docs/operator-playbooks/hydra-cleanup.md": [
-      "path .github/workflows/deploy.yml",
-      "path src/digest-format.ts",
-      "path src/digest.ts"
     ],
     "docs/operator-playbooks/hydra-doctor.md": [
       "path docs/agents/wiring-status.md",

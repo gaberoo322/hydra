@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import {
   resolveRolloutSwitches,
+  resolveReviewerCommitsStageFromTexts,
   loadRolloutSwitches,
   COHORT_BASELINE_PATH,
 } from "../src/qa/rollout-switches.ts";
@@ -111,5 +112,19 @@ describe("qa rollout switches", () => {
     const nf = await loadRolloutSwitches("/r", { readFile: mk(enoent) });
     assert.ok(nf.reasons.includes("trip-unreadable"));
     assert.ok(!nf.reasons.includes("trip-read-failed"));
+  });
+});
+
+describe("resolveReviewerCommitsStageFromTexts (shared fixed-point reader)", () => {
+  const notTripped = JSON.stringify({ metrics: { tripped: false } });
+  const cfg = JSON.stringify({ "reviewer-commits": "A" });
+  it("resolves the configured stage when the baseline is not tripped", () => {
+    assert.equal(resolveReviewerCommitsStageFromTexts(cfg, notTripped), "A");
+  });
+  it("forces off for missing/malformed config, missing baseline, or a tripped baseline", () => {
+    assert.equal(resolveReviewerCommitsStageFromTexts(undefined, notTripped), "off");
+    assert.equal(resolveReviewerCommitsStageFromTexts("{not json", notTripped), "off");
+    assert.equal(resolveReviewerCommitsStageFromTexts(cfg, undefined), "off");
+    assert.equal(resolveReviewerCommitsStageFromTexts(cfg, JSON.stringify({ metrics: { tripped: true } })), "off");
   });
 });
