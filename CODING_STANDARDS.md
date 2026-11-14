@@ -86,9 +86,9 @@ enforced-by: reviewer
 
 ### STD-TEST-OWN-FEATURE
 
-A test pins its own feature, never a sibling issue's prose or "added by #NNNN".
+A test pins its own feature, never a sibling issue's prose, "added by #NNNN", or QA-history provenance (`round N`, `fix-forward`, `re-review`) in a test title or comment.
 
-enforced-by: reviewer
+enforced-by: scripts/ci/test-title-provenance-scan.ts, reviewer
 
 ### STD-TEST-NO-SHARED-TEARDOWN-NESTING
 

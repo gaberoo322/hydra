@@ -505,6 +505,7 @@
   "test/test-file-sprawl-guard.test.mts": 4,
   "test/test-pools.test.mts": 7,
   "test/test-source-read-ratchet.test.mts": 2,
+  "test/test-title-provenance-ratchet.test.mts": 4,
   "test/test-typecheck-check.test.mts": 6,
   "test/tick-stagnation-alert.test.mts": 1,
   "test/tier-classifier.test.mts": 6,
