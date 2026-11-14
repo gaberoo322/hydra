@@ -9,17 +9,17 @@ reference_files: [_fragments/hydra-target-build-merge-flow.md, _fragments/hydra-
 
 # Hydra Build
 
-Run one complete Hydra development build operating as every agent (planner, skeptic, executor, reporter). You write the code yourself — do NOT call Codex (retired, ADR-0006) or the Hydra scheduler.
+Run one complete Hydra development build operating as every agent (planner, skeptic, executor, reporter). You write the code yourself — do NOT call the Hydra scheduler.
 
 To prevent context window saturation under `/loop`, delegate the build to a child **when a spawn capability exists**:
 - **Claude:** spawn an `Agent` with the build prompt below.
 
-Autopilot dispatch sessions carry NO Agent/Task spawn tool (issue #1782). In that environment the build runs under the **explicit inline-mode contract** in Step 2 — silently running the child prompt inline as an undeclared fallback is forbidden, and so is aborting just because the spawn tool is absent.
+Autopilot dispatch sessions carry NO Agent/Task spawn tool. In that environment the build runs under the **explicit inline-mode contract** in Step 2 — silently running the child prompt inline as an undeclared fallback is forbidden, and so is aborting just because the spawn tool is absent.
 
 In delegated mode the parent does pre-flight, spawns the child, blocks on the
 child in the FOREGROUND until it reaches a terminal state, and only then
 relays its outcome. The child does the heavy work; the parent must never end
-its turn while the child is still running (issue #4196) — relaying a summary
+its turn while the child is still running — relaying a summary
 for a still-running child, or narrating a future notification instead of
 watching the child finish now, is a forbidden ending, not a valid handoff. See
 the `dev_target` variant of the `## NEVER END WAITING` preamble in
@@ -36,13 +36,13 @@ does not inherit these exports):
 
 Then run:
 
-**Concurrency check (Claude only — does NOT block on retired Codex cycles, ADR-0006):**
+**Concurrency check (Claude cycles only):**
 ```bash
 CLAUDE_LOCK=$(docker exec hydra-redis-1 redis-cli GET hydra:cycle:active:claude 2>/dev/null)
 if [ -n "$CLAUDE_LOCK" ]; then echo "BLOCKED: another Claude cycle running ($CLAUDE_LOCK)"; fi
 ```
 
-**WIP limit check (GitHub-Issues board — ADR-0031 Decision 4, liveness-aware since #4475):** Target tracking now lives as GitHub Issues on `$TARGET_GH_REPO`, not the Redis backlog. The WIP limit AND the rule for which `in-progress` claims count toward it live in `~/hydra/scripts/autopilot/target-wip.py` for this gate. The autopilot computes the same liveness in its Turn Snapshot `target-board` collector (ADR-0043 slice 4), whose limit is test-pinned to `target-wip.py --limit` and whose reference predicate is held in parity with pr-refs.py by `test/github-pr-refs.test.mts` — so `decide.py` never dispatches `dev_target` into a gate that would bounce it (and vice versa). A claim counts as live WIP only when an OPEN Target PR references it; an orphaned `in-progress` label with no PR (a crashed build — such claims are released at reap time by #4195) does not. Never hard-code the limit here. Read via **REST** (`gh api`), never `gh --json` / GraphQL — the money-critical Target loop must draw from the underused REST pool (ADR-0031 Decision 6, #3427). **A resume dispatch (Step 0.7, `prompt_args.resume`) SKIPS this check** — the resume issue carries `needs-dev-resume`, not `in-progress`, and the PR already exists; this is not new WIP.
+**WIP limit check (GitHub-Issues board — ADR-0031 Decision 4):** Target tracking now lives as GitHub Issues on `$TARGET_GH_REPO`, not the Redis backlog. The WIP limit AND the rule for which `in-progress` claims count toward it live in `~/hydra/scripts/autopilot/target-wip.py` for this gate. The autopilot computes the same liveness in its Turn Snapshot `target-board` collector (ADR-0043 slice 4), whose limit is test-pinned to `target-wip.py --limit` and whose reference predicate is held in parity with pr-refs.py by `test/github-pr-refs.test.mts` — so `decide.py` never dispatches `dev_target` into a gate that would bounce it (and vice versa). A claim counts as live WIP only when an OPEN Target PR references it; an orphaned `in-progress` label with no PR (a crashed build — such claims are released at reap time) does not. Never hard-code the limit here. Read via **REST** (`gh api`), never `gh --json` / GraphQL — the money-critical Target loop must draw from the underused REST pool (ADR-0031 Decision 6). **A resume dispatch (Step 0.7, `prompt_args.resume`) SKIPS this check** — the resume issue carries `needs-dev-resume`, not `in-progress`, and the PR already exists; this is not new WIP.
 ```bash
 # REST reads only (never GraphQL): open in-progress issue numbers + open PRs
 # projected to target-wip.py's {headRefName, body} input rows.
@@ -51,8 +51,8 @@ WIP_IP=$(gh api "repos/$TARGET_GH_REPO/issues?labels=in-progress&state=open&per_
 WIP_PRS=$(gh api "repos/$TARGET_GH_REPO/pulls?state=open&per_page=100" \
   --jq '[.[] | {headRefName: .head.ref, body: (.body // "")}]' 2>/dev/null || echo '')
 if [ -z "$WIP_IP" ] || [ -z "$WIP_PRS" ]; then
-  # Fail OPEN (issue #4475): an unreadable board never blocks the build.
-  echo "WARN: WIP gate reads failed — proceeding without the WIP check (issue #4475)" >&2
+  # Fail OPEN: an unreadable board never blocks the build.
+  echo "WARN: WIP gate reads failed — proceeding without the WIP check" >&2
 else
   WIP_OUT=$({ printf '%s\n' "$WIP_IP"; printf '%s\n' "$WIP_PRS"; } \
     | jq -cs '{in_progress: .[0], prs: .[1]}' \
@@ -70,7 +70,7 @@ fi
 
 If either fails, stop. Do not delegate.
 
-## Step 2: Delegate — or declare inline mode (issue #1782)
+## Step 2: Delegate — or declare inline mode
 
 **Mode detection (mandatory):** make exactly ONE `ToolSearch` query (`+agent spawn task`) against the deferred-tool list, then commit to a mode.
 
@@ -82,7 +82,7 @@ them, in THIS session — before your final message. Do NOT end your turn on a
 still-running child, a narrated future wait ("I'll relay its summary once it
 completes"), or an armed Monitor; and if a notification wakes you while the
 child is STILL not done, re-arming the wait and ending your turn again is the
-same forbidden ending repeated (issue #4196). Once the child reaches a
+same forbidden ending repeated. Once the child reaches a
 terminal state, relay its outcome: the child returns ONLY a summary table,
 `Mode | delegated`.
 
@@ -99,9 +99,9 @@ Full autonomy: pick the task, plan, challenge your own plan, execute, verify, me
 
 @include _fragments/target-seam-preamble.md
 
-## CRITICAL SAFETY RULE — READ FIRST (issues #542, #3889)
+## CRITICAL SAFETY RULE — READ FIRST
 
-Two repos are in play: `~/hydra` (orchestrator) and `$TARGET_WS` (target). `dev_target` is dispatched WITHOUT harness `isolation: "worktree"` (issue #3889): the harness's worktree isolation only covers `~/hydra`, and because `$TARGET_WS` is a sibling repo not nested under it, a pinned session is refused ALL git ops against the target. So this skill isolates the target ITSELF via Step 0.6 below (nested under `$TARGET_APP_DIR/.worktrees/` — relocated off `/dev/shm` in issue #4177 to eliminate the reach-back `node_modules` symlink hazard, #4175), and the installed `worktree-write-fence.sh` PreToolUse hook fences ghost-writes back into that worktree. Step 0.6 is therefore the SOLE isolation for the target repo — never skip it.
+Two repos are in play: `~/hydra` (orchestrator) and `$TARGET_WS` (target). `dev_target` is dispatched WITHOUT harness `isolation: "worktree"`: the harness's worktree isolation only covers `~/hydra`, and because `$TARGET_WS` is a sibling repo not nested under it, a pinned session is refused ALL git ops against the target. So this skill isolates the target ITSELF via Step 0.6 below (nested under `$TARGET_APP_DIR/.worktrees/`), and the installed `worktree-write-fence.sh` PreToolUse hook fences ghost-writes back into that worktree. Step 0.6 is therefore the SOLE isolation for the target repo — never skip it.
 
 Before running ANY `git`, `npm`, `Edit`, or `Write` against the target repo:
 
@@ -110,9 +110,9 @@ Before running ANY `git`, `npm`, `Edit`, or `Write` against the target repo:
 3. Verify isolation: inside the new worktree, `git rev-parse --git-common-dir` must resolve to `$TARGET_WS/.git` AND `git rev-parse --git-dir` must contain `.git/worktrees/`. ABORT otherwise.
 4. From that point on, every Edit/Write/Bash file mutation against the target uses **the worktree path only** — never construct absolute paths under `$TARGET_WS/...` directly. If you must use an absolute path, anchor it to `$TARGET_WT/...`.
 
-**`$TARGET_WS` is also the Target's serving tree** — the checkout its own deploy pipeline pulls, builds, and restarts from (issue #4525). The build never fast-forwards it, never builds or tests in it, and never restarts the Target's service: shipping is PR → the Target's CI → its automerge → its CI-owned deploy (Steps 7–8, merge-flow reference).
+**`$TARGET_WS` is also the Target's serving tree** — the checkout its own deploy pipeline pulls, builds, and restarts from. The build never fast-forwards it, never builds or tests in it, and never restarts the Target's service: shipping is PR → the Target's CI → its automerge → its CI-owned deploy (Steps 7–8, merge-flow reference).
 
-No fallback. No `cd "$TARGET_WS"` in any step below — those bare paths are historical and have been replaced by `$TARGET_WT` references. If `$TARGET_WT` is unset when a step needs it, ABORT — that means Step 0.6 was skipped.
+No fallback. No `cd "$TARGET_WS"` in any step below — every step uses `$TARGET_WT`. If `$TARGET_WT` is unset when a step needs it, ABORT — that means Step 0.6 was skipped.
 
 ### 0. Register cycle
 ```bash
@@ -120,46 +120,45 @@ CYCLE_ID="claude-cycle-$(date -u +%Y-%m-%d-%H%M)"
 hydra raw POST /cycle/register "{\"cycleId\":\"$CYCLE_ID\",\"source\":\"claude\"}"
 ```
 
-### 0.6. Create the target worktree (issue #542, relocated off `/dev/shm` in #4177)
+### 0.6. Create the target worktree
 
-Symmetric with how `hydra-dev` worktree-isolates `~/hydra`. The target repo (`$TARGET_WS`) is a separate git repo — the harness can't isolate it for us. Create one ourselves with the shared create+verify block below (issue #4476 — the ONE source every self-isolated Target class runs; `$TARGET_WS` / `$TARGET_APP_DIR` come from the seam preamble above, and `TARGET_WT_BASE` stays at its `origin/main` default here, except on a resume dispatch — see Step 0.7):
+Symmetric with how `hydra-dev` worktree-isolates `~/hydra`. The target repo (`$TARGET_WS`) is a separate git repo — the harness can't isolate it for us. Create one ourselves with the shared create+verify block below (the ONE source every self-isolated Target class runs; `$TARGET_WS` / `$TARGET_APP_DIR` come from the seam preamble above, and `TARGET_WT_BASE` stays at its `origin/main` default here, except on a resume dispatch — see Step 0.7):
 
 @include _fragments/target-self-isolation-preamble.md
 
 Then, still inside `$TARGET_WT`:
 
 ```bash
-# No install step here (issue #4177): node_modules AND `npm run <script>`
+# No install step here: node_modules AND `npm run <script>`
 # binaries resolve by the ancestor walk above. A change that adds/bumps a
 # dependency gets a LOCAL `npm ci` in Step 6 (Verify), only when the diff
 # touches package.json/package-lock.json. appSubdir comes from the Target
-# Manifest (verify.appSubdir; epic #3014, ADR-0026, issue #3019) — not
+# Manifest (verify.appSubdir, ADR-0026) — not
 # hardcoded — because later steps `cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}/$APP_SUBDIR"`. Re-read it
 # from the worktree's own manifest copy (not just $TARGET_APP_SUBDIR from the
 # seam preamble) since the worktree is the canonical checkout for this cycle.
 APP_SUBDIR=$(jq -r '.verify.appSubdir' "$TARGET_WT/.hydra/manifest.json")
 
-# Mirror the Target SDLC gate scripts NEXT TO the worktree (issue #1451;
-# moved out of the worktree by issue #4526). The gate scripts (mutation-check /
+# Mirror the Target SDLC gate scripts NEXT TO the worktree. The gate scripts (mutation-check /
 # target-design-concept / post-merge-health / verify-install-decision) and
 # their small src closure live ONLY in this orchestrator repo and import
 # `../../src/…`, so they do not exist in the target checkout. The sync copies
 # them into the SIBLING scratch dir `${TARGET_WT}.hydra-gate` (git-excluded,
 # so it never pollutes any Target diff) so Steps 4.5 / 6 / 6.6 / 8.6 run the
 # REAL gate — never from ~/hydra, never by hand-rolling the risk-critical
-# classification. The sibling location is load-bearing (#4526): INSIDE the
+# classification. The sibling location is load-bearing: INSIDE the
 # worktree the mirror sat in the cwd of every Target tool, and CSB's
 # `eslint .` descended into it (6 `no-explicit-any` failures before any
 # change was made); OUTSIDE it — but still under
 # `$TARGET_APP_DIR/.worktrees/` — no Target tool can reach the mirror, while
 # the mirror's bare `zod` import keeps resolving through the ancestor
-# node_modules walk (the same mechanism #4177 relies on, no symlink).
+# node_modules walk (no symlink).
 bash ~/hydra/scripts/sync-target-gate.sh "$TARGET_WT"
 # Every later step references the gate dir through $HYDRA_GATE_DIR only.
 export HYDRA_GATE_DIR="${TARGET_WT}.hydra-gate"
 ```
 
-`scripts/branch-prune.sh` (issue #443) sweeps stale worktrees under `$TARGET_APP_DIR/.worktrees/*`. We DO remove the worktree in Step 8.5 on success — leaking is only acceptable on crash. Step 8.5 removes the `$HYDRA_GATE_DIR` sibling alongside it (the `pmh-baseline.json` + build logs live there, never under `$TARGET_WT`); a crashed cycle can leak the small sibling dir exactly like it can leak the worktree — a branch-prune GC sweep for orphaned `*.hydra-gate` dirs is follow-up work, not part of the build.
+`scripts/branch-prune.sh` sweeps stale worktrees under `$TARGET_APP_DIR/.worktrees/*`. Step 8.5 removes the worktree and the `$HYDRA_GATE_DIR` sibling on success (the `pmh-baseline.json` + build logs live there, never under `$TARGET_WT`); leaking either is acceptable only on a crash.
 
 ### 0.5. Drift check
 ```bash
@@ -173,7 +172,7 @@ if recent:
 "
 ```
 
-### 0.7. Resume arm (dev_target resume dispatch — issue #4739)
+### 0.7. Resume arm (dev_target resume dispatch
 
 **Trigger:** the dispatch carries `prompt_args.resume: true` with `anchor` (`issue-<N>`), `resume_issue` (<N>), `resume_pr` (<PR number>), and `resume_branch` (<head.ref>). This is the durable bridge back from an operator "fix forward on PR #N, push to its existing branch" decision: the issue carries `needs-dev-resume` (written ONLY by /hydra-review's per-Target fix-forward resolution), decide.py's `_select_slot_dev_target` pinned it via `target_dev_resume_pick`, and this arm continues the EXISTING PR — it never starts a new build.
 
@@ -194,7 +193,7 @@ RESUME_BRANCH="$resume_branch"    # that PR's head.ref
 
 **The work, bounded by the decision:** read the LATEST `hydra-target-qa` verdict comment on PR `$RESUME_PR` (the FAIL findings) and the operator's fix-forward decision on issue `$RESUME_ISSUE` (the resolution that stamped `needs-dev-resume`). Fix ONLY what those two name — no drive-by refactors, no scope creep beyond the verdict's findings list. Then verify (Step 6) and commit.
 
-**Pre-push guards (issue #4854 — run in this order, BOTH before the push; the PR must carry the fence label before the new head's CI run starts, because the Target's `automerge.yml` reads labels when that run concludes).** A resume never rewrites a closing ref (`Closes/Fixes/Resolves #$RESUME_ISSUE`) to a non-closing one (`Refs #N`) — on ANY anchor. Scoping a resume down is not the resume's decision: fix what the verdict named, push with the ref intact, and report partial delivery in the summary (splitting a child issue is an operator / hydra-review act). Never remove a fencing label from the issue or the PR. If any guard command below fails, do NOT push — fall into the "If nothing can be pushed" terminal state (leave `needs-dev-resume`, report why).
+**Pre-push guards (run in this order, BOTH before the push; the PR must carry the fence label before the new head's CI run starts, because the Target's `automerge.yml` reads labels when that run concludes).** A resume never rewrites a closing ref (`Closes/Fixes/Resolves #$RESUME_ISSUE`) to a non-closing one (`Refs #N`) — on ANY anchor. Scoping a resume down is not the resume's decision: fix what the verdict named, push with the ref intact, and report partial delivery in the summary (splitting a child issue is an operator / hydra-review act). Never remove a fencing label from the issue or the PR. If any guard command below fails, do NOT push — fall into the "If nothing can be pushed" terminal state (leave `needs-dev-resume`, report why).
 
 ```bash
 # 1. Closing-ref guard (fail closed): the PR body must still close the anchor.
@@ -241,9 +240,9 @@ gh issue edit "$RESUME_ISSUE" --repo "$TARGET_GH_REPO" \
 
 ### 1. Ground (read-only, in the manifest's appSubdir)
 
-**Verify commands come from the Target Manifest, NOT hardcoded** (epic #3014, ADR-0026, issue #3019). Read `verify.test` / `verify.typecheck` / `verify.appSubdir` from `<TARGET_WT>/.hydra/manifest.json` and run *those* — never a hardcoded `npm test`. Some targets alias a bare `npm test` to a count-gate + a handful of sentinels rather than the real suite (a documented failure mode on a prior Target — an agent that reads its "X passed" footer as a green suite can ship a change that breaks untested modules), so grounding must run the manifest's DECLARED `verify.test` command, whatever it names. A missing/malformed manifest is **fail-closed**: abort with the `[target-manifest]` error, do NOT default to `npm test`.
+**Verify commands come from the Target Manifest, NOT hardcoded**. Read `verify.test` / `verify.typecheck` / `verify.appSubdir` from `<TARGET_WT>/.hydra/manifest.json` and run *those* — never a hardcoded `npm test`. Some targets alias a bare `npm test` to a count-gate + a handful of sentinels rather than the real suite (a documented failure mode on a prior Target — an agent that reads its "X passed" footer as a green suite can ship a change that breaks untested modules), so grounding must run the manifest's DECLARED `verify.test` command, whatever it names. A missing/malformed manifest is **fail-closed**: abort with the `[target-manifest]` error, do NOT default to `npm test`.
 
-Ground runs `verify.test` + `verify.typecheck` ONLY — deliberately no build and no lint here (issue #4526): the build is the most expensive command in the ladder and grounds no decision at this stage; both build and lint run in Step 6 against the actual diff, in the worktree.
+Ground runs `verify.test` + `verify.typecheck` ONLY — deliberately no build and no lint here: the build is the most expensive command in the ladder and grounds no decision at this stage; both build and lint run in Step 6 against the actual diff, in the worktree.
 
 ```bash
 # Source the verify block from the Target Manifest (fail-closed on absence).
@@ -264,9 +263,9 @@ git status --short
 Load context (parallel):
 - `~/hydra/config/direction/priorities.md`
 - `~/hydra/config/direction/vision.md`
-- The Target board (open issues), via **REST** — never `gh --json` / GraphQL (ADR-0031 Decision 6): `gh api -X GET search/issues -f q="repo:$TARGET_GH_REPO is:issue is:open" --jq '.items[] | "#\(.number) [\(.labels | map(.name) | join(","))] \(.title)"'`. (Replaces the retired `hydra backlog ls` + `LRANGE hydra:anchors:work-queue` Redis reads.)
+- The Target board (open issues), via **REST** — never `gh --json` / GraphQL (ADR-0031 Decision 6): `gh api -X GET search/issues -f q="repo:$TARGET_GH_REPO is:issue is:open" --jq '.items[] | "#\(.number) [\(.labels | map(.name) | join(","))] \(.title)"'`.
 
-> **Direction docs are a mirror — refresh if stale (issue #1791).** The
+> **Direction docs are a mirror — refresh if stale.** The
 > `~/hydra/config/direction/priorities.md` file loaded above is the
 > orchestrator's COMMITTED copy and the runtime source of truth for the
 > in-process readers. The LIVE docs that
@@ -276,17 +275,17 @@ Load context (parallel):
 > Nothing auto-syncs the two, so the orch copy can lag the research cycle by
 > milestones. The
 > Turn Snapshot's `direction-drift` collector sets `direction_drift` true when the
-> committed orch copy no longer matches the live Target docs. When you see that
+> committed orch copy differs from the live Target docs. When you see that
 > signal (or notice the loaded `priorities.md` frontmatter `updated:` lagging
 > the Target's), refresh the committed copy on a feature branch and open a PR —
 > never write into `config/direction/` from a read-only collector or from the
-> deploy tree (the #1739 dirty-tree hazard):
+> deploy tree (a dirty serving tree blocks the deploy):
 >
 > ```bash
 > cp "${HYDRA_TARGET_REPO:-$TARGET_WS}"/direction/priorities.md ~/hydra/config/direction/priorities.md
 > ```
 
-> **Superseded direction docs are non-groundable — check the banner before you plan from a doc (issue #2728).** A direction doc whose premise has been retired carries a machine-readable header banner as its first non-blank content line:
+> **Superseded direction docs are non-groundable — check the banner before you plan from a doc.** A direction doc whose premise has been retired carries a machine-readable header banner as its first non-blank content line:
 >
 > ```
 > > **STATUS: superseded by <doc-or-ADR> on <YYYY-MM-DD>.** <one-line pointer to the current doc.>
@@ -296,14 +295,14 @@ Load context (parallel):
 
 ### 2. Anchor (select task) — GitHub-Issues board (ADR-0031)
 
-Target work is now tracked as **GitHub Issues on `$TARGET_GH_REPO`**, orch-style label-driven (ADR-0031 Decision 2/4) — NOT the Redis work-queue / `/backlog` API. Dispatch simplifies to the Orchestrator's own model: pick a `ready-for-agent`, **unblocked** issue, ordered by priority. There is no scored ranking, no semantic dedup (OpenViking, retired by ADR-0033), and no Redis atomic claim — those Redis mechanisms are retired.
+Target work is tracked as **GitHub Issues on `$TARGET_GH_REPO`**, orch-style label-driven (ADR-0031 Decision 2/4). Pick a `ready-for-agent`, **unblocked** issue, ordered by priority; there is no scored ranking, no semantic dedup and no Redis claim.
 
 > **Resume dispatches (Step 0.7, `prompt_args.resume`) SKIP this entire step** — the anchor is already pinned (`prompt_args.anchor` = `issue-<resume_issue>`) and the `in-progress` claim is not taken (the issue carries `needs-dev-resume`, whose ONLY writer is /hydra-review's fix-forward resolution, and whose ONLY consumer is the Step 0.7 resume arm).
 
 If operator gave a task, use it. Otherwise priority order:
 1. Failing tests
 2. Typecheck errors
-3. **`ready-for-agent` board pick** — read the board via **REST** (`gh api`, never `gh --json` / GraphQL — ADR-0031 Decision 6, the money-critical Target loop stays off the Orchestrator's saturated GraphQL pool), then claim by relabeling `in-progress` (mirrors the Orchestrator `hydra-dev` claim). This is the label-driven replacement for the retired atomic Redis `/backlog/claim`:
+3. **`ready-for-agent` board pick** — read the board via **REST** (`gh api`, never `gh --json` / GraphQL — ADR-0031 Decision 6, the money-critical Target loop stays off the Orchestrator's saturated GraphQL pool), then claim by relabeling `in-progress` (mirrors the Orchestrator `hydra-dev` claim).:
    ```bash
    # Pick the highest-priority open `ready-for-agent` Target issue via the REST
    # search pool. Priority label ordering (priority/high > priority/medium > …)
@@ -326,7 +325,7 @@ If operator gave a task, use it. Otherwise priority order:
 
 Cross-reference drift check. Skip if recently merged.
 
-> **CONTEXT POINTER:** for a board-picked anchor run the shipped-anchor preflight (Step 2.1) and the two grounding preflights (Steps 3.1 ledger-intersection, 3.2 doc-banner) before finalising the plan. Full bash recipes live in `hydra-target-build-anchor-preflight.md` (sibling of this SKILL.md). Summary: board anchor — treat as suspected-shipped ONLY if a MERGED PR on `$TARGET_GH_REPO` carries a closing verb (`Closes`/`Fixes`/`Resolves`) for the anchor number — a citation, `Refs`, or subject-word overlap is never evidence (skip the anchor non-destructively — never close or relabel the issue — and take the next candidate; issue #4167); wire-or-retire ledger hit → HARD STOP-AND-REFRAME; superseded-doc banner → HARD STOP-AND-REFRAME. All three are fail-open on uncertainty.
+> **CONTEXT POINTER:** for a board-picked anchor run the shipped-anchor preflight (Step 2.1) and the two grounding preflights (Steps 3.1 ledger-intersection, 3.2 doc-banner) before finalising the plan. Full bash recipes live in `hydra-target-build-anchor-preflight.md` (sibling of this SKILL.md). Summary: board anchor — treat as suspected-shipped ONLY if a MERGED PR on `$TARGET_GH_REPO` carries a closing verb (`Closes`/`Fixes`/`Resolves`) for the anchor number — a citation, `Refs`, or subject-word overlap is never evidence (skip the anchor non-destructively — never close or relabel the issue — and take the next candidate); wire-or-retire ledger hit → HARD STOP-AND-REFRAME; superseded-doc banner → HARD STOP-AND-REFRAME. All three are fail-open on uncertainty.
 
 ### 3. Plan (planner role)
 
@@ -338,7 +337,7 @@ Complexity:
 - **standard** (3–5 files, 4–8 criteria): full ceremony.
 - **complex** (>5 files): split.
 
-### 3.3. Operator-decision comment read (issue #4693 — EVERY board-picked anchor)
+### 3.3. Operator-decision comment read (EVERY board-picked anchor)
 
 The issue BODY is not the whole scope contract. An operator decision posted as a
 **comment** — the hydra-review convention when routing a `ready-for-human`
@@ -370,18 +369,18 @@ if [ -n "${ANCHOR_NUM:-}" ]; then
     ' <"$OD_TMP.merged"); then
       OPERATOR_DECISION_JSON="$OD_OUT"
     else
-      echo "hydra-target-build: WARN: operator-decision selection FAILED for ${ANCHOR_REF:-issue-$ANCHOR_NUM} (jq/node error after a successful read) — proceeding on the issue body alone (fail-open, issue #4693)" >&2
+      echo "hydra-target-build: WARN: operator-decision selection FAILED for ${ANCHOR_REF:-issue-$ANCHOR_NUM} (jq/node error after a successful read) — proceeding on the issue body alone (fail-open)" >&2
     fi
   else
-    # Fail-open (issue #4693): a failed read proceeds on the issue body alone —
+    # Fail-open: a failed read proceeds on the issue body alone —
     # loudly. The artifact only informs; it never blocks a merge.
-    echo "hydra-target-build: WARN: operator-decision comment read FAILED for ${ANCHOR_REF:-issue-$ANCHOR_NUM} — proceeding on the issue body alone (fail-open, issue #4693)" >&2
+    echo "hydra-target-build: WARN: operator-decision comment read FAILED for ${ANCHOR_REF:-issue-$ANCHOR_NUM} — proceeding on the issue body alone (fail-open)" >&2
   fi
   rm -f "$OD_TMP" "$OD_TMP.merged"
 fi
 ```
 
-**Enforcement boundary (explicit, issue #4693 QA finding):** on a **safe-path
+**Enforcement boundary (explicit):** on a **safe-path
 build** Step 4.5 is skipped, so no design-concept artifact exists and the
 decision is NOT persisted or machine-checked anywhere — the binding is carried
 solely by the plan quoted to the executor role and by the QA Spec axis reading
@@ -411,7 +410,7 @@ must not contradict it, and the issue body's option list yields wherever they
 conflict. Quote the decision verbatim in the plan handed to the executor role,
 and carry `$OPERATOR_DECISION_JSON` forward into Step 4.5's `$DC_INPUT_JSON`.
 
-### 3.5. Self-declare scope (issue #396)
+### 3.5. Self-declare scope
 
 When hydra-target-build picks its own task from a failing test or the priorities doc there is no pre-existing scope contract, so the child MUST write its own before opening the PR. A board-picked anchor (Step 2 priority 3) is now a GitHub issue on `$TARGET_GH_REPO` and may already carry a `## Files in scope` section — reuse it verbatim when present; otherwise author the contract as below. **A resume dispatch (Step 0.7) does NOT author a scope contract** — the original PR already carries one, and the QA verdict's named findings are the resume's scope.
 
@@ -438,7 +437,7 @@ EOF
 
 CI's `scope-check` gate (`.github/workflows/ci.yml` in the orchestrator repo, mirrored in the target repo if present) reads these sections from the PR body. Skipping this step doesn't block the build today (no hard requirement on PR body shape for target-repo PRs), but it's how the orchestrator learns the subagent's intended blast radius — and it's the contract reviewers + `hydra-qa` use to spot scope creep.
 
-### 3.6. Inject per-anchor Reflections (issue #841) + deposit telemetry (issue #1136/#1912)
+### 3.6. Inject per-anchor Reflections + deposit telemetry
 
 **Two mandatory halves — do BOTH every build:**
 
@@ -466,7 +465,7 @@ Challenge:
 
 If rejected, replan narrower.
 
-### 4.5. Design-concept artifact (risk-critical only — issue #1056)
+### 4.5. Design-concept artifact (risk-critical only
 
 **A resume dispatch (Step 0.7) skips this step** — the original build's artifact (if any) still stands; a resume fixes QA-named findings on an existing PR, it does not re-conceive the design.
 
@@ -474,22 +473,21 @@ Before execute, risk-critical Target builds capture a **lightweight
 design-concept artifact** and persist it per-anchor, so a retry on the same
 anchor reuses it instead of rediscovering scope every cycle. It is a flat
 4-field record (scope / modules-touched / invariants / rejected-alternatives)
-— plus, since issue #4693, the optional `operatorDecision` provenance field
+— plus the optional `operatorDecision` provenance field
 carrying the Step 3.3 selection verbatim — NOT the Orchestrator's `hydra-grill`
-Q&A loop, draft/approved/stale gate, or tier ladder (epic #1052). The pure
+Q&A loop, draft/approved/stale gate, or tier ladder. The pure
 builder/serializer lives in the gate
 mirror at `$HYDRA_GATE_DIR/scripts/target/target-design-concept.ts` (synced
-into the sibling scratch dir by Step 0.6, issues #1451/#4526); this step is
+into the sibling scratch dir by Step 0.6); this step is
 the I/O wrapper. Import it by ABSOLUTE `file://` URL from `$HYDRA_GATE_DIR` —
 the mirror is a sibling of the worktree, so a cwd-relative import can no
 longer reach it — never from `~/hydra`.
 
 **Gate on risk-critical first — safe-path builds skip this step entirely.**
 `shouldCaptureDesignConcept()` routes on the keystone classifier
-(`classifyRisk` in `src/target/risk-critical.ts`, #1053): a path is
+(`classifyRisk` in `src/target/risk-critical.ts`): a path is
 risk-critical iff it touches the Target's own declared risk surface
-(`riskCritical.surface` in `<TARGET_WT>/.hydra/manifest.json`, epic #3014 /
-ADR-0026 — the Target-specific risk vocabulary lives only in the target repo,
+(`riskCritical.surface` in `<TARGET_WT>/.hydra/manifest.json`, ADR-0026 — the Target-specific risk vocabulary lives only in the target repo,
 never hardcoded here). If no
 expected path is risk-critical, there is no artifact to create, persist, or
 diff against — proceed straight to Step 5.
@@ -520,7 +518,7 @@ else
     process.stdout.write(dc ? JSON.stringify(dc) : "");
   ' -- "$EXISTING")
 
-  # Issue #4693 staleness: a persisted artifact captured BEFORE the latest
+  # staleness: a persisted artifact captured BEFORE the latest
   # operator decision — or one carrying no `operatorDecision` field at all —
   # must NOT be reused. Discard and fall through to recapture.
   if [ -n "$REUSED" ] && [ -n "${OPERATOR_DECISION_JSON:-}" ]; then
@@ -533,7 +531,7 @@ else
       process.stdout.write(concept && mod.isStaleAgainstDecision(concept, decision) ? "stale" : "fresh");
     ' -- "$REUSED" "$OPERATOR_DECISION_JSON")
     if [ "$STALE" != "fresh" ]; then  # anything but a clean "fresh" (incl. a node failure) recaptures
-      echo "persisted design-concept for $ANCHOR_REF predates the latest operator decision — recapturing (issue #4693)"
+      echo "persisted design-concept for $ANCHOR_REF predates the latest operator decision — recapturing"
       REUSED=""
     fi
   fi
@@ -545,7 +543,7 @@ else
   else
     # First attempt (or corrupt prior value): the planner authors the four
     # fields now and persists. Build the input JSON from the plan, then:
-    # Issue #4693: when Step 3.3 selected an operator decision, fold it in
+    # When Step 3.3 selected an operator decision, fold it in
     # VERBATIM as the `operatorDecision` field, so the QA Spec axis diffs
     # against the operator's call, not the body's option list.
     if [ -n "${OPERATOR_DECISION_JSON:-}" ]; then
@@ -569,24 +567,24 @@ fi
 `{anchorRef, scope, modulesTouched, invariants, rejectedAlternatives}` object
 (`rejectedAlternatives` is `[{alt, why}, ...]`), plus — when Step 3.3 found one
 — the optional `operatorDecision` `{url, createdAt, body}` carried VERBATIM
-from the operator's decision comment (issue #4693; `body` is the full comment
+from the operator's decision comment (`body` is the full comment
 body, never a paraphrase). The Target QA Spec axis
-(#1055) reads the same `$DC_KEY` key to diff
+ reads the same `$DC_KEY` key to diff
 the merged change against the captured intent — that is the artifact's only
 consumer; it never blocks a merge by itself.
 
 ### 5. Execute
 
-Step 0.6 already created `$TARGET_WT` on branch `feature/$CYCLE_ID` off `origin/main`. Stay in that worktree — do NOT `cd` into `$TARGET_WS`, do NOT `git checkout main`, do NOT `git pull` from the main checkout (that's the race that #542 is fixing).
+Step 0.6 already created `$TARGET_WT` on branch `feature/$CYCLE_ID` off `origin/main`. Stay in that worktree — do NOT `cd` into `$TARGET_WS`, do NOT `git checkout main`, do NOT `git pull` from the main checkout (that is a race).
 
 ```bash
 cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}"
 git status --short    # must be clean — we just branched off origin/main
 ```
 
-**Path discipline for Read/Edit/Write tools (issues #542, #1861):** every `file_path` argument MUST be either repo-relative (e.g. `$TARGET_APP_SUBDIR/src/foo.ts`) when cwd is `$TARGET_WT`, OR an absolute path anchored to `$TARGET_WT/...`. Do NOT construct paths directly under `$TARGET_APP_DIR/...` (the main checkout) — those bypass the worktree and write to the main checkout. This applies to **Read** too: reading the main-checkout copy of a file anchors you on the path your later Edit/Write would ghost-write into the main tree. The `worktree-write-fence.sh` PreToolUse hook now fences Read/Edit/Write/MultiEdit and, on a deny, names the corrected `$TARGET_WT/...` path — re-issue against that path rather than recomputing it or `cd`-ing out of the worktree.
+**Path discipline for Read/Edit/Write tools:** every `file_path` argument MUST be either repo-relative (e.g. `$TARGET_APP_SUBDIR/src/foo.ts`) when cwd is `$TARGET_WT`, OR an absolute path anchored to `$TARGET_WT/...`. Do NOT construct paths directly under `$TARGET_APP_DIR/...` (the main checkout) — those bypass the worktree and write to the main checkout. This applies to **Read** too: reading the main-checkout copy of a file anchors you on the path your later Edit/Write would ghost-write into the main tree. The `worktree-write-fence.sh` PreToolUse hook now fences Read/Edit/Write/MultiEdit and, on a deny, names the corrected `$TARGET_WT/...` path — re-issue against that path rather than recomputing it or `cd`-ing out of the worktree.
 
-**EnterWorktree / cwd discipline (issues #2371, #3889):** `dev_target` is dispatched WITHOUT `isolation="worktree"` (#3889), so you reach `$TARGET_WT` via Step 0.6 (`git worktree add` + `cd`) — there is normally NO harness `EnterWorktree` anchor engaged, and the installed `worktree-write-fence.sh` PreToolUse hook is what fences stray Edit/Write back into `$TARGET_WT`. If a harness anchor IS engaged (a session that genuinely called `EnterWorktree`), the harness tracks ONE writable-worktree-root anchor per agent: NEVER call `EnterWorktree` when your `pwd` already satisfies the worktree predicate (`git rev-parse --git-dir` under `.git/worktrees/`); a redundant or sibling switch desyncs that anchor from cwd and makes a perfectly-valid in-cwd Edit/Write get DENIED. After ANY `EnterWorktree`, re-run `pwd` immediately and re-derive every subsequent `file_path` from that fresh root. If an in-`$TARGET_WT` Edit/Write is STILL denied even though the file resolves inside your cwd, the anchor has desynced — recover by `ExitWorktree` then `EnterWorktree` by `path` (the documented re-anchor path), NOT by writing the file via `python3`/`Bash`. The shell-out workaround is reactive, bypasses the harness diff tracking, and is the exact friction #2371 exists to eliminate.
+**EnterWorktree / cwd discipline:** `dev_target` is dispatched WITHOUT `isolation="worktree"`, so you reach `$TARGET_WT` via Step 0.6 (`git worktree add` + `cd`) — there is normally NO harness `EnterWorktree` anchor engaged, and the installed `worktree-write-fence.sh` PreToolUse hook is what fences stray Edit/Write back into `$TARGET_WT`. If a harness anchor IS engaged (a session that genuinely called `EnterWorktree`), the harness tracks ONE writable-worktree-root anchor per agent: NEVER call `EnterWorktree` when your `pwd` already satisfies the worktree predicate (`git rev-parse --git-dir` under `.git/worktrees/`); a redundant or sibling switch desyncs that anchor from cwd and makes a perfectly-valid in-cwd Edit/Write get DENIED. After ANY `EnterWorktree`, re-run `pwd` immediately and re-derive every subsequent `file_path` from that fresh root. If an in-`$TARGET_WT` Edit/Write is STILL denied even though the file resolves inside your cwd, the anchor has desynced — recover by `ExitWorktree` then `EnterWorktree` by `path` (the documented re-anchor path), NOT by writing the file via `python3`/`Bash`. The shell-out workaround is reactive, bypasses the harness diff tracking, and is the exact friction #2371 exists to eliminate.
 
 Rules:
 - Smallest change wins (20 lines > 200 lines).
@@ -600,11 +598,11 @@ Rules:
 
 ### 6. Verify (NOT an agent)
 
-**Commit before you verify (issue #3953):** `git commit` the structurally-complete change on the feature branch *before* this long verification, so a stall degrades to an unmerged PR the autopilot resumes next tick rather than work destroyed by the worktree-orphan-prune (which reaps uncommitted state).
+**Commit before you verify:** `git commit` the structurally-complete change on the feature branch *before* this long verification, so a stall degrades to an unmerged PR the autopilot resumes next tick rather than work destroyed by the worktree-orphan-prune (which reaps uncommitted state).
 
-Verify commands come from the Target Manifest (`verify.typecheck` / `verify.test` / `verify.build` / `verify.lint`-when-declared / `verify.appSubdir`; epic #3014, ADR-0026, issues #3019 and #4526) — never hardcoded. Run the manifest's DECLARED commands, whatever they name — never assume a bare `npm test` is the real suite (some targets alias it to a count-gate instead, a documented failure mode on a prior Target). `verify.lint` is OPTIONAL (issue #4526): a target that ships no lint gate omits the key and Step 6 skips the lint rung entirely — every manifest valid before #4526 stays valid unchanged.
+Verify commands come from the Target Manifest (`verify.typecheck` / `verify.test` / `verify.build` / `verify.lint`-when-declared / `verify.appSubdir`, ADR-0026) — never hardcoded. Run the manifest's DECLARED commands, whatever they name — never assume a bare `npm test` is the real suite (some targets alias it to a count-gate instead, a documented failure mode on a prior Target). `verify.lint` is OPTIONAL: a target that ships no lint gate omits the key and Step 6 skips the lint rung entirely — every manifest valid before #4526 stays valid unchanged.
 
-**A red build or a red lint fails the cycle exactly like a red test** (issue #4526): the ladder order is lint (iff declared) → typecheck → test → build. **The install decision is made by the mirrored pure leaf (`verify-install-decision.ts`), never re-derived in bash** — see its header for the two triggers: the kept #4177 lockfile-diff trigger (install BEFORE typecheck/test/build) and the new result-driven trigger (a build that failed with a module-resolution signature AND no worktree-local node_modules → install once, re-run ONLY the build, once — CSB's `next build` pins its resolution root, so the ancestor node_modules walk #4177 relies on does not reach it from a nested worktree). **"No worktree-local node_modules" means no REAL install (issue #4533)** — a directory holding only tool-cache entries (`.vite`, `.vite-temp`, `.cache/jiti`) does not count, because the ladder's earlier `test` rung reliably creates exactly that cache before the `build` rung ever runs; the leaf's `probeNodeModules` requires a real (non-dot-prefixed, or package-manager-marker) entry before it will report an install as present. Its `MODULE_RESOLUTION_SIGNATURE` also matches Next 16 Turbopack's `"Could not find the Next.js package"` phrasing, which the pre-#4533 regex missed.
+**A red build or a red lint fails the cycle exactly like a red test**: the ladder order is lint (iff declared) → typecheck → test → build. **The install decision is made by the mirrored pure leaf (`verify-install-decision.ts`), never re-derived in bash** — see its header for the two triggers: the lockfile-diff trigger (install BEFORE typecheck/test/build) and the new result-driven trigger (a build that failed with a module-resolution signature AND no worktree-local node_modules → install once, re-run ONLY the build, once — CSB's `next build` pins its resolution root, so the ancestor node_modules walk does not reach it from a nested worktree). **"No worktree-local node_modules" means no REAL install** — a directory holding only tool-cache entries (`.vite`, `.vite-temp`, `.cache/jiti`) does not count, because the ladder's earlier `test` rung reliably creates exactly that cache before the `build` rung ever runs; the leaf's `probeNodeModules` requires a real (non-dot-prefixed, or package-manager-marker) entry before it will report an install as present. Its `MODULE_RESOLUTION_SIGNATURE` also matches Next 16 Turbopack's `"Could not find the Next.js package"` phrasing, which the pre-#4533 regex missed.
 
 ```bash
 MANIFEST="$TARGET_WT/.hydra/manifest.json"
@@ -612,12 +610,12 @@ APP_SUBDIR=$(jq -r '.verify.appSubdir' "$MANIFEST")
 TEST_CMD=$(jq -r '.verify.test' "$MANIFEST")
 TYPECHECK_CMD=$(jq -r '.verify.typecheck' "$MANIFEST")
 BUILD_CMD=$(jq -r '.verify.build' "$MANIFEST")
-# verify.lint is optional (issue #4526): `// empty` yields "" for a target
+# verify.lint is optional: `// empty` yields "" for a target
 # that declares no lint gate — the rung is then skipped entirely.
 LINT_CMD=$(jq -r '.verify.lint // empty' "$MANIFEST")
 cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}/$APP_SUBDIR"
 
-# --- Install decision, trigger 1 (lockfile diff — #4177, kept) -------------
+# --- Install decision, trigger 1 (lockfile diff) -------------
 # The leaf probes worktree-local node_modules presence/symlink itself and
 # answers in one JSON line; the playbook never re-derives the decision.
 LOCKFILE_CHANGED=false
@@ -626,7 +624,7 @@ DECISION=$(node "$HYDRA_GATE_DIR/scripts/target/verify-install-decision.ts" \
   --app-dir "$PWD" --lockfile-changed "$LOCKFILE_CHANGED")
 ACTION=$(printf '%s' "$DECISION" | jq -r '.action')
 if [ "$ACTION" = "abort" ]; then
-  echo "ABORT: $DECISION" >&2  # worktree-local node_modules is a SYMLINK (#4175 class) — never install through it
+  echo "ABORT: $DECISION" >&2  # worktree-local node_modules is a SYMLINK — never install through it
   exit 1
 fi
 if [ "$ACTION" = "install-then-retry" ]; then
@@ -634,7 +632,7 @@ if [ "$ACTION" = "install-then-retry" ]; then
   eval "$INSTALL_CMD --no-audit --no-fund"   # npm never walks up: writes ONLY worktree-local node_modules
 fi
 
-# --- The verify ladder (issue #4526): lint → typecheck → test → build ------
+# --- The verify ladder: lint → typecheck → test → build ------
 # eval word-splits the multi-word manifest commands under zsh (a bare `$TYPECHECK_CMD`
 # is taken as one command word — `command not found: npm run typecheck`). Portable.
 if [ -n "$LINT_CMD" ]; then eval "$LINT_CMD"; fi  # rung skipped entirely when undeclared
@@ -652,7 +650,7 @@ eval "$BUILD_CMD" >"$BUILD_LOG" 2>&1 || BUILD_EXIT=$?
 if [ "$BUILD_EXIT" -ne 0 ]; then
   head -60 "$BUILD_LOG"
 
-  # --- Install decision, trigger 2 (result-driven — #4526) -----------------
+  # --- Install decision, trigger 2 (result-driven) -----------------
   # The leaf reads the CAPTURED build output: install-then-retry only when the
   # failure carries a module-resolution signature AND no worktree-local
   # node_modules exists. Any other red build is 'fail' — a real defect.
@@ -682,7 +680,7 @@ if [ "$BUILD_EXIT" -ne 0 ]; then
 fi
 ```
 
-After the first edit batch, sanity-check that the edits actually landed in the worktree (cheap canary against the #542 ghost-edit symptom):
+After the first edit batch, sanity-check that the edits actually landed in the worktree (cheap canary against ghost edits):
 ```bash
 ( cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}" && git diff --name-only ) | head
 # If this is empty when Edit calls were made, edits leaked to the main checkout —
@@ -693,26 +691,24 @@ Fail → fix → re-verify. After 2 failed fixes, abandon branch.
 
 **NEVER run a bare `node --test <file>` — always pass `--test-force-exit`.** Modules that open a DB/Redis connection or a timer keep `node:test`'s event loop alive, so the process **hangs forever** after the assertions pass and blocks the Bash tool call.
 
-### 6.6. Risk-critical mutation gate (issue #1057 — diff-scoped)
+### 6.6. Risk-critical mutation gate (diff-scoped)
 
 After the test/typecheck gate passes (Step 6), the changed-file set runs through
 the **risk-critical mutation gate**. It mutates ONLY the changed files that
-`classifyRisk()` (the keystone classifier from #1053, in
+`classifyRisk()` (the keystone classifier, in
 `src/target/risk-critical.ts`) flags as risk-critical — the paths the Target's
-own `.hydra/manifest.json` declares under `riskCritical.surface` (epic #3014,
-ADR-0026). When no changed file is risk-critical the gate exits 0 with a
+own `.hydra/manifest.json` declares under `riskCritical.surface` (ADR-0026). When no changed file is risk-critical the gate exits 0 with a
 `skipped` status and never spins up the runner. There is a single kill-floor,
 NOT a tier ladder: either the changed risk-critical files clear it or the build
 fails.
 
-Invoke the **mirrored** gate script from the target worktree (issue #1451 —
-Step 0.6 syncs it into the SIBLING gate dir `$HYDRA_GATE_DIR`, outside
+Invoke the **mirrored** gate script from the target worktree (Step 0.6 syncs it into the SIBLING gate dir `$HYDRA_GATE_DIR`, outside
 `$TARGET_WT` so no Target tool ever sees the mirror), feeding it the PR diff
 against the merge base. Do NOT run `scripts/target/mutation-check.ts` from
 `~/hydra`, and do NOT hand-strip the `appSubdir` prefix from `CHANGED_FILES` —
 pass the raw repo-rooted diff paths straight through. `classifyRisk()`
 (inside the mirrored script) already strips the manifest's declared
-`appSubdir` prefix (#1235, ADR-0026), so hand-stripping re-introduces an
+`appSubdir` prefix, so hand-stripping re-introduces an
 already-solved bug and runs the gate inconsistently.
 
 **Commit brand-new files BEFORE running the gate.** Mutant scoping follows the
@@ -726,8 +722,7 @@ file the cycle created is committed on the feature branch, and treat a
 pass.
 
 **Large-file pure-enrichment diffs: the gate verdict is unreliable, not a
-pass to trust.** A second, opposite failure mode (friction recurred 3× on a
-prior Target): when the changed
+pass to trust.** A second, opposite failure mode (a recurring friction): when the changed
 file is a **large** risk-critical module (e.g.
 a large file under one of the manifest's `riskCritical.surface` prefixes)
 and your diff is **pure enrichment** — it adds/annotates without changing the
@@ -762,7 +757,7 @@ cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}"
 # CHANGED_FILES is the newline-separated diff against origin/main's merge base,
 # in raw repo-rooted form — the gate strips the manifest's appSubdir itself,
 # do NOT strip it.
-# Guard-compatible form (issue #3896): the worktree-isolation Bash guard refuses
+# Guard-compatible form: the worktree-isolation Bash guard refuses
 # nested command substitution `$( ... $(...) ...)`. Resolve the merge base into a
 # plain variable first, then pass it to `git diff`.
 MERGE_BASE=$(git merge-base origin/main HEAD)
@@ -788,7 +783,7 @@ neutral status and exits 0, mirroring the Orchestrator gate's exemption.
 
 Before opening the code PR, answer the two yes/no glossary/ADR questions below. Both answers go in the code PR body **even when both are "none"** — the declaration is the audit trail.
 
-**The Target's domain-doc protocol is OPTIONAL input (issue #4525).** If `$TARGET_WS/docs/agents/domain.md` exists, follow its WRITE protocol (and its "Where the glossary/ADR change lands" section). If it does not exist — not every Target has a `docs/agents/` tree — skip it explicitly and use the criteria in this step: glossary changes land in the Target's `CONTEXT.md` (or the co-located `CONTEXT.md` nearest the code), ADRs under the Target's `docs/adr/`. A missing optional doc is never a blocker and never an input to invent.
+**The Target's domain-doc protocol is OPTIONAL input.** If `$TARGET_WS/docs/agents/domain.md` exists, follow its WRITE protocol (and its "Where the glossary/ADR change lands" section). If it does not exist — not every Target has a `docs/agents/` tree — skip it explicitly and use the criteria in this step: glossary changes land in the Target's `CONTEXT.md` (or the co-located `CONTEXT.md` nearest the code), ADRs under the Target's `docs/adr/`. A missing optional doc is never a blocker and never an input to invent.
 
 ```bash
 DOMAIN_DOC="$TARGET_WS/docs/agents/domain.md"
@@ -810,17 +805,17 @@ If "ADR impact" is not `none`:
 - Same separate-PR pattern. ADR file is `docs/adr/NNNN-kebab-slug.md`, or a context-local `docs/adr/` directory when the Target's own docs define one.
 - Same `ubiquitous-language` label. Same code-PR reference.
 
-**Companion-PR referencing rule (issue #4767).** Both separate PRs above are companion / partial PRs — neither itself finishes the anchor. Reference the anchor from the companion PR body as `Refs #N` or `Part of #N` and never put any closing verb (negated or not) next to `#N`: the closing predicate (`pr-refs.py` / `src/github/pr-refs.ts`, since #4767) rejects a negated verb but a plain one still counts, and GitHub's own auto-close IGNORES negation — a companion body reading "Does not close #N" still auto-closes the anchor on merge.
+**Companion-PR referencing rule.** Both separate PRs above are companion / partial PRs — neither itself finishes the anchor. Reference the anchor from the companion PR body as `Refs #N` or `Part of #N` and never put any closing verb (negated or not) next to `#N`: the closing predicate (`pr-refs.py` / `src/github/pr-refs.ts`) rejects a negated verb but a plain one still counts, and GitHub's own auto-close IGNORES negation — a companion body reading "Does not close #N" still auto-closes the anchor on merge.
 
-**Partial delivery of a fresh build (issue #5400).** When a FRESH (non-resume) build ships only a slice of its anchor, never open a `Refs`-only PR: the QA and dev-resume lanes find a PR through the issue it CLOSES, so it strands green and unreviewed (`targetDevResumePick` never pairs it; CSB PR #270). File a child issue on `$TARGET_GH_REPO` for exactly that slice, link it as a native sub-issue of the anchor, and open the PR with `Closes #<child>` plus `Part of #<anchor>` (never a closing verb next to the anchor). This does not change the resume rule above (#4854: a resume never rewrites `Closes` to `Refs`; splitting is not the resume's decision) nor the companion rule (#4767: glossary/ADR companions stay `Refs`-only).
+**Partial delivery of a fresh build.** When a FRESH (non-resume) build ships only a slice of its anchor, never open a `Refs`-only PR: the QA and dev-resume lanes find a PR through the issue it CLOSES, so it strands green and unreviewed (`targetDevResumePick` never pairs it). File a child issue on `$TARGET_GH_REPO` for exactly that slice, link it as a native sub-issue of the anchor, and open the PR with `Closes #<child>` plus `Part of #<anchor>` (never a closing verb next to the anchor). This does not change the resume rule above (a resume never rewrites `Closes` to `Refs`; splitting is not the resume's decision) nor the companion rule (#4767: glossary/ADR companions stay `Refs`-only).
 
-**Fence preservation for companions (issue #4767).** A `Refs #N` companion is not in the anchor's `closingIssuesReferences`, so the Target's `automerge.yml` operator fence can no longer see the anchor's labels through the link — the fence reads the PR's OWN labels (gaberoo322/hydra#4558). When the anchor carries `money-critical` or `hold-for-operator`, apply that same label to the companion PR itself at creation, BEFORE its CI concludes, so a companion of a fenced anchor never becomes merge-on-green unreviewed (the PR #1026 class).
+**Fence preservation for companions.** A `Refs #N` companion is not in the anchor's `closingIssuesReferences`, so the Target's `automerge.yml` operator fence cannot see the anchor's labels through the link — the fence reads the PR's OWN labels. When the anchor carries `money-critical` or `hold-for-operator`, apply that same label to the companion PR itself at creation, BEFORE its CI concludes, so a companion of a fenced anchor never becomes merge-on-green unreviewed (the PR #1026 class).
 
 Gating discipline: the criteria are deliberately strict. **Both** ADR criteria must hold (hard-to-reverse AND surprising-to-a-reader AND has a real trade-off). Glossary updates fire only when you can write the one-line gloss now — if you can't, there's no glossary entry to add. Most builds will declare `none / none` — that's the expected steady state. The design-concept gate (hydra-grill) already caught the anticipated terms upfront; this step covers only the residual case where new vocabulary surfaced during implementation.
 
 ### 6.7. Changelog fragment (or opt out)
 
-Before opening the code PR, author a per-PR changelog fragment for any user- or operator-visible change (issue #3658, epic #3676). This mirrors the Orchestrator convention on the Target board.
+Before opening the code PR, author a per-PR changelog fragment for any user- or operator-visible change. This mirrors the Orchestrator convention on the Target board.
 
 **Only when the Target repo has adopted the `.changelog/` convention** (a `.changelog/README.md` exists in `$TARGET_WS/`): write **one** file `.changelog/<issue>-<slug>.md` — `<issue>` is the issue this build closes, `<slug>` a short kebab-case description — whose sole line is a curated, imperative, user-facing note (NOT the issue title):
 
@@ -830,9 +825,9 @@ Before opening the code PR, author a per-PR changelog fragment for any user- or 
 
 `<type>` is a Conventional-Commits type (`feat`/`fix`/`perf`/`refactor`/`docs`/`test`/`build`/`ci`/`chore`/`revert`); the dashboard groups by type at render time and links the note to the issue. Commit the fragment with your change. For a genuinely user-invisible change (pure chore, test-only, internal refactor with no observable effect), apply the **`skip-changelog`** label to the PR instead of adding an empty fragment. There is no committed `CHANGELOG.md`; per-PR fragment files are conflict-free across parallel builds.
 
-**Graceful no-op until the Target adopts the convention:** if `$TARGET_WS/.changelog/README.md` is absent, the Target board has not yet mirrored this convention — skip this step entirely (the Target's Versions card degrades to "no releases yet"). Do NOT create the directory or the `skip-changelog` label yourself; that is the follow-on Target adoption ticket's job. QA gets no changelog role.
+**Graceful no-op when the Target has no changelog convention:** if `$TARGET_WS/.changelog/README.md` is absent, skip this step entirely (the Target's Versions card degrades to "no releases yet"). Do NOT create the directory or the `skip-changelog` label yourself; that is the follow-on Target adoption ticket's job. QA gets no changelog role.
 
-### Foreground-wait contract — read before the merge phase (issue #3953)
+### Foreground-wait contract — read before the merge phase
 
 A backgrounded wait is **structurally unrecoverable**: end the turn while CI (or
 any other result) is still pending and the result is delivered to a session
@@ -887,27 +882,13 @@ failure mode.
 
 ### 7–10. Merge, deploy, verify, state sync, and report
 
-> **Resume dispatches (Step 0.7) NEVER reach this phase** — the PR already exists (`resume_pr`) and the Target's automerge owns merging. The resume's shipping step is one fast-forward push (`git push origin HEAD:$RESUME_BRANCH`, Step 0.7's push contract) plus the `needs-dev-resume` → `needs-qa` relabel, preceded by the closing-ref guard and fence-label mirror (Step 0.7 pre-push guards, #4854); no PR creation, no merge, no changelog fragment, no deploy steps.
+> **Resume dispatches (Step 0.7) NEVER reach this phase** — the PR already exists (`resume_pr`) and the Target's automerge owns merging. The resume's shipping step is one fast-forward push (`git push origin HEAD:$RESUME_BRANCH`, Step 0.7's push contract) plus the `needs-dev-resume` → `needs-qa` relabel, preceded by the closing-ref guard and fence-label mirror (Step 0.7 pre-push guards); no PR creation, no merge, no changelog fragment, no deploy steps.
 
-> **CONTEXT POINTER:** when you reach the merge phase, read `hydra-target-build-merge-flow.md` (sibling of this SKILL.md). It covers: pre-merge health baseline snapshot (MANDATORY), the PR-only merge path (the Target's `main` may be branch-protected, so the build never pushes to it; already-merged-post-green is SUCCESS not friction; and the operator-review fence — a PR that itself, whose linked issue(s), or whose anchor carries `money-critical` or `hold-for-operator` is NEVER merged by the build, AND is fenced at the SOURCE: the target's own `automerge.yml` skips the squash-merge when the PR's own labels, or any issue it closes in that repo, carry either label. Both fences resolve the same subjects — the PR's own labels first (a Target's CI may apply the fencing label to the PR itself during its CI run, so read them only after that run concludes), then every same-repo issue the PR links via `closingIssuesReferences`, plus the anchor — and both FAIL CLOSED, so a failed lookup counts as fenced. Green-but-unmerged is a handoff to the operator, not friction; see gaberoo322/hydra#4224), deploy verification — wait for the Target's own CI-owned deploy and compare the deployed SHA; the build never deploys, restarts, or tests in the serving tree — post-merge verify via the main-branch CI run (revert PR on regression), operational-health smoke check (alarm-only), worktree cleanup, state sync, friction report, and the summary table.
+> **CONTEXT POINTER:** when you reach the merge phase, read `hydra-target-build-merge-flow.md` (sibling of this SKILL.md). It covers: pre-merge health baseline snapshot (MANDATORY), the PR-only merge path (the Target's `main` may be branch-protected, so the build never pushes to it; already-merged-post-green is SUCCESS not friction; and the operator-review fence — a PR that itself, whose linked issue(s), or whose anchor carries `money-critical` or `hold-for-operator` is NEVER merged by the build, AND is fenced at the SOURCE: the target's own `automerge.yml` skips the squash-merge when the PR's own labels, or any issue it closes in that repo, carry either label. Both fences resolve the same subjects — the PR's own labels first (a Target's CI may apply the fencing label to the PR itself during its CI run, so read them only after that run concludes), then every same-repo issue the PR links via `closingIssuesReferences`, plus the anchor — and both FAIL CLOSED, so a failed lookup counts as fenced. Green-but-unmerged is a handoff to the operator, not friction), deploy verification — wait for the Target's own CI-owned deploy and compare the deployed SHA; the build never deploys, restarts, or tests in the serving tree — post-merge verify via the main-branch CI run (revert PR on regression), operational-health smoke check (alarm-only), worktree cleanup, state sync, friction report, and the summary table.
 
 ### Step 8.5. Worktree cleanup (on success)
 
-On success, remove the target worktree created in Step 0.6. Leaking on crash is acceptable — `scripts/branch-prune.sh` will GC it — but on the happy path we clean up so `$TARGET_APP_DIR/.worktrees/` does not fill with stale directories (issues #3173, #542, #4177):
-
-```bash
-git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" worktree remove --force "$TARGET_WT" 2>&1 || \
-  echo "warn: worktree remove failed for $TARGET_WT — branch-prune.sh will GC it later"
-# Remove the SIBLING gate dir alongside the worktree (issue #4526): it holds
-# the gate mirror, pmh-baseline.json, and build logs — all disposable. A
-# crashed cycle can leak it exactly like it can leak the worktree itself;
-# orphaned *.hydra-gate dirs are branch-prune GC follow-up, not build work.
-rm -rf "$HYDRA_GATE_DIR"
-# Prune stale metadata: an interrupted remove (or an out-of-band `rm -rf` of
-# $TARGET_WT) can leave an orphaned .git/worktrees/<id> entry that blocks the
-# next `git branch -d` with "branch ... used by worktree at '...'".
-git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" worktree prune 2>&1 || true
-```
+Runs on every successful build, including the resume arm. The recipe (worktree remove, gate-dir removal, metadata prune, branch delete) lives once, in `hydra-target-build-merge-flow.md` Step 8.5.
 
 </child-prompt>
 
@@ -921,7 +902,7 @@ git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" worktr
 
 Never assume a stack from this skill (ADR-0013 — generality lives in the swap): framework/library versions may differ from training data, so read the Target's own docs above before assuming conventions. Every Target path derives from the manifest (`verify.appSubdir`) and the seam (`scripts/target/print-target-facts.ts`).
 
-## Guard-compatible shell forms (issue #3837 AC #3, swept in #3896)
+## Guard-compatible shell forms
 
 The harness's worktree-isolation Bash guard — the same fence `hydra-dev` meets on
 the Orchestrator side — refuses Bash commands it judges too complex to verify
@@ -941,13 +922,13 @@ into plain sequential ones: write intermediate results to temp files or plain
 variables, then operate on those — never nest `$( $( ) )` and never use `<(...)`
 (the Step 6.6 mutation-gate recipe resolves `MERGE_BASE` first for exactly this
 reason); where a loop only exists to scan a list, prefer a single flat `gh api | jq | python3 pr-refs.py --closing`
-pipeline plus a `case` test (as the shipped-anchor preflight does, issues #4167, #4694).
+pipeline plus a `case` test (as the shipped-anchor preflight does).
 
 Do NOT disable or work around the guard itself — it is the isolation fence. The
 full note (with the `Monitor` CI-poll corollary) lives in
 `_fragments/hydra-dev-parent-flow.md` under the same heading.
 
-## Slot lifecycle events — PostToolUse hook (issue #671)
+## Slot lifecycle events — PostToolUse hook
 
 Every tool call inside this skill emits a `subagent_tool_call` event onto the
 Redis stream `hydra:autopilot:slot-events`, classified at emit-time so the
