@@ -1,0 +1,1 @@
+- feat: add advisory logger-seam and fail-loud-catch-src ast-grep rules; STD-LOG-PINO-SEAM now covers all src/ logging (#5435)

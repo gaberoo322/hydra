@@ -39,6 +39,7 @@ import {
 export const FAIL_LOUD_BASELINE_REL = "test/fixtures/fail-loud-baseline.json";
 export const FAIL_LOUD_RULE_IDS = [
   "fail-loud-catch",
+  "fail-loud-catch-src",
   "fail-loud-except-py",
   "fail-loud-devnull-sh",
 ] as const;
