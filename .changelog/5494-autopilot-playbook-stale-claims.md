@@ -1,0 +1,1 @@
+- docs: correct stale and harmful claims in the autopilot playbook and fragments (#5494)

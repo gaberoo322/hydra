@@ -5,7 +5,6 @@
       "route /api/autopilot/inflight"
     ],
     "docs/operator-playbooks/_fragments/hydra-autopilot-phase6-ops.md": [
-      "path src/api/autopilot.ts",
       "superseded-adr 0004"
     ],
     "docs/operator-playbooks/_fragments/hydra-qa-reference.md": [
