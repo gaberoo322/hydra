@@ -1,6 +1,6 @@
 #!/usr/bin/env -S npx tsx
 /**
- * Schema Seam check — ADR-0011 closure ratchet (issue #893).
+ * Schema Seam check — ADR-0011 closure ratchet (issue #893, STD-SCHEMA-SEAM).
  *
  * ADR-0011 decided that every HTTP `req.body` read in `src/api/*.ts` validates
  * through a `src/schemas/<domain>.ts` zod `safeParse` and returns the canonical

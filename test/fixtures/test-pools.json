@@ -10,7 +10,6 @@
     "test/biome-check.test.mts",
     "test/changelog-check.test.mts",
     "test/ci-test-job-pipefail-guard.test.mts",
-    "test/coding-standards-integrity.test.mts",
     "test/dashboard-ticking-clock.test.mts",
     "test/dashboard-today-polling.test.mts",
     "test/display-format.test.mts",
