@@ -8,7 +8,7 @@
  * `{reviewPacketPath, standardsPacketPath, standardsFound, specInputPath,
  * priorFindings, rereviewDiffBase, mergeDanger, degraded[]}`. The review packet
  * text is byte-identical to the playbook bash it replaces (the `Diff
- * (<sha12>…HEAD):` header, the `===== <f> @ HEAD =====` sections, the
+ * (<sha12>…<head12>):` header, the `===== <f> @ <head12> =====` sections, the
  * deleted-file sentinel, the appended re-review context and the informational
  * Merge-danger line). The packet NEVER carries the standards text — that goes
  * only to the Standards prompts (the Spec axis must not see it). An unreadable
@@ -37,13 +37,14 @@ import {
   type PacketResult,
   type PreflightResult,
 } from "../../src/schemas/qa-plumbing-cli.ts";
+import { ensurePrHead } from "../../src/qa/pr-head.ts";
 import { compareMergeDanger, parseMergeDangerField } from "../../src/qa/change-shape.ts";
 import { detectOneWayDoor } from "../../src/qa/one-way-door.ts";
 import { loadCodingStandards, type LoadResult } from "../../src/qa/standards-loader.ts";
 
 export const NO_STANDARDS_SENTINEL =
   "No CODING_STANDARDS.md at repo root — judge against the Fowler battery and the remaining Hydra checks only";
-const DELETED_SENTINEL = "(file deleted or absent at HEAD — see the diff above)";
+const DELETED_SENTINEL = "(file deleted or absent at the PR head — see the diff above)";
 
 /** What bash command substitution does to a captured stdout: drop trailing newlines. */
 const chomp = (s: string): string => s.replace(/\n+$/, "");
@@ -80,6 +81,8 @@ export async function runPacket(
   }
   const { fixedSha } = pre;
   const prNumber = pre.pr.number;
+  const headSha = pre.pr.headSha;
+  const headSha12 = headSha.slice(0, 12);
   const degraded: string[] = [];
 
   // Standards-axis only (ADR-0046 Decision 3). Load FIRST: a failed read must
@@ -89,28 +92,32 @@ export async function runPacket(
     throw new Error(`standards catalog read failed: ${(standards as { message: string }).message}`);
   }
 
+  // Every revision below is the PR head sha, never the worktree's HEAD (#5520).
+  const head = await ensurePrHead(ports.git, prNumber, headSha);
+  if (!head.ok) throw new Error(head.reason);
+
   // 7.0 the shared review packet, captured ONCE.
-  const diff = await ports.git(["diff", `${fixedSha}...HEAD`]);
+  const diff = await ports.git(["diff", `${fixedSha}...${headSha}`]);
   if (!diff.ok) throw new Error(`git diff failed: ${diff.stderr}`);
   const diffText = chomp(diff.stdout);
-  const names = await ports.git(["diff", "--name-only", `${fixedSha}...HEAD`]);
+  const names = await ports.git(["diff", "--name-only", `${fixedSha}...${headSha}`]);
   if (!names.ok) throw new Error(`git diff --name-only failed: ${names.stderr}`);
   let changedFilesPacket = "";
   for (const f of names.stdout.split("\n")) {
     if (f === "") continue;
-    const shown = await ports.git(["show", `HEAD:${f}`]);
+    const shown = await ports.git(["show", `${headSha}:${f}`]);
     let body: string;
     if (shown.ok) body = chomp(shown.stdout);
     else if (/does not exist|exists on disk, but not in/i.test(shown.stderr)) body = DELETED_SENTINEL;
     else {
       // Not a missing path: a transient error must not read as a deleted file.
-      console.error(`[hydra-qa] WARN: show HEAD:${f} failed — packet entry unavailable:`, shown.stderr.slice(0, 300));
+      console.error(`[hydra-qa] WARN: show ${headSha12}:${f} failed — packet entry unavailable:`, shown.stderr.slice(0, 300));
       degraded.push("changed-file-unreadable");
       body = `(file contents unavailable — show failed: ${shown.stderr.slice(0, 120)})`;
     }
-    changedFilesPacket += `===== ${f} @ HEAD =====\n${body}\n\n`;
+    changedFilesPacket += `===== ${f} @ ${headSha12} =====\n${body}\n\n`;
   }
-  let packet = `Diff (${fixedSha.slice(0, 12)}…HEAD):\n\n${diffText}\n\nFull contents of every changed file at HEAD:\n\n${changedFilesPacket}`;
+  let packet = `Diff (${fixedSha.slice(0, 12)}…${headSha12}):\n\n${diffText}\n\nFull contents of every changed file at ${headSha12}:\n\n${changedFilesPacket}`;
 
   // 7.0a re-review context after a FAIL — every failure means no context.
   let priorFindings = "";
@@ -127,12 +134,12 @@ export async function runPacket(
   if (priorFindings !== "") {
     packet += `\n\nRE-REVIEW CONTEXT — the previous QA round FAILed with the findings below. Review the FULL change above as usual. In your report, first state fixed/not-fixed for each prior finding; for anything new, prefer medium+ and say why it wasn't visible before.\n\n${priorFindings}`;
     if (rereviewDiffBase !== "") {
-      const since = await ports.git(["diff", "--no-renames", rereviewDiffBase, "HEAD"]);
+      const since = await ports.git(["diff", "--no-renames", rereviewDiffBase, headSha]);
       if (!since.ok) {
         console.error("[hydra-qa] WARN: since-prior-verdict diff failed:", since.stderr.slice(0, 300));
         degraded.push("since-diff");
       }
-      packet += `\n\nChanges since the prior verdict (${rereviewDiffBase}..HEAD), context only:\n\n${since.ok ? chomp(since.stdout) : "(since-diff unavailable — diff failed)"}`;
+      packet += `\n\nChanges since the prior verdict (${rereviewDiffBase}..${headSha12}), context only:\n\n${since.ok ? chomp(since.stdout) : "(since-diff unavailable — diff failed)"}`;
     }
   } else {
     rereviewDiffBase = "";
@@ -143,13 +150,12 @@ export async function runPacket(
   let mdGap: string | null = null;
   try {
     const bodyRes = await ports.gh(["pr", "view", String(prNumber), "--repo", repo, "--json", "body", "--jq", ".body"]);
-    const pathsRes = await ports.git(["diff", "--no-renames", "--name-only", `${fixedSha}...HEAD`]);
-    const head = await ports.git(["rev-parse", "HEAD"]);
+    const pathsRes = await ports.git(["diff", "--no-renames", "--name-only", `${fixedSha}...${headSha}`]);
     if (!bodyRes.ok || !pathsRes.ok) throw new Error("merge-danger inputs unreadable");
     const paths = pathsRes.stdout.split("\n").filter((l) => l !== "");
     const det = detectOneWayDoor({ paths, diff: diffText });
     const field = parseMergeDangerField(bodyRes.stdout);
-    const check = compareMergeDanger(field, det, { pr: String(prNumber), sha: head.ok ? head.stdout.trim() : "" });
+    const check = compareMergeDanger(field, det, { pr: String(prNumber), sha: headSha });
     mdFinding = check.finding ?? null;
     mdGap = check.gapLine ?? null;
     packet += `\n\nMerge danger check (informational): declared=${field.declared ?? "none"} detector=${det.door} outcome=${check.outcome} classes=${(det.classes ?? []).join(",")}`;

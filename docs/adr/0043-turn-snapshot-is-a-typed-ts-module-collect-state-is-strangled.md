@@ -129,6 +129,14 @@ script's `python3` heredoc count, and each slice lowers it. The ceiling starts a
   accessor that fails loud in replay mode, the py/jq/py-format compat leaves are deleted, the replay
   contract test replaces the two cross-language drift guards, and adding a signal is collector + zod
   key + `decide.py` policy.
+- Retired (#5442): the plan-parity corpus (`decide-inputs.jsonl.gz`, 611 entries) is stored in the JSON
+  Turn Snapshot form and is a fixed historical regression set. It was converted once from the legacy
+  `state.signals` + blob form, and the conversion code, its per-signal type tuples, the capture harness
+  and `pack-corpus.mjs` are deleted; the corpus is never re-captured. Signals added after the capture
+  (2026-10-07) stay absent from its entries, and `decide-plans.jsonl.gz` is unchanged. A signal is
+  declared in exactly three TypeScript sites: the schema key in `src/schemas/turn-snapshot.ts`, its
+  degraded default in `ALL_DEGRADED_SIGNALS` (same file), and the emitter mapping in
+  `src/autopilot/turn-snapshot/json-snapshot.ts` (`buildTurnSnapshot`).
 
 ## Alternatives considered
 

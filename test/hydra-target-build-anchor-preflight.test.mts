@@ -362,6 +362,18 @@ function listTree(root: string): string[] {
   return (res.stdout ?? "").split("\n").filter(Boolean).sort();
 }
 
+/** What the capability seam exports for the Target's package.json: the generator script name, or empty. */
+function capabilityGenerator(packageJson: string | undefined): string {
+  if (packageJson === undefined) return "";
+  try {
+    const scripts = (JSON.parse(packageJson) as { scripts?: Record<string, string> }).scripts ?? {};
+    return scripts["deadcode:ledger"] ? "deadcode:ledger" : "";
+  } catch {
+    /* intentional: malformed package.json means no generator capability, mirroring the seam probe */
+    return "";
+  }
+}
+
 function runStep31(opts: Run31Opts): Run31Result {
   const dir = mkdtempSync(join(tmpdir(), "preflight-4531-"));
   try {
@@ -391,6 +403,8 @@ function runStep31(opts: Run31Opts): Run31Result {
       `TARGET_WS=${shSingleQuote(ws)}`,
       `TARGET_APP_SUBDIR=${shSingleQuote(subdir)}`,
       `TARGET_GH_REPO='example/target'`,
+      `TARGET_CAP_WIRING_LEDGER=${shSingleQuote(opts.ledger !== undefined ? "docs/agents/wiring-status.md" : "")}`,
+      `TARGET_CAP_WIRING_LEDGER_GENERATOR=${shSingleQuote(capabilityGenerator(opts.packageJson))}`,
       `ANCHOR_NUM='431'`,
       `ANCHOR_REF='issue-431'`,
       `CYCLE_ID='test-cycle'`,
@@ -411,6 +425,7 @@ function runStep31(opts: Run31Opts): Run31Result {
         PATH: `${binDir}:${process.env.PATH ?? ""}`,
         GH_LOG: ghLogPath,
         HYDRA_LOG: hydraLogPath,
+        HYDRA_ROOT: REPO_ROOT,
       },
     });
     const all = (res.stdout ?? "").split("\n").filter((l) => l.length > 0);
@@ -522,7 +537,7 @@ test("the ledger-missing probe never writes into the Target workspace", () => {
   }
 });
 
-test("the ledger-missing branch stays guard-compatible: one flat jq probe, no loops, no nested substitution", () => {
+test("the ledger-missing branch stays guard-compatible: no substitution, no loops, reads the capability seam", () => {
   const branch = extractLedgerMissingBranch();
   const shellOnly = branch
     .replace(/'[\s\S]*?'/g, "''")
@@ -530,24 +545,23 @@ test("the ledger-missing branch stays guard-compatible: one flat jq probe, no lo
     .filter((l) => !/^\s*#/.test(l))
     .join("\n");
   assert.ok(!/<\(/.test(shellOnly), "no process substitution — the #3896 guard refuses it");
-  assert.ok(!/\$\([^)]*\$\(/.test(shellOnly), "no nested command substitution — refused");
+  assert.ok(!/\$\(/.test(shellOnly), "no command substitution — the ledger and generator come from the seam");
   assert.ok(
     !/^[ \t]*(for|while|until)[ \t]/m.test(shellOnly) && !/^[ \t]*done\b/m.test(shellOnly),
     "no shell loop in the ledger-missing branch",
   );
-  assert.equal((shellOnly.match(/\$\(/g) ?? []).length, 1, "exactly one command substitution: the jq generator probe");
-  assert.ok(branch.includes(`.scripts["deadcode:ledger"] // empty`), "the probe reads scripts[\"deadcode:ledger\"]");
-  assert.ok(
-    branch.includes('"$TARGET_WS/${TARGET_APP_SUBDIR:+$TARGET_APP_SUBDIR/}package.json"'),
-    "the probe reads package.json from $TARGET_WS — the same tree the ledger is read from",
-  );
+  assert.ok(branch.includes('[ -n "$TARGET_CAP_WIRING_LEDGER_GENERATOR" ]'), "the cue is gated on the generator capability");
+  assert.ok(!/package\.json|deadcode:ledger|wiring-status\.md/.test(shellOnly), "no Target convention name is spelled");
   assert.ok(!/git[ \t]+(checkout|pull)\b/.test(shellOnly), "the probe must never checkout/pull");
   assert.ok(!/\bexit\b/.test(shellOnly), "no ledger-missing branch may exit the build");
 });
 
 test("the step 3.1 prose describes the two-branch ledger-missing behaviour", () => {
   const step31 = FRAGMENT.slice(FRAGMENT.indexOf("### 3.1."), FRAGMENT.indexOf("### 3.2."));
-  assert.ok(step31.includes("deadcode:ledger"), "the prose must name the generator that makes a ledger expected");
+  assert.ok(
+    step31.includes("$TARGET_CAP_WIRING_LEDGER_GENERATOR"),
+    "the prose must name the capability that makes a ledger expected",
+  );
   assert.ok(
     !step31.includes("`grep` exits non-zero"),
     "the stale claim that grep runs against a missing ledger must be gone — the guard short-circuits first",

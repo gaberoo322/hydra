@@ -105,8 +105,10 @@ Pick `<next>` (it MUST equal the trailer's `next=`) and `--reason`:
 
 Exit codes: `0` = written (in shadow the JSON may carry `wouldRefuse:<code>`;
 report it, do not retry). `1` = refused or failed: leave the label as is and
-report the code in the run summary / Friction Report. If the trailer itself was
-wrong (e.g. `research-trailer-next-mismatch`), post ONE corrected findings
-comment and retry once. `2` = usage error, a playbook bug.
-
-The issue returns to triage (or the chosen state) for review of the findings.
+report the code in the run summary / Friction Report. The research-exit gate
+needs exactly one `Hydra-Research:` line in a comment posted after the issue
+entered `needs-research`, so `research-trailer-next-mismatch`,
+`research-trailer-ambiguous`/`-malformed`/`-missing` and `research-trailer-stale`
+are fixed by ONE corrected findings comment and one retry.
+`scope-section-missing` (`ready-for-agent` without `## Files in scope`) is not
+retried: re-advance to `needs-triage`. `2` = usage error, a playbook bug.
