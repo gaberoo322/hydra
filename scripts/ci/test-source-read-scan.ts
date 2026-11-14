@@ -436,8 +436,8 @@ export function checkPinSites(observed: Record<string, PinCounts>, baseline: Rea
 }
 
 export type BaselineWritePlan =
-  | { ok: true; next: ReadBaseline }
-  | { ok: false; refusals: ReadViolation[] };
+  | { ok: true; next: ReadBaseline; refusals?: undefined }
+  | { ok: false; refusals: ReadViolation[]; next?: undefined };
 
 /**
  * Pure write/refuse decision behind `--write-baseline` / `--init` (INV-3).
@@ -464,11 +464,11 @@ async function main(): Promise<number> {
   if (write) {
     const plan = planBaselineWrite(observed, baseline, init);
     if (!plan.ok) {
-      for (const v of plan.refusals) console.error(v.message);
+      for (const v of plan.refusals ?? []) console.error(v.message);
       console.error("test-source-read-scan: refusing to grow the baseline (use --init only to seed).");
       return 1;
     }
-    await writeJsonBaseline(join(REPO_ROOT, BASELINE_REL), plan.next);
+    await writeJsonBaseline(join(REPO_ROOT, BASELINE_REL), plan.next as ReadBaseline);
     console.log(`test-source-read-scan: wrote pinSites for ${Object.keys(observed).length} file(s).`);
     return 0;
   }
