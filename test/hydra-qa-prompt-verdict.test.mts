@@ -449,7 +449,7 @@ describe("hydra-qa playbook wires convergent review (issue #4735)", () => {
   test("the re-review context is APPENDED to the full packet, with the confirm-first instruction", () => {
     const packetSrc = readFileSync(join(REPO_ROOT, "scripts", "qa", "packet.ts"), "utf8");
     assert.ok(packetSrc.includes("${priorFindings}"));
-    assert.ok(packetSrc.includes('["diff", "--no-renames", rereviewDiffBase, "HEAD"]'));
+    assert.ok(packetSrc.includes('["diff", "--no-renames", rereviewDiffBase, headSha]'));
     assert.ok(packetSrc.includes("packet += `"), "the context is appended; the full diff and changed files stay first");
     assert.match(packetSrc, /first state fixed\/not-fixed for each prior finding; for anything new, prefer medium\+ and say why it wasn't visible before/);
     assert.match(QA_PLAYBOOK, /first state fixed\/not-fixed for each prior finding; for anything new, prefer medium\+ and say why it wasn't visible before/i, "the re-review brief stays in the reviewer prompts");
