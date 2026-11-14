@@ -32,6 +32,7 @@ import {
   advisoryPromptSites,
   checkReadRatchet,
   isCodePathLiteral,
+  planBaselineWrite,
   pinSitesOf,
   readsCodePath,
   scanPinSites,
@@ -154,5 +155,33 @@ describe("test-source-read ratchet (detection rules, synthetic sources)", () => 
 
   it("the kind set is closed", () => {
     assert.deepEqual([...READ_KINDS], ["drift-guard", "invariant-lint", "dashboard-pin", "behaviour", "grandfathered"]);
+  });
+});
+
+describe("test-source-read ratchet (baseline write decision, INV-3)", () => {
+  const baseline: ReadBaseline = {
+    files: { "test/a.test.mts": "behaviour" },
+    pinSites: { "test/a.test.mts": { code: 2, prompt: 1 } },
+  };
+
+  it("--write-baseline refuses growth and names the grown file", () => {
+    const plan = planBaselineWrite({ "test/a.test.mts": { code: 3, prompt: 1 } }, baseline, false);
+    assert.equal(plan.ok, false);
+    if (!plan.ok) assert.deepEqual(plan.refusals.map((r) => r.file), ["test/a.test.mts"]);
+  });
+
+  it("--write-baseline accepts a shrink and never touches the files rows", () => {
+    const plan = planBaselineWrite({ "test/a.test.mts": { code: 1, prompt: 0 } }, baseline, false);
+    assert.equal(plan.ok, true);
+    if (plan.ok) {
+      assert.deepEqual(plan.next.pinSites, { "test/a.test.mts": { code: 1, prompt: 0 } });
+      assert.deepEqual(plan.next.files, baseline.files);
+    }
+  });
+
+  it("--init is the only growth path", () => {
+    const plan = planBaselineWrite({ "test/a.test.mts": { code: 9, prompt: 9 } }, baseline, true);
+    assert.equal(plan.ok, true);
+    if (plan.ok) assert.deepEqual(plan.next.pinSites, { "test/a.test.mts": { code: 9, prompt: 9 } });
   });
 });
