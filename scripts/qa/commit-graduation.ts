@@ -26,8 +26,8 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { loadRolloutSwitches, type TripState } from "../../src/qa/rollout-switches.ts";
-import { parseQaFixCommitTrailer } from "../../src/qa/verdict-trailer.ts";
-import { MATURITY_DAYS } from "./cohort-baseline.ts";
+import { parseQaFixCommitTrailer, parseQaVerdictTrailers } from "../../src/qa/verdict-trailer.ts";
+import { DEFAULT_SINCE, MATURITY_DAYS } from "./cohort-baseline.ts";
 
 /** ADR-0046 D6: "~10 clean class-A fixes". */
 export const GRADUATION_MIN_CLEAN_A = 10;
@@ -196,37 +196,85 @@ export function planFlipItem(report: CommitGraduationReport, openIssues: OpenIss
 // CLI helpers (gh) — the pure folds above are the tested surface
 // ---------------------------------------------------------------------------
 
-/** Null (after logging) when any gh read fails: the caller exits 1, never grades a partial harvest. */
+/**
+ * Pure. True iff the PR has matured (its escape window has closed by `nowMs`) but the cohort fixture was generated
+ * before that window closed, so the fixture's escape list cannot vouch for it. An immature PR is never stale (the
+ * fold counts it as immature regardless); an unparseable fixture instant is stale (fail loud, never grade blind).
+ */
+export function escapeFixtureStale(mergedAt: string, nowMs: number, fixtureUntilMs: number): boolean {
+  const windowEndMs = Date.parse(mergedAt) + MATURITY_DAYS * DAY_MS;
+  if (Number.isNaN(windowEndMs)) return false; // the fold counts an unparseable mergedAt as immature
+  if (windowEndMs > nowMs) return false;
+  return !(windowEndMs <= fixtureUntilMs);
+}
+
+/**
+ * Null (after logging) when any gh read fails or the escape cohort is stale: the caller exits 1, never grades a
+ * partial harvest. Merged PRs and their latest QA-Verdict trailer come live from gh (INV-10); the checked-in
+ * cohort fixture supplies ONLY the escape list, and only while it covers each candidate's escape window.
+ */
 async function harvest(repo: string, repoRoot: string): Promise<{ inputs: CommitGraduationInputs } | null> {
   const { ghJson } = await import("../../src/github/gh.ts");
   const fixture = JSON.parse(readFileSync(`${repoRoot}/${COHORT_FIXTURE_PATH}`, "utf8")) as any;
   const until = new Date().toISOString();
-  const candidates: Array<{ number: number; mergedAt: string; latestQaFixes: string[] }> = [];
-  for (const pr of fixture?.inputs?.prs ?? []) {
-    const trailers = Array.isArray(pr?.trailers) ? pr.trailers : [];
-    const latest = trailers.reduce((a: any, t: any) => (!a || t.round >= a.round ? t : a), null);
-    if (latest && Array.isArray(latest.qaFixes) && latest.qaFixes.length > 0) {
-      candidates.push({ number: pr.number, mergedAt: pr.mergedAt, latestQaFixes: latest.qaFixes });
-    }
+  const fixtureUntilMs = Date.parse(String(fixture?.inputs?.until ?? ""));
+  const opts = { timeout: 300_000, maxBuffer: 256 * 1024 * 1024 };
+  const q = encodeURIComponent(`repo:${repo} is:pr is:merged merged:>=${DEFAULT_SINCE.slice(0, 10)}`);
+  const found = await ghJson<Array<{ total_count?: number; items: Array<{ number: number; pull_request?: { merged_at?: string | null } }> }>>(
+    ["api", `search/issues?q=${q}&per_page=100`, "--paginate", "--slurp"],
+    opts,
+  );
+  if (found.ok === false) {
+    console.error(`[commit-graduation] gh search of merged PRs failed: ${found.code}`);
+    return null;
+  }
+  const merged = found.data.flatMap((pg) => pg.items ?? []);
+  if (merged.length < (found.data[0]?.total_count ?? 0)) {
+    console.error("[commit-graduation] merged-PR search is truncated (search API caps at 1000); narrow the window");
+    return null;
   }
   const prs: CommitGraduationPr[] = [];
-  for (const c of candidates) {
-    const res = await ghJson<Array<{ commit: { message: string } }>[]>(
-      ["api", `repos/${repo}/pulls/${c.number}/commits?per_page=100`, "--paginate", "--slurp"],
-      { timeout: 120_000 },
+  for (const it of merged) {
+    const mergedAt = it.pull_request?.merged_at;
+    if (!mergedAt) continue;
+    const comments = await ghJson<Array<Array<{ body: string | null }>>>(
+      ["api", `repos/${repo}/issues/${it.number}/comments?per_page=100`, "--paginate", "--slurp"],
+      opts,
     );
-    if (res.ok === false) {
-      console.error(`[commit-graduation] gh api pulls/${c.number}/commits failed: ${res.code}`);
+    if (comments.ok === false) {
+      console.error(`[commit-graduation] gh api issues/${it.number}/comments failed: ${comments.code}`);
       return null;
     }
-    prs.push({ ...c, commitMessages: res.data.flat().map((x) => x.commit.message) });
+    const trailers = comments.data.flat().flatMap((c) => parseQaVerdictTrailers(c.body)).filter((t) => t.pr === it.number);
+    const latest = trailers.reduce<(typeof trailers)[number] | null>((a, t) => (!a || t.round >= a.round ? t : a), null);
+    if (!latest || !latest.qaFixes || latest.qaFixes.length === 0) continue;
+    if (escapeFixtureStale(mergedAt, Date.now(), fixtureUntilMs)) {
+      console.error(
+        `[commit-graduation] cohort fixture (until ${fixture?.inputs?.until}) predates PR #${it.number}'s escape window; refresh it with scripts/qa/cohort-baseline.ts --write-baseline`,
+      );
+      return null;
+    }
+    const commits = await ghJson<Array<Array<{ commit: { message: string } }>>>(
+      ["api", `repos/${repo}/pulls/${it.number}/commits?per_page=100`, "--paginate", "--slurp"],
+      opts,
+    );
+    if (commits.ok === false) {
+      console.error(`[commit-graduation] gh api pulls/${it.number}/commits failed: ${commits.code}`);
+      return null;
+    }
+    prs.push({
+      number: it.number,
+      mergedAt,
+      latestQaFixes: [...latest.qaFixes],
+      commitMessages: commits.data.flat().map((x) => x.commit.message),
+    });
   }
   const sw = await loadRolloutSwitches(repoRoot);
   return {
     inputs: {
       prs,
       until,
-      pending: fixture?.metrics?.pending ?? [],
+      pending: [], // immaturity is derived from mergedAt against `until` inside the fold
       escapes: (fixture?.metrics?.escapes ?? []).map((e: any) => e.pr),
       switches: { configured: sw.configured["reviewer-commits"], trip: sw.trip.state },
     },

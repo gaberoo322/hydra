@@ -15,6 +15,7 @@ import { countTestCases, decideReviewerCommit, type ReviewerCommitInput } from "
 import { parseTapAssertionProof } from "../src/qa/fix-proof.ts";
 import {
   assessCommitGraduation,
+  escapeFixtureStale,
   GRADUATION_MIN_CLEAN_A,
   planFlipItem,
   FLIP_ITEM_MARKER,
@@ -383,5 +384,39 @@ describe("playbook step 9.4 class-B pins (INV-5, INV-6, INV-13)", () => {
   test("step 9.5 splits the comma-separated qa-fixes into the trailer array", () => {
     const step95 = PLAYBOOK.slice(PLAYBOOK.indexOf("### 9.5 "), PLAYBOOK.indexOf("### 9.6 "));
     assert.ok(step95.includes('split(",")'));
+  });
+});
+
+describe("commit graduation: harvest source (QA round 1 finding 1)", () => {
+  const FIXTURE_UNTIL = Date.parse("2026-10-28T00:48:59Z");
+  const DAY = 86_400_000;
+
+  test("a PR merged after the fixture, whose escape window has closed, makes the fixture stale", () => {
+    // Merged 2026-10-30, mature on 2026-11-13; the fixture (until 10-28) predates the whole window.
+    assert.equal(escapeFixtureStale("2026-10-30T00:00:00Z", Date.parse("2026-11-20T00:00:00Z"), FIXTURE_UNTIL), true);
+  });
+
+  test("sibling shape: a PR whose window the fixture covers keeps the fixture usable", () => {
+    assert.equal(escapeFixtureStale("2026-10-01T00:00:00Z", FIXTURE_UNTIL + DAY, FIXTURE_UNTIL), false);
+  });
+
+  test("sibling shape: an immature PR is never stale (the fold counts it as immature)", () => {
+    assert.equal(escapeFixtureStale("2026-11-10T00:00:00Z", Date.parse("2026-11-13T00:00:00Z"), FIXTURE_UNTIL), false);
+  });
+
+  test("harvest no longer reads candidate PRs from the fixture", () => {
+    const src = readFileSync(join(ROOT, "scripts", "qa", "commit-graduation.ts"), "utf8");
+    assert.ok(!src.includes("fixture?.inputs?.prs"));
+    assert.ok(!src.includes("fixture?.metrics?.pending"));
+  });
+});
+
+describe("hydra-qa step 9.4: a reviewer-added new test file (QA round 1 finding 2)", () => {
+  test("the case-count loop skips a file absent at the reviewed head instead of refusing the round", () => {
+    assert.ok(/git cat-file -e "\$REVIEWED_HEAD:\$p"[^\n]*\|\| continue/.test(PLAYBOOK));
+  });
+
+  test("sibling shape: an existing file still fails closed when its before-copy cannot be read", () => {
+    assert.ok(PLAYBOOK.includes('git show "$REVIEWED_HEAD:$p" > "$BEFORE_FILE" 2>/dev/null || { RC_OK=0;'));
   });
 });

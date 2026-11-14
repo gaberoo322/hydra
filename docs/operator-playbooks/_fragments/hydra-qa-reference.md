@@ -384,6 +384,8 @@ if [ "$REVIEW_VERDICT" = "FAIL" ] && { [ "$RC_HAS_A" = 1 ] || [ "$RC_HAS_B" = 1 
       # No-weakening: a class-B edit never lowers the test( / it( count of any file it touches (fails closed).
       for p in $RC_BLOCKING_TEST_PATHS $RC_FOLLOWUP_TEST_PATHS; do
         [ -f "$p" ] || continue
+        # A reviewer-added NEW test file has no reviewed-head version: its before-count is 0, so there is nothing to lower.
+        git cat-file -e "$REVIEWED_HEAD:$p" 2>/dev/null || continue
         BEFORE_FILE=$(mktemp); git show "$REVIEWED_HEAD:$p" > "$BEFORE_FILE" 2>/dev/null || { RC_OK=0; rm -f "$BEFORE_FILE"; continue; }
         node --experimental-strip-types "$MASTER_WT/scripts/ci/qa-commit-checks.ts" case-count-check "$BEFORE_FILE" "$p" || RC_OK=0   # case-count-check
         rm -f "$BEFORE_FILE"
@@ -417,7 +419,7 @@ if [ "$REVIEW_VERDICT" = "FAIL" ] && { [ "$RC_HAS_A" = 1 ] || [ "$RC_HAS_B" = 1 
     fi
   fi
   # Local deterministic proof BEFORE any push, run from the MASTER-BASED session tree against this PR
-  # worktree (cwd); the reviewer never hand-judges it. Two proofs, both must pass: base `$REVIEWED_HEAD` proves the new commit alone (INV-7), and base `$FIXED_SHA` (origin/master) reads the rollout stage from master, never from the PR tree.
+  # worktree (cwd); the reviewer never hand-judges it. Two proofs, both must pass: base `$REVIEWED_HEAD` proves the new commit alone (INV-7), and base `$FIXED_SHA` (origin/master) reads the switch stage from master, never from the PR tree.
   # A round carrying a class-B commit runs EXACTLY ONE proof, with base $FIXED_SHA: the $REVIEWED_HEAD base's merge-base IS the
   # reviewed head, which already holds the PR's src changes, so every class-B file would pass there and be refused as unproven.
   # The $FIXED_SHA run still evaluates every QA-Fix commit in mergeBase..HEAD (per-commit class/path allowlist, stage read at master).
