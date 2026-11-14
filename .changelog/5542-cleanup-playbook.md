@@ -1,0 +1,1 @@
+- refactor: rewrite the hydra-cleanup playbook under the authoring standard, dropping history narration and the duplicated issue-body template (#5542)

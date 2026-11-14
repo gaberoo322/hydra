@@ -14,7 +14,7 @@ Comprehensive health check of the Hydra autonomous orchestrator. You have full c
 
 If the operator provided a focus area (`$focus`), weight your analysis toward that.
 
-> Prefer `bin/hydra` over raw curl where commands exist. Fall back to `hydra raw GET <path>` for endpoints not yet wrapped.
+> Prefer `bin/hydra` over raw curl where commands exist. Fall back to `hydra raw GET <path>` for endpoints without a command.
 
 ## Phase 1: Collect (run in parallel)
 
@@ -419,7 +419,7 @@ Only report issues actually present — don't speculate.
 - **Docker conflicts**: Could cleanup scripts kill production containers?
 - **Backlog**: Empty queue? Duplicate items? Stale blocked items?
 - **Memory bloat**: Any agent's `:patterns` string unusually large (STRLEN)? Duplicate patterns?
-- **Alerts**: Stale alerts from resolved issues? Alerts that no longer match the live state?
+- **Alerts**: Stale alerts from resolved issues? Alerts that contradict the live state?
 - **Tool currency**: Any tool reporting `outdated` (warning) — does the operator need to upgrade `gh`, switch Node, etc.? `unknown` is information-only — it means the doctor couldn't reach the upstream feed, not that something is wrong.
 - **Disk pressure**: NVMe below 20GB? SSD filling up?
 - **Redis**: Memory growing? Key count unusual?
