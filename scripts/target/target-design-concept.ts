@@ -67,6 +67,7 @@
 
 import { classifyRisk, type RiskSurface } from "../../src/target/risk-critical.ts";
 import { loadRiskSurface } from "./target-risk-surface.ts";
+import { readFileSync } from "node:fs";
 
 /**
  * One rejected alternative — what was considered and the one-line reason it
@@ -507,4 +508,58 @@ function cleanAlternatives(
     out.push({ alt, why });
   }
   return out;
+}
+
+/**
+ * CLI for the playbook (Steps 3.3 and 4.5): one subcommand per pure function, so
+ * no playbook block carries an inline `node -e` import. Prints to stdout and
+ * exits 0; a malformed input prints the empty/neutral answer and exits 1 so the
+ * caller's fail-open arm fires.
+ *
+ *   select-decision          stdin: REST comments array  -> OperatorDecision JSON or ""
+ *   should-capture <paths..>                             -> "yes" | "no"
+ *   parse <raw>                                          -> artifact JSON or ""
+ *   stale <concept-json> <decision-json>                 -> "stale" | "fresh"
+ *   build <input-json>                                   -> serialized artifact
+ *   summarize                stdin: artifact JSON        -> two human lines
+ */
+export function runCli(argv: string[], readStdin: () => string = () => readFileSync(0, "utf8")): { out: string; code: number } {
+  const [cmd, ...rest] = argv;
+  try {
+    switch (cmd) {
+      case "select-decision": {
+        const sel = selectOperatorDecision(JSON.parse(readStdin()));
+        return { out: sel ? JSON.stringify(sel) : "", code: 0 };
+      }
+      case "should-capture":
+        return { out: shouldCaptureDesignConcept(rest) ? "yes" : "no", code: 0 };
+      case "parse": {
+        const dc = parseDesignConcept(rest[0] ?? "");
+        return { out: dc ? JSON.stringify(dc) : "", code: 0 };
+      }
+      case "stale": {
+        const concept = parseDesignConcept(rest[0]);
+        const decision = JSON.parse(rest[1]);
+        return { out: concept && isStaleAgainstDecision(concept, decision) ? "stale" : "fresh", code: 0 };
+      }
+      case "build":
+        return { out: serializeDesignConcept(buildDesignConcept(JSON.parse(rest[0]))), code: 0 };
+      case "summarize": {
+        const d = JSON.parse(readStdin());
+        return { out: `  scope: ${d.scope}\n  invariants: ${d.invariants.join("; ")}`, code: 0 };
+      }
+      default:
+        console.error(`target-design-concept: unknown subcommand ${JSON.stringify(cmd)}`);
+        return { out: "", code: 2 };
+    }
+  } catch (err) {
+    console.error(`target-design-concept ${cmd}: failed:`, err);
+    return { out: "", code: 1 };
+  }
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const { out, code } = runCli(process.argv.slice(2));
+  process.stdout.write(out);
+  process.exit(code);
 }

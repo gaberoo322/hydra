@@ -19,6 +19,7 @@ import {
   buildDesignConcept as buildRaw,
   serializeDesignConcept,
   parseDesignConcept,
+  runCli,
   selectOperatorDecision,
   isStaleAgainstDecision,
   type TargetDesignConceptInput,
@@ -335,7 +336,8 @@ describe("selectOperatorDecision — content-marker selection (issue #4693)", ()
     assert.ok(i33 >= 0 && i33 < pb.indexOf("### 3.5. Self-declare scope"));
     const block = pb.slice(i33, pb.indexOf("### 3.5. Self-declare scope"));
     assert.ok(block.includes('<"$OD_TMP.merged"'), "comment thread must stream via stdin redirect, not argv (ARG_MAX)");
-    assert.ok(block.includes("readFileSync(0"), "node must read the comment thread from stdin");
+    assert.ok(block.includes("target-design-concept.ts\" select-decision <"), "the select-decision CLI must read the comment thread from stdin");
+    assert.ok(!block.includes("node --input-type=module"), "no inline node import snippet in the playbook");
     assert.ok(block.includes("operator-decision selection FAILED"), "selection failure must WARN");
     assert.ok(block.includes("safe-path builds"), "safe-path (no Step 4.5) enforcement must be documented");
   });
@@ -511,5 +513,43 @@ describe("isStaleAgainstDecision — retry-reuse staleness (issue #4693)", () =>
     assert.equal(isStaleAgainstDecision(concept, badDecision), true);
     const badConcept = { ...concept, capturedAt: "not-a-date" };
     assert.equal(isStaleAgainstDecision(badConcept, newer), true);
+  });
+});
+
+describe("runCli — playbook subcommands (Steps 3.3 / 4.5)", () => {
+  const noStdin = () => "";
+  const decision: OperatorDecision = {
+    url: "https://example/1#c",
+    createdAt: "2026-09-27T18:00:00Z",
+    body: "**Operator decision (2026-09-27):** x",
+  };
+
+  test("select-decision reads a comments array from stdin and prints the selected decision or empty", () => {
+    const hit = runCli(["select-decision"], () => JSON.stringify([ROUTING_NOTE, DECISION_0923]));
+    assert.equal(hit.code, 0);
+    assert.equal(JSON.parse(hit.out).body, DECISION_0923.body);
+    assert.deepEqual(runCli(["select-decision"], () => JSON.stringify([ROUTING_NOTE])), { out: "", code: 0 });
+  });
+
+  test("build then parse round-trips and summarize prints scope and invariants", () => {
+    const built = runCli(["build", JSON.stringify(sampleInput())], noStdin);
+    assert.equal(built.code, 0);
+    const parsed = runCli(["parse", built.out], noStdin);
+    assert.equal(JSON.parse(parsed.out).anchorRef, sampleInput().anchorRef);
+    const summary = runCli(["summarize"], () => parsed.out);
+    assert.match(summary.out, /^ {2}scope: /);
+    assert.match(summary.out, /\n {2}invariants: /);
+  });
+
+  test("parse of corrupt input prints empty and stale of a decision-less artifact is stale", () => {
+    assert.deepEqual(runCli(["parse", "{not json"], noStdin), { out: "", code: 0 });
+    const built = runCli(["build", JSON.stringify(sampleInput())], noStdin);
+    assert.equal(runCli(["stale", built.out, JSON.stringify(decision)], noStdin).out, "stale");
+  });
+
+  test("should-capture answers yes or no; an unknown subcommand exits 2; bad JSON exits 1", () => {
+    assert.match(runCli(["should-capture", "docs/readme.md"], noStdin).out, /^(yes|no)$/);
+    assert.equal(runCli(["bogus"], noStdin).code, 2);
+    assert.equal(runCli(["build", "{nope"], noStdin).code, 1);
   });
 });

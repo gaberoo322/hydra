@@ -100,7 +100,8 @@ SCOPE_IN="${TARGET_APP_SUBDIR:+$TARGET_APP_SUBDIR/}src/example-module/example-fi
 ${TARGET_APP_SUBDIR:+$TARGET_APP_SUBDIR/}src/example-module/other-file.ts"
 
 # --- 1. Read the ledger rows ---
-WIRING_STATUS_PATH="${TARGET_CAP_WIRING_LEDGER:+$TARGET_WS/$TARGET_CAP_WIRING_LEDGER}"
+WIRING_STATUS_PATH=""
+if [ -n "$TARGET_CAP_WIRING_LEDGER" ]; then WIRING_STATUS_PATH="$TARGET_WS/$TARGET_CAP_WIRING_LEDGER"; fi
 
 # Ledger-missing guard — never blocks the build (read-only advisory check);
 # either way proceed to Step 3.5. Sits before the WOR_ROWS/AW_ROWS extraction
