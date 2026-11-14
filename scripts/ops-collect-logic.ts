@@ -109,6 +109,7 @@ export function collectAgentMemory(agent: string, raw: string | null): Collector
   try {
     parsed = JSON.parse(raw);
   } catch (err) {
+    /* intentional: error is returned as the collector result, not swallowed */
     return fail("parse-error", `${agent}: ${(err as Error).message}`);
   }
   if (!Array.isArray(parsed)) return fail("parse-error", `${agent}: patterns value is not an array`);
@@ -164,6 +165,9 @@ export function collectScheduler(raw: unknown): CollectorResult<SchedulerSummary
 
 /** Render one collector result as a single text line. */
 export function renderText(name: string, result: CollectorResult<unknown>): string {
-  if (!result.ok) return `${name}: ${result.code} (${result.reason})`;
+  if (!result.ok) {
+    const f = result as { code: string; reason: string };
+    return `${name}: ${f.code} (${f.reason})`;
+  }
   return `${name}: ${JSON.stringify(result.data)}`;
 }

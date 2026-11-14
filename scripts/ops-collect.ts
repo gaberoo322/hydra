@@ -34,6 +34,7 @@ async function getJson(path: string): Promise<CollectorResult<unknown>> {
     if (!res.ok) return { ok: false, code: "http-error", reason: `${path} -> ${res.status}` };
     return { ok: true, data: await res.json() };
   } catch (err) {
+    /* intentional: error is returned as the collector result, not swallowed */
     return { ok: false, code: "unreachable", reason: `${path}: ${(err as Error).message}` };
   }
 }
@@ -44,6 +45,7 @@ async function collectMemory(): Promise<CollectorResult<unknown>> {
     const doc = JSON.parse(readFileSync(new URL("./autopilot/classes.json", import.meta.url), "utf8"));
     agents = learningAgents(doc);
   } catch (err) {
+    /* intentional: error is returned as the collector result, not swallowed */
     return { ok: false, code: "classes-unreadable", reason: (err as Error).message };
   }
   const out: CollectorResult<unknown>[] = [];
@@ -51,6 +53,7 @@ async function collectMemory(): Promise<CollectorResult<unknown>> {
     try {
       out.push(collectAgentMemory(agent, await getMemoryPatterns(agent)));
     } catch (err) {
+      /* intentional: error is returned as the collector result, not swallowed */
       out.push({ ok: false, code: "redis-error", reason: `${agent}: ${(err as Error).message}` });
     }
   }
@@ -71,7 +74,9 @@ async function runCollector(name: string, count: number): Promise<CollectorResul
       const r = await ghJson<unknown>([
         "issue", "list", "--repo", REPO, "--state", "open", "--limit", "200", "--json", "labels",
       ]);
-      return r.ok ? collectBoard(r.data) : { ok: false, code: r.code, reason: r.stderr.slice(0, 200) };
+      if (r.ok) return collectBoard(r.data);
+      const failed = r as { code: string; stderr: string };
+      return { ok: false, code: failed.code, reason: failed.stderr.slice(0, 200) };
     }
     case "memory":
       return collectMemory();
