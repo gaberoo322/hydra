@@ -179,13 +179,6 @@ for (const [name, playbook] of Object.entries(playbooks)) {
         `${name} must reference cycle-record and warn the child not to POST it (reap.py is the sole authoritative writer)`,
       );
     });
-
-    test("cites issue #1912 so the rationale is discoverable", () => {
-      assert.ok(
-        /#1912/.test(playbook),
-        `${name} should cite issue #1912 in the reflection-deposit section for future archaeology`,
-      );
-    });
   });
 }
 

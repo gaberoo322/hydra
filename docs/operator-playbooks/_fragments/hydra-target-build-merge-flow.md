@@ -6,7 +6,7 @@ verification (the Target's own CI-owned deploy — never a hand deploy), post-me
 verify, operational-health smoke, worktree cleanup, state sync, friction report,
 and the final summary table.
 
-**The build never deploys (issue #4525).** Shipping is: open the PR → the
+**The build never deploys.** Shipping is: open the PR → the
 Target's required CI → the Target's automerge (e.g. an `automerge.yml` that
 squash-merges a green, unfenced PR) → the Target's CI run on `main` → its
 `deploy` job. The Target's `main` may be branch-protected with PRs required, so
@@ -20,9 +20,9 @@ board, the orchestrator API, and (on regression) a revert PR opened from
 
 ### 7. Merge (PR-only — the Target's automerge lands it)
 
-**Close-discipline (ADR-0031 Decision 5 — enforced `Closes #N`).** When this build was anchored on a `$TARGET_GH_REPO` GitHub issue (Step 2 priority 3, the board pick), the Target PR body MUST end with `Closes #<ANCHOR_NUM>` for the issue it resolves. The Target's automerge then **auto-closes the issue and removes it from the open board for free** — this is the label-model replacement for the retired Redis merged/shipped-subject suppression cascade. There is NO separate suppression / lane-move / work-queue-eviction step to take the item off the board; the issue-close IS the terminal signal. A failing-test / priorities-doc anchor has no issue number, so it opens a PR with no `Closes` line (nothing to close), exactly as before.
+**Close-discipline (ADR-0031 Decision 5 — enforced `Closes #N`).** When this build was anchored on a `$TARGET_GH_REPO` GitHub issue (Step 2 priority 3, the board pick), the Target PR body MUST end with `Closes #<ANCHOR_NUM>` for the issue it resolves. The Target's automerge then closes the issue and removes it from the open board; the issue-close IS the terminal signal, and no separate lane-move step exists. A failing-test / priorities-doc anchor has no issue number, so its PR carries no `Closes` line.
 
-For an anchor carrying a fencing label (`money-critical` / `hold-for-operator`) this link is load-bearing for the operator-review fence itself (gaberoo322/hydra#4224): the workflow's fence reads the PR's own labels directly (gaberoo322/hydra#4558) but resolves the ANCHOR's labels only through the PR's linked issues, so without the `Closes #<ANCHOR_NUM>` link the workflow's fence cannot see the anchor, and the PR squash-merges on green unreviewed — the PR #1026 class. A resume (Step 0.7) must therefore keep the `Closes` link and mirror the fencing label onto the PR — a `Refs`-only resume PR with no label of its own is the #4854 class (CSB PR #236). Verify the link is present in the PR body BEFORE its CI can conclude (i.e. at PR creation), not at merge time; the 7b fence-blind branch below handles the case where it was missed.
+For an anchor carrying a fencing label (`money-critical` / `hold-for-operator`) this link is load-bearing for the operator-review fence itself: the workflow's fence reads the PR's own labels directly but resolves the ANCHOR's labels only through the PR's linked issues, so without the `Closes #<ANCHOR_NUM>` link the workflow's fence cannot see the anchor, and the PR squash-merges on green unreviewed. A resume (Step 0.7) must therefore keep the `Closes` link and mirror the fencing label onto the PR — a `Refs`-only resume PR with no label of its own is invisible to the fence. Verify the link is present in the PR body BEFORE its CI can conclude (i.e. at PR creation), not at merge time; the 7b fence-blind branch below handles the case where it was missed.
 
 The PR body MUST include the self-declared scope captured in Step 3.5:
 
@@ -41,7 +41,7 @@ Closes #$ANCHOR_NUM   <!-- only when the anchor was a Target board issue; omit f
 ```
 
 Just before the PR can merge, capture the **pre-merge health baseline** for the Step 8.6
-delta comparison (issue #1699). While the Target baseline is ambiently degraded
+delta comparison. While the Target baseline is ambiently degraded
 (stale data, missing external creds), absolute thresholds cannot tell a
 merge-caused regression from the pre-existing state — the snapshot lets the
 post-merge check alarm only on what THIS merge changed. Run the mirrored script
@@ -49,26 +49,22 @@ from the worktree (synced into the gate dir by Step 0.6). Fail-soft: if the
 Target is unreachable, no baseline file is written and Step 8.6 falls back to
 absolute thresholds — do NOT branch the cycle on this step's outcome.
 
-**MANDATORY (issue #1839).** Capturing this baseline is NOT optional. Without a
+**MANDATORY.** Capturing this baseline is NOT optional. Without a
 `pmh-baseline.json`, Step 8.6 falls back to absolute thresholds and — against an
 ambiently-degraded Target — false-alarms `hydra-target-incident` on every merge,
-even for type-only refactors that structurally cannot touch the alarming
-services (observed 6× in autopilot run `4d10ad1b`, friction cue
-`pmh-absolute-threshold-false-alarm-on-pr-automerge-path`). Capture it before
+even for type-only refactors that cannot touch the alarming services (friction
+cue `pmh-absolute-threshold-false-alarm-on-pr-automerge-path`). Capture it before
 the PR can merge (at the latest right after opening it, before its CI concludes),
-while the worktree mirror (Step 0.6) is still present, so Step 8.6 has a
-baseline to diff against and stays in delta mode. (The watcher's own
-Target-specific defaults are tracked separately in gaberoo322/hydra#4524.)
+while the worktree mirror (Step 0.6) is still present, so Step 8.6 stays in delta mode.
 
 ```bash
-# Pre-merge health baseline (issue #1699, #1839) — consumed by Step 8.6 via
-# --baseline. REQUIRED on both the direct-to-main path (below) AND the
-# auto-merge/PR path. Run it before the merge lands on whichever path applies.
+# Pre-merge health baseline — consumed by Step 8.6 via --baseline. Run it
+# before the PR can merge.
 npx tsx "$HYDRA_GATE_DIR/scripts/target/post-merge-health.ts" \
   --snapshot-out "$HYDRA_GATE_DIR/pmh-baseline.json"
 ```
 
-**PR-only merge path (issue #4525).** Push the worktree's feature branch and open
+**PR-only merge path.** Push the worktree's feature branch and open
 the PR against `main`; never merge locally and never push to `main` (a
 branch-protected `main` rejects it, and the serving tree must not be touched):
 
@@ -86,7 +82,7 @@ the Target's own automerge workflow merges a green, unfenced PR. The build's job
 is to wait for CI in the foreground (the foreground-wait contract in the main
 playbook) and then observe the outcome per 7b.
 
-#### 7b. PR merge completion — already-merged-post-green is SUCCESS, not friction (issue #2392)
+#### 7b. PR merge completion — already-merged-post-green is SUCCESS, not friction
 
 This subsection covers a Target PR (`$TARGET_GH_REPO`) that CI + the Target's
 own automerge workflow (e.g. `automerge.yml` in the target repo) land. It does
@@ -109,18 +105,16 @@ PR_STATE=$(gh pr view "$PR_NUM" --repo "$TARGET_GH_REPO" \
 PR_MERGED=$(printf '%s' "$PR_STATE" | jq -r '.state // ""' 2>/dev/null)   # "MERGED" once landed
 ```
 
-**Resolve the operator-review fence FIRST (gaberoo322/hydra#4224, #4558) — all
+**Resolve the operator-review fence FIRST — all
 three branches below read its result.** The fence lookup is predicate-aligned
 with the workflow: it resolves the SAME subjects the workflow's own fence
 resolves — the PR's OWN labels first (the workflow reads those before anything
 else), then every same-repo issue the PR links via `closingIssuesReferences` —
 plus the anchor as belt-and-braces. On a Target whose CI applies the fencing
 label to the PR itself, the PR-label read is the load-bearing one: the linked
-issue AND the anchor can both carry no fencing label at all while the PR is
-fenced (gaberoo322/hydra#4558 — an issue/anchor-only lookup would have released
-the explicit merge on exactly the PR the workflow withheld).
+issue AND the anchor can both carry no fencing label while the PR is fenced.
 
-**Timing (gaberoo322/hydra#4558): the fencing label can land on the PR DURING
+**Timing: the fencing label can land on the PR DURING
 the PR's CI run** — the Target's labelling job classifies the diff and labels
 the PR inside that same run, so a label read racing an in-flight run mistakes
 a not-yet-applied fence for absence. The lookup below is therefore only valid
@@ -129,42 +123,25 @@ ordering. Never hoist the lookup above the CI poll, and never run it while any
 check is still queued or in progress.
 
 ```bash
-# Fence lookup — FAIL CLOSED and PREDICATE-ALIGNED (gaberoo322/hydra#4224,
-# #4558): branch on gh's exit code, never on empty output, and resolve the
-# same subjects the workflow's fence resolves — the PR's own labels, plus
-# every same-repo issue this PR links — plus the anchor. An issue/anchor-only
-# lookup desyncs from the workflow: a PR linked to a DIFFERENT money-critical
-# issue passes it, and on a Target whose CI labels the PR itself the fence is
-# invisible to it entirely — either way the "attempt the explicit merge
-# yourself" branch would then merge the exact PR the workflow just withheld.
+# Fence lookup — FAIL CLOSED and PREDICATE-ALIGNED: branch on gh's exit code,
+# never on empty output, and resolve the same subjects the workflow's fence
+# resolves — the PR's own labels, every same-repo issue this PR links, and the
+# anchor. An issue/anchor-only lookup would merge a PR the workflow withheld.
 FENCE_LOOKUP="ok"
 FENCED=""
 LINKED=""
-# NOTE: the `--jq` argument below is single-quoted (as a deliberate
-# no-shell-expansion / no-injection posture), so `env.TARGET_GH_REPO` reads
-# the exported env var through gh's own jq engine at runtime instead of
-# relying on the shell to splice a literal `"$TARGET_GH_REPO"` string into
-# the filter — the previous single-quoted form never expanded the shell
-# variable at all, so `select()` compared against the literal text
-# `$TARGET_GH_REPO` and never matched, silently degrading this fence to
-# anchor-only (gaberoo322/hydra#4411 QA remediation).
+# The `--jq` argument is single-quoted (no shell expansion), so
+# `env.TARGET_GH_REPO` reads the exported env var through gh's own jq engine.
 LINKED=$(gh pr view "$PR_NUM" --repo "$TARGET_GH_REPO" \
   --json closingIssuesReferences \
   --jq '.closingIssuesReferences[]
         | select((.repository.owner.login + "/" + .repository.name)
                  == env.TARGET_GH_REPO)
         | .number' 2>/dev/null) || FENCE_LOOKUP="failed"
-# The PR's OWN labels (gaberoo322/hydra#4558): on a Target whose CI applies
-# the fencing label to the PR itself (its risk-scope job classifies the diff
-# and labels the PR inside the very CI run this merge phase keys off), the
-# linked issue and the anchor can both carry no fencing label at all. The
-# workflow's fence reads the PR's own labels FIRST, so this read is
-# predicate-alignment, not belt-and-braces — omit it and the "explicit merge
-# yourself" branch merges exactly the PR the workflow withheld. The literal
-# label set below deliberately mirrors the workflow's own literals: the two
-# fences must not drift apart, which a Target-Manifest-configurable set would
-# invite (that widening would need an ADR-0026 amendment — manifest scope is
-# what orchestrator code and synced gate scripts branch on, not playbooks).
+# The PR's OWN labels: the workflow's fence reads them FIRST, so this read is
+# predicate-alignment, not belt-and-braces. The literal label set below
+# deliberately mirrors the workflow's own literals so the two fences cannot
+# drift apart (a manifest-configurable set would need an ADR-0026 amendment).
 if ! PR_LABELS=$(gh pr view "$PR_NUM" --repo "$TARGET_GH_REPO" \
       --json labels --jq '.labels[].name' 2>/dev/null); then
   FENCE_LOOKUP="failed"
@@ -198,11 +175,8 @@ done
   merged PR's merge commit (`gh pr view "$PR_NUM" --json mergeCommit --jq
   '.mergeCommit.oid'`) for the metrics/event bookkeeping below.
   - **Explicitly DO NOT POST the `target-automerge-lands-before-explicit-merge`
-    cue to `/api/memory/subagent-friction`.** The merge succeeded — recording
-    friction here is the pure-noise defect this subsection fixes (it 3-hit-escalated
-    a meta-friction issue, #2391, working-as-intended-but-spurious). Root-cause
-    suppression is at the emission site (do not narrate the POST), NOT a downstream
-    threshold bump in `src/pattern-memory/escalation.ts`.
+    cue to `/api/memory/subagent-friction`.** The merge succeeded; recording
+    friction here is spurious noise.
   - Fall through to **Step 8.5** (worktree cleanup + branch delete) and **Step 9**
     (state sync: move ITEM_ID to done, `tasksMerged:1` metrics record,
     `cycle:completed` event with `merged:true`, and `/cycle/complete`
@@ -214,7 +188,7 @@ done
   - The **post-green qualifier is load-bearing**: an already-merged PR whose CI is
     NOT green / still in progress is NOT a clean success — do not silently treat it
     as one. Wait for CI to conclude before classifying the outcome.
-  - The **fence qualifier is load-bearing** (gaberoo322/hydra#4224, #4558): a
+  - The **fence qualifier is load-bearing**: a
     merged fenced PR is success ONLY when the operator merged it. A hit on the
     PR's OWN labels, or on any issue among `$LINKED`, means exactly that — the
     workflow's fence reads the PR's own labels first and every linked issue, so
@@ -223,22 +197,21 @@ done
     never carried the `Closes` link the workflow's fence resolves — and if it
     is not mirrored on the PR's own labels either, the workflow, not an
     operator, merged a fenced PR unreviewed. That is a fence
-    breach (the PR #1026 class): report it to the operator as such, and do NOT
+    breach: report it to the operator as such, and do NOT
     let Step 9's residual close guard close the fenced issue as completed — the
     change landed without the review the fence exists to force.
 
 - **PR is NOT merged, and the fence holds** (the PR itself, any same-repo
   issue it links, or the anchor carries `money-critical` or
   `hold-for-operator` — **or the fence lookup itself failed**) → **STOP: the
-  merge is the operator's**
-  (gaberoo322/hydra#4224). The emulated automerge deliberately skips fenced
+  merge is the operator's**. The emulated automerge deliberately skips fenced
   PRs — its run log + step summary say "fenced for operator review" — so
   green-but-unmerged here is the fence working, not merge friction.
   **Detect the fence at the source** (the PR's own labels plus the linked
   issues' labels — the SAME subjects the workflow's own fence resolves, which
   is why the lookup above reads the PR's labels and `closingIssuesReferences`
   and not just the anchor), never by
-  scraping workflow logs. **Fail closed (the #4230 QA remediation): a failed lookup —
+  scraping workflow logs. **Fail closed: a failed lookup —
   transient API error, rate limit, auth expiry — is indistinguishable from a
   confirmed "not fenced", so it counts as FENCED.** Only a successful label
   read with no fencing label releases the explicit merge.
@@ -250,9 +223,8 @@ done
   Specifically:
   - **NEVER merge it yourself, retry the merge, or re-run the workflow.** An
     explicit `gh pr merge` here is exactly the unreviewed merge the fence
-    exists to prevent (PR #1026, money-critical, was squash-merged ~2 minutes
-    after CI went green). There is no direct-to-main path at all (issue
-    #4525) — the PR is the only path any change, fenced or not, may take.
+    exists to prevent. There is no direct-to-main path at all — the PR is the
+    only path any change, fenced or not, may take.
   - **Do NOT remove the fencing label** from the issue or from the PR itself
     — that is the operator's release lever, not the build's (on a Target
     whose CI applies the label, re-running that CI re-applies it anyway —
@@ -267,11 +239,10 @@ done
     reason), so the next green workflow run squash-merges it unreviewed the
     moment this handoff ends. Take the one mechanical hold available to the
     build first — mark the PR draft (`gh pr ready --undo`; the workflow's
-    merge selector skips drafts, the same hold that protects
-    $TARGET_GH_REPO#1076 itself) — then add the missing `Closes`
+    merge selector skips drafts) — then add the missing `Closes`
     link to the PR body so the fence can see the anchor, and report both
     actions alongside the fencing label.
-  - **A hit on the PR's own labels is never fence-blind** (gaberoo322/hydra#4558)
+  - **A hit on the PR's own labels is never fence-blind**
     — the workflow reads PR labels directly, so it is already holding
     this PR; there is no missing `Closes` link to add and no draft-mark
     remediation to take. Report the PR and the label as the final answer and
@@ -280,7 +251,7 @@ done
     verify, no `merged:true` / done-move): nothing has landed on main, so
     there is nothing to deploy, verify, or mark shipped. The merge and
     everything after it belong to whoever merges. The skip list names its
-    steps individually on purpose (#4230 QA review): a "7.5–8.6" range
+    steps individually on purpose: a "7.5–8.6" range
     numerically swallows Step 8.5 and contradicts the carve-out in the
     bullet above. Step 8.5 still runs — on an unmerged fenced branch its
     local `git branch -d` simply refuses (branch not merged), which that
@@ -304,7 +275,7 @@ done
   outranks the explicit merge; if the lookup failed, you are in the fenced
   branch above, never here.
 
-### 7.5. Deploy verification — wait for the Target's own deploy (issue #4525)
+### 7.5. Deploy verification — wait for the Target's own deploy
 
 The Target deploys itself: its CI run on `main` (started by the merge's push, or
 dispatched by its automerge workflow) runs a `deploy` job after the required
@@ -421,14 +392,12 @@ gh pr create --repo "$TARGET_GH_REPO" --base main --head "revert/$CYCLE_ID" \
 The revert PR goes through the same required CI + automerge + CI-owned deploy as
 any other change. Report the regression and the revert PR number.
 
-### 8.6. Post-merge operational-health smoke check (alarm-only — issue #1054)
+### 8.6. Post-merge operational-health smoke check (alarm-only)
 
 After the merge has landed and the Target's deploy has been observed (Step 7.5), run the
-**alarm-only** operational-health smoke check. This is the Target's replacement
-for per-merge **Outcome Holdback** (epic #1052): Target outcomes can lag the
-merge by hours or days and there is no per-merge outcome seam (#933), so instead
-of holding a merge back on an outcome signal, we let the merge land and then
-sample fast, merge-attributable operational signals the Target already exposes
+**alarm-only** operational-health smoke check. Target outcomes can lag the
+merge by hours or days, so instead of holding a merge back on an outcome signal,
+we let the merge land and then sample fast, merge-attributable operational signals the Target already exposes
 (e.g. a Target-side health endpoint — overall status + per-service health
 signals). On a regression past a configurable noise floor it
 raises a `hydra-target-incident` alarm.
@@ -438,100 +407,65 @@ post-merge and routes to `hydra-target-incident`, which decides whether to
 investigate/fix/revert. The revert-PR path is Step 8 (main-branch CI
 regression) only — do NOT add a revert here.
 
-REALM ROUTING (ADR-0025, issue #2553): the watcher dispatches the Target-scoped
+REALM ROUTING (ADR-0025): the watcher dispatches the Target-scoped
 `hydra-target-incident`, NOT the Orchestrator's `hydra-incident`. Each
 Operate-layer incident skill is single-realm — `hydra-target-incident` operates
 only on `$TARGET_WS`, `hydra-incident` only on `~/hydra`. The dispatch
 target string lives in `scripts/target/post-merge-health.ts` (the `--dispatch`
 spawn); it and this playbook move in lockstep.
 
-Run the **mirrored** script from the worktree (issue #1451 — Step 0.6 syncs it
+Run the **mirrored** script from the worktree (Step 0.6 syncs it
 into the SIBLING gate dir `$HYDRA_GATE_DIR`, outside `$TARGET_WT`); do NOT
 invoke it from `~/hydra`. This step runs BEFORE the Step 8.5 worktree cleanup,
 so the mirror is still present.
 
 ```bash
 cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}"
-# Pass --dispatch so a real regression actually fires hydra-target-incident.
-# Without --dispatch it is a dry-run (prints the alarm context, spawns nothing),
-# which is what you want when smoke-testing the watcher itself.
-# --baseline points at the pre-merge snapshot captured in Step 7 (issue #1699):
-# the watcher then alarms only on DELTAS vs that baseline — services newly
-# not-ok, per-service worsening (degraded -> error), or overall severity-rank
-# worsening — so ambient pre-existing degradation never false-alarms.
-# This baseline is captured on every build before the PR can merge (issue
-# #1839), so delta mode is the normal case; the absolute-threshold fallback
-# below is for a genuine baseline-miss (Target down pre-merge), NOT the
-# steady-state path.
-# Issue #1817 FRESHNESS-FLAP SUPPRESSION (delta mode, no extra flags needed):
-# some Target services derive status purely from data freshness, whose window
-# can be far tighter than the probe cadence, so the signal flaps ok<->degraded
-# purely as a function of WHEN the probe fires. evaluateDelta suppresses the
-# single ok->soft (degraded/stale) transition for these freshness-class services
-# (keyword allowlist, env-overridable via HYDRA_PMH_FRESHNESS_SERVICES) so a
-# phantom `<freshness-service>: ok -> degraded` no longer alarms. ANY move into error, any
-# worsening from an already-not-ok baseline, and ok->degraded on a hard-check
-# (non-freshness) service all still alarm — suppression is scoped, never global.
+# --dispatch fires hydra-target-incident on a real regression; omit it for a
+# print-only dry-run. --baseline is the Step 7 snapshot: the watcher then alarms
+# only on deltas vs that baseline, so ambient pre-existing degradation never
+# false-alarms. Freshness-class services (HYDRA_PMH_FRESHNESS_SERVICES) have
+# their single ok->soft transition suppressed; any error transition, any
+# worsening from a not-ok baseline, and any hard-check ok->degraded still alarm.
 npx tsx "$HYDRA_GATE_DIR/scripts/target/post-merge-health.ts" \
   --merge-sha "$COMMIT_SHA" --dispatch \
   --baseline "$HYDRA_GATE_DIR/pmh-baseline.json"
 ```
 
-Fail-soft: if the Target API is truly unreachable (service still restarting,
-port not yet up, non-JSON body), the script logs and exits 0 — an unreachable
-Target is not a merge regression and must never look like a build failure.
-Note (issue #1699): a non-2xx response that still carries a health JSON body
-IS a valid sample — the Target health endpoint answers 503 with a full body when the
-overall status is degraded/error — so a degraded baseline still yields signal.
-If the baseline file is missing (Step 7 snapshot skipped or Target was down
-pre-merge), the watcher falls back to the absolute thresholds.
-**Absolute-mode ambient-alarm guard (issue #1839):** in this fallback the Target's ambient
-degraded services (whichever services were already not-ok before the merge —
-stale data / missing external creds) trip the absolute thresholds on every
-merge.
-Before honoring an absolute-mode alarm, cross-check it against this build's
-in-scope diff (`scopeBoundary.in`, already computed in Step 3.5): if EVERY
-alarming service is one of the known-ambient degraded services AND none of the
-changed paths has any plausible path to those services (e.g. type-only
-refactors, UI-only components, `package.json` config — the diff touches no
-code on those services' path), treat it as a baseline-miss false
-positive — do NOT pass `--dispatch` for that run (omit it to keep the watcher in
-its print-only dry-run), and log the friction cue
-`pmh-absolute-threshold-false-alarm-on-pr-automerge-path` instead of spawning
-`hydra-target-incident`. Any alarming service OUTSIDE the ambient set, OR any changed
-path that could reach an alarming service, still dispatches normally — this
-guard only suppresses the provably-spurious ambient-only case, never a true
-regression. The clean fix remains capturing the Step-7 baseline on both merge
-paths (above); this guard is the defense-in-depth fallback for the genuine
-baseline-miss case (Target was down pre-merge). Tune the noise
-floor via the `HYDRA_PMH_*` env vars documented at the top of
-`scripts/target/post-merge-health.ts` (overall-status alarm set, and the
-tolerated counts of degraded / execution-class / provider-class services —
-applied to delta counts when a baseline is supplied). Freshness-flap suppression
-(issue #1817): in delta mode the comparator suppresses the single ok->soft
-(degraded/stale) transition for freshness-class services (the
-`HYDRA_PMH_FRESHNESS_SERVICES` keyword allowlist — its Target-specific defaults
-are tracked in gaberoo322/hydra#4524), so a sampling-phase freshness-window flap no
-longer false-alarms while any error transition, any worsening from an
-already-not-ok baseline, and any hard-check (non-freshness) ok->degraded still
-fire. The exit code is informational only (75 on alarm, 0 otherwise); do NOT
-branch the cycle on it.
+Fail-soft: if the Target API is truly unreachable (service restarting, port not
+up, non-JSON body), the script logs and exits 0 — an unreachable Target is not a
+merge regression and must never look like a build failure. A non-2xx response
+that still carries a health JSON body IS a valid sample (the Target health
+endpoint answers 503 with a full body when degraded), so a degraded baseline
+still yields signal. The exit code is informational only (75 on alarm, 0
+otherwise); do NOT branch the cycle on it. Tune the noise floor via the
+`HYDRA_PMH_*` env vars documented at the top of
+`scripts/target/post-merge-health.ts`.
 
-### 8.5. Worktree cleanup (issue #542)
+If the baseline file is missing (Step 7 snapshot skipped or Target down
+pre-merge), the watcher falls back to absolute thresholds, and the Target's
+ambient degraded services trip them on every merge. Before honoring an
+absolute-mode alarm, cross-check it against this build's in-scope diff
+(`scopeBoundary.in`, computed in Step 3.5): if EVERY alarming service is a
+known-ambient degraded service AND no changed path can reach those services
+(type-only refactors, UI-only components, `package.json` config), treat it as a
+baseline-miss false positive — omit `--dispatch` for that run and log the
+friction cue `pmh-absolute-threshold-false-alarm-on-pr-automerge-path` instead
+of spawning `hydra-target-incident`. Any alarming service outside the ambient
+set, or any changed path that could reach an alarming service, still dispatches
+normally.
 
-On success, remove the target worktree we created in Step 0.6, **prune stale worktree metadata**, THEN delete the merged feature branch — in that order. `git branch -d` fails with "branch ... used by worktree" while the worktree still holds the branch checked out, which is why the delete lives here and not in Step 7 (friction cue: `worktree-held-branch-blocks-local-delete`). The `git worktree prune` between the two is load-bearing (issue #2272): an interrupted remove (or an out-of-band `rm -rf` of `$TARGET_WT`) can leave an orphaned `.git/worktrees/<id>` entry that still claims the branch is "used by worktree at '...'" even though the directory is long gone (9 such failures for one cycle in 24h on a prior Target). `git worktree prune` is git's own sanctioned metadata reconcile — it only drops entries git itself agrees are no longer in use, so it never touches a live worktree. On failure, `scripts/branch-prune.sh` will GC both on the next daily sweep — leaking is acceptable on crash but not on the happy path.
+### 8.5. Worktree cleanup
+
+On success, remove the target worktree created in Step 0.6, **prune stale worktree metadata**, THEN delete the merged feature branch — in that order. `git branch -d` fails with "branch ... used by worktree" while the worktree still holds the branch checked out, which is why the delete lives here and not in Step 7 (friction cue: `worktree-held-branch-blocks-local-delete`). The `git worktree prune` between the two is load-bearing: an interrupted remove (or an out-of-band `rm -rf` of `$TARGET_WT`) can leave an orphaned `.git/worktrees/<id>` entry that still claims the branch is in use; prune only drops entries git itself agrees are unused, so it never touches a live worktree. On failure, `scripts/branch-prune.sh` GCs both on the next daily sweep — leaking is acceptable on crash but not on the happy path. The resume arm (Step 0.7) never reaches the merge phase and runs this step as written here.
 
 ```bash
 git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" worktree remove --force "$TARGET_WT" 2>&1 || \
   echo "warn: worktree remove failed for $TARGET_WT — branch-prune.sh will GC it later"
-# Remove the SIBLING gate dir alongside the worktree (issue #4526): the mirror,
-# pmh-baseline.json, and build logs live there — all disposable. This runs AFTER
-# Step 8.6 has consumed --baseline, which is why the cleanup order is 8.6 → 8.5.
+# Remove the SIBLING gate dir: the mirror, pmh-baseline.json and build logs are
+# disposable. This runs AFTER Step 8.6 has consumed --baseline (order 8.6 → 8.5).
 rm -rf "$HYDRA_GATE_DIR"
-# Reconcile stale worktree metadata before the branch delete (issue #2272):
-# an interrupted remove above (or an out-of-band deletion of $TARGET_WT) can
-# leave an orphaned .git/worktrees/<id> entry that makes the next
-# `git branch -d` fail with "branch ... used by worktree at '...'".
+# Reconcile stale worktree metadata before the branch delete.
 git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" worktree prune 2>&1 || \
   echo "warn: worktree prune failed in $TARGET_WS — branch-prune.sh will reconcile later"
 git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" branch -d "feature/$CYCLE_ID" 2>&1 || \
@@ -545,22 +479,14 @@ git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" branch
 TASK_TITLE="${ANCHOR_SUBJECT:-<task title>}"
 ```
 
-**Board close-out — `Closes #N` is the sole terminal signal (ADR-0031 Decision 4/5).** Target tracking now lives as GitHub Issues on `$TARGET_GH_REPO`, so there is NO Redis backlog lane to move to `done`, and NO `POST/PATCH /backlog` write of any kind. When the anchor was a board issue, the PR body's `Closes #$ANCHOR_NUM` (Step 7) is what `automerge.yml` reads to close the issue on merge — that close removes it from the open board and IS the terminal state-sync. (The close is performed *explicitly* by the merge workflow; GitHub's native auto-close does not fire on the emulated-automerge path — ADR-0031 Decision 5 as amended by gaberoo322/hydra#3700.) Nothing else is required:
-
-- **No `hydra backlog move … done`.** The old `hydra backlog ls` → `hydra backlog move "$ITEM_ID" done` idiom is retired — the Redis kanban lanes no longer track Target work.
-- **No `pr-<n>` claimedBy PATCH marker.** The old inProgress `claimedBy":"pr-<n>"` PATCH to `/api/backlog/${ITEM_ID}/move` (the issue-#640 just-shipped-anchor suppression) is retired. On the GitHub board the in-flight signal is the `in-progress` label the claim stamped (Step 2), and the terminal signal is the issue-close on merge (`Closes #N`), performed explicitly by `automerge.yml` rather than by GitHub's native auto-close (ADR-0031 Decision 5 as amended by gaberoo322/hydra#3700) — the board read never re-surfaces a closed issue, so there is no window for decide.py to re-dispatch onto the same anchor.
-- **No work-queue `COMPLETED:`/`CLOSED:` marker.** The old `hydra queue add "COMPLETED: <task title>"` idiom is retired with the whole `hydra:anchors:work-queue` — completion is recorded by the issue-close plus the metrics record and `cycle:completed` event below.
-
-(The Redis backlog subsystem is deleted — ADR-0031 Decision 4/6; the label model on the Target board is the only backlog. There is nothing left for this step to write to.)
+**Board close-out — `Closes #N` is the sole terminal signal (ADR-0031 Decision 4/5).** Target tracking lives as GitHub Issues on `$TARGET_GH_REPO`; there is no Redis backlog lane and no `POST/PATCH /backlog` write. When the anchor was a board issue, the PR body's `Closes #$ANCHOR_NUM` (Step 7) is what `automerge.yml` reads to close the issue explicitly on merge (GitHub's native auto-close does not fire on the emulated-automerge path; ADR-0031 Decision 5). That close removes the issue from the open board and IS the terminal state-sync; the in-flight signal is the `in-progress` label the Step 2 claim stamped. Completion is also recorded by the metrics record and `cycle:completed` event below.
 
 ```bash
-# Board anchor: automerge.yml closes the `Closes #$ANCHOR_NUM` issue explicitly,
-# within seconds of the merge (ADR-0031 Decision 5 as amended by
-# gaberoo322/hydra#3700 — GitHub's NATIVE auto-close does not fire here). This
-# block is the residual guard, NOT the mechanism: it only runs if this agent
-# survives to Step 9, which is why it failed to save #623. Keep it (one REST
-# read; covers merges that bypassed automerge.yml) but never rely on it as the
-# primary close. Never GraphQL here (ADR-0031 Decision 6).
+# Board anchor: automerge.yml closes the `Closes #$ANCHOR_NUM` issue explicitly
+# within seconds of the merge. This block is the residual guard, NOT the
+# mechanism: it only runs if this agent survives to Step 9 (one REST read;
+# covers merges that bypassed automerge.yml). Never GraphQL here (ADR-0031
+# Decision 6).
 if [ -n "${ANCHOR_NUM:-}" ]; then
   STATE=$(gh api "repos/$TARGET_GH_REPO/issues/${ANCHOR_NUM}" --jq '.state')
   if [ "$STATE" = "open" ]; then
@@ -570,7 +496,7 @@ if [ -n "${ANCHOR_NUM:-}" ]; then
 fi
 ```
 
-Record metrics (shared with Codex, retired by ADR-0006):
+Record metrics:
 ```bash
 hydra raw POST /metrics/record "{
   \"cycleId\":\"$CYCLE_ID\",\"source\":\"claude\",
@@ -582,16 +508,12 @@ hydra raw POST /metrics/record "{
 }"
 ```
 
-As of #3048 this endpoint routes through the `recordCycle()` coordinator (the same deep path `POST /autopilot/cycle-record` uses), so this inline merge-time write is now a FULL cycle record — a `hydra:cycle:<id>` hash + index membership + scheduler-counter bump, not just the metrics-hash feed the old shallow handler wrote. Because `reap.py` also fires `POST /autopilot/cycle-record` for this same `$CYCLE_ID`, whichever write lands first records the cycle deeply and the second dedup/enriches — the coordinator's idempotency guard prevents double-counting.
-
-As of #3220 the `POST /metrics/record` handler moved from `src/api/metrics.ts` into `src/api/autopilot-lifecycle.ts`; the URL path is unchanged.
+This endpoint routes through the `recordCycle()` coordinator, so the inline merge-time write is a full cycle record (`hydra:cycle:<id>` hash, index membership, scheduler-counter bump). `reap.py` also fires `POST /autopilot/cycle-record` for this `$CYCLE_ID`; the coordinator's idempotency guard prevents double-counting.
 
 Publish event:
 ```bash
-# Issue #4299: carry the merged file paths so the `cycle:completed` reactor can
-# tier-classify the cycle's side. Without the list a merged target cycle falls
-# to the workspace hint (and pre-#4299, to a bogus "idle" — the 100%-idle
-# capacity window). $FILES_CHANGED above is the INTEGER COUNT the metrics trend
+# Carry the merged file paths so the `cycle:completed` reactor can tier-classify
+# the cycle's side. $FILES_CHANGED above is the INTEGER COUNT the metrics trend
 # consumes; THIS is the string[] path list the side classifier consumes.
 FILES_JSON=$(gh pr view "$PR_NUM" --repo "$TARGET_GH_REPO" \
   --json files --jq 'map(.path)' 2>/dev/null || echo '[]')
@@ -606,11 +528,7 @@ Complete cycle registration:
 hydra raw POST /cycle/complete "{\"cycleId\":\"$CYCLE_ID\",\"source\":\"claude\",\"status\":\"completed\"}"
 ```
 
-On failure — lesson capture for shared learning (issue #392).
-This is the only post-cycle writer to `hydra:memory:{agent}:patterns` (agent = executor) for
-Claude-driven builds after #383 deletes codex-runner (ADR-0006). The endpoint forwards
-to `recordPattern()` (the pattern store is live). There is no feedback-file
-promotion: that write was retired (#2962).
+On failure — lesson capture for shared learning. This is the only post-cycle writer to `hydra:memory:{agent}:patterns` (agent = executor) for Claude-driven builds; the endpoint forwards to `recordPattern()`.
 ```bash
 # Pick the cue that matches the failure mode:
 #   verification-failure | no-diff | rollback
@@ -628,7 +546,7 @@ API failures: log but don't fail the build. The endpoint is idempotent on
 `(skill, outcome, cue)` — multiple calls for the same logical event merge
 into one pattern (hit count increments).
 
-### 9.5. Friction Report (issue #512 — ALWAYS, even on success)
+### 9.5. Friction Report (ALWAYS, even on success)
 
 The child agent ALSO emits a `## Friction Report` section in its return,
 even on a clean merge. Each item is a piece of soft friction the agent
@@ -670,7 +588,7 @@ hydra raw POST /memory/subagent-friction "{
 ```
 
 Idempotent on `(skill, cue)`. When the same cue crosses the
-`PROMOTION_THRESHOLD` (3 hits), a `meta-friction` GitHub issue is
+`PROMOTION_THRESHOLD` (`src/pattern-memory/escalation.ts`), a `meta-friction` GitHub issue is
 auto-opened (or comment-bumped). Failure to POST is logged but never
 fails the build.
 
@@ -678,7 +596,7 @@ fails the build.
 
 | Step | Result |
 |------|--------|
-| Mode | delegated / inline (issue #1782 contract) |
+| Mode | delegated / inline |
 | Ground | X tests passing, typecheck status |
 | Anchor | task title (anchor type) |
 | Plan | scope: N files, M criteria |

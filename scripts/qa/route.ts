@@ -68,7 +68,7 @@ import {
 } from "../../src/schemas/qa-plumbing-cli.ts";
 import { QA_ADMISSION_SKIP_MARKER, annotateReviewerFixedReport } from "../../src/qa/round-action.ts";
 import { COHORT_BASELINE_PATH, QA_ROLLOUT_CONFIG_PATH, resolveReviewerCommitsStageFromTexts, type ReviewerCommitsValue } from "../../src/qa/rollout-switches.ts";
-import { parseQaVerdictTrailer } from "../../src/qa/verdict-trailer.ts";
+import { parseQaFixCommitTrailer, parseQaVerdictTrailer } from "../../src/qa/verdict-trailer.ts";
 import { rowsFromFold } from "../../src/qa/review-findings-extract.ts";
 import type { StoredReviewFindingRow } from "../../src/redis/review-findings.ts";
 
@@ -490,17 +490,20 @@ async function runRouteImpl(
     }
     if (rcOut !== null && Array.isArray(rcOut.degraded)) degraded.push(...rcOut.degraded.map(String));
     const strList = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : []);
-    if (rcOut?.action !== "commit-a") {
+    const rcAction = rcOut?.action;
+    if (rcAction !== "commit-a" && rcAction !== "commit-b" && rcAction !== "commit-ab") {
       reviewerCommit = { action: "none", reason: typeof rcOut?.reason === "string" ? rcOut.reason : "decision-error" };
     } else {
       const plan: ReviewerCommitPlan = {
-        action: "commit-a",
+        action: rcAction,
         reason: String(rcOut.reason ?? "class-a-fixable"),
         reviewedHead: pre.pr.headSha,
         headRef: pre.pr.headRefName,
         fixedSha: pre.fixedSha,
         blockingPaths: strList(rcOut.blockingPaths),
         followUpPaths: strList(rcOut.followUpPaths),
+        blockingTestPaths: strList(rcOut.blockingTestPaths),
+        followUpTestPaths: strList(rcOut.followUpTestPaths),
         bodyFix: rcOut.bodyFix === true,
         blockingLocations: blocking.map((b) => b.location),
       };
@@ -524,34 +527,51 @@ async function runRouteImpl(
           degraded,
         };
       }
-      // Pass 2a: verify the pushed commit BEFORE it can override a FAIL.
+      // Pass 2a: verify the pushed commit chain BEFORE it can override a FAIL. A round makes at most one
+      // `QA-Fix: A` and one `QA-Fix: B` commit (A first); walk first parents from the pushed head back to the
+      // reviewed head, so every commit is proven and the trailer's qa-fixes names all of them.
       const sha40 = opts.reviewerFixed;
-      const sha12 = sha40.slice(0, 12);
-      const commitRes = await ports.gh(["api", `repos/${repo}/commits/${sha40}`]);
-      const parsed = commitRes.ok ? tryParse(commitRes.stdout) : undefined;
-      const parents = isRecord(parsed) && Array.isArray(parsed.parents) ? parsed.parents : [];
-      const firstParent = isRecord(parents[0]) ? parents[0].sha : undefined;
-      const message = isRecord(parsed) && isRecord(parsed.commit) && typeof parsed.commit.message === "string" ? parsed.commit.message : "";
-      const hasTrailer = /^QA-Fix: A\s*$/m.test(message);
+      const expected = rcAction === "commit-ab" ? ["A", "B"] : [rcAction === "commit-b" ? "B" : "A"];
+      const chain: Array<{ sha: string; cls: string | null }> = [];
+      let cursor = sha40;
+      let reachedReviewed = false;
+      for (let i = 0; i < expected.length; i++) {
+        const commitRes = await ports.gh(["api", `repos/${repo}/commits/${cursor}`]);
+        const parsed = commitRes.ok ? tryParse(commitRes.stdout) : undefined;
+        const parents = isRecord(parsed) && Array.isArray(parsed.parents) ? parsed.parents : [];
+        const parent = isRecord(parents[0]) ? String(parents[0].sha) : "";
+        const message = isRecord(parsed) && isRecord(parsed.commit) && typeof parsed.commit.message === "string" ? parsed.commit.message : "";
+        const trailerFound = parseQaFixCommitTrailer(message);
+        chain.unshift({ sha: cursor, cls: trailerFound.present ? trailerFound.cls : null });
+        if (parent === pre.pr.headSha) {
+          reachedReviewed = true;
+          break;
+        }
+        if (parent === "") break;
+        cursor = parent;
+      }
       const live = await liveHeadOid();
-      if (firstParent !== pre.pr.headSha || !hasTrailer || live !== sha40) {
+      const classesOk = chain.map((c) => c.cls).join(",") === expected.join(",");
+      if (!reachedReviewed || !classesOk || live !== sha40) {
         throw new PreVerdictError(
           "reviewer-fixed-unverified",
-          `reviewer commit ${sha12} not verified (parent=${String(firstParent)}, trailer=${hasTrailer}, live head=${live || "unreadable"})`,
+          `reviewer commit(s) from ${sha40.slice(0, 12)} not verified (reachedReviewedHead=${reachedReviewed}, classes=${chain.map((c) => String(c.cls)).join(",")}, expected=${expected.join(",")}, live head=${live || "unreadable"})`,
         );
       }
+      const shas12 = chain.map((c) => c.sha.slice(0, 12));
+      const sha12 = shas12.join(",");
       reviewVerdict = "PASS"; // nominal, as the pre-wiring sidecar did: the round is a PASS-pending-CI at the new head
       verdict = "PASS-pending-CI";
-      verdictReason = `reviewer fixed every blocking finding in ${sha12} (QA-Fix: A); awaiting CI at the new head`;
+      verdictReason = `reviewer fixed every blocking finding in ${sha12} (QA-Fix: ${expected.join("/")}); awaiting CI at the new head`;
       blockers = 0;
       maxSeverity = "none";
       worstFinding = "";
       report = annotateReviewerFixedReport(report, plan.blockingLocations ?? [], sha12);
-      trailerExtra = { headSha: sha40, qaFixes: [sha12] };
+      trailerExtra = { headSha: sha40, qaFixes: shas12 };
     }
   }
   if (opts.reviewerFixed !== undefined && trailerExtra === null) {
-    throw new PreVerdictError("reviewer-fixed-unverified", "no fresh commit-a decision for --reviewer-fixed");
+    throw new PreVerdictError("reviewer-fixed-unverified", "no fresh commit decision for --reviewer-fixed");
   }
 
   const trailerOut = await ports.phase("trailer", { pr, verdict, blockers, maxSeverity, ...(trailerExtra ?? {}) });

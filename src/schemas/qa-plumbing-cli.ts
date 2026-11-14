@@ -112,7 +112,7 @@ export type RouteEffect = z.infer<typeof RouteEffectSchema>;
  * other path it is the audit of why no reviewer commit ran.
  */
 export const ReviewerCommitPlanSchema = z.object({
-  action: z.enum(["none", "commit-a"]),
+  action: z.enum(["none", "commit-a", "commit-b", "commit-ab"]),
   reason: z.string(),
   reviewedHead: z.string().optional(),
   headRef: z.string().optional(),
@@ -120,6 +120,8 @@ export const ReviewerCommitPlanSchema = z.object({
   blockingPaths: z.array(z.string()).optional(),
   followUpPaths: z.array(z.string()).optional(),
   bodyFix: z.boolean().optional(),
+  blockingTestPaths: z.array(z.string()).optional(),
+  followUpTestPaths: z.array(z.string()).optional(),
   blockingLocations: z.array(z.string()).optional(),
 });
 export type ReviewerCommitPlan = z.infer<typeof ReviewerCommitPlanSchema>;
