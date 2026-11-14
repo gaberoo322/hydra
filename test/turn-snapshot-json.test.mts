@@ -3,8 +3,8 @@
  *
  *   1. Plan parity (the critical gate): every distinct decide() input the
  *      existing test suite produces (test/fixtures/turn-snapshot-parity/
- *      decide-inputs.jsonl.gz, captured by capture/sitecustomize.py),
- *      converted to the JSON form with `signals` and every blob field REMOVED,
+ *      decide-inputs.jsonl.gz, a fixed historical set captured once and
+ *      stored in the JSON form with `signals` and every blob field REMOVED),
  *      yields a Plan byte-identical to the golden Plan recorded from the 6a
  *      expand PR's JSON path (decide-plans.jsonl.gz) — so decide.py reads
  *      nothing around scripts/autopilot/turn_snapshot.py and plans exactly as
@@ -308,11 +308,10 @@ describe("turn snapshot JSON: plan parity over every captured decide() input (#4
     const allDegraded = join(dumpDir, "all-degraded.json");
     writeFileSync(allDegraded, serializeTurnSnapshot({ doc: allDegradedTurnSnapshot("plan-parity", "turn-snapshot.ts exited 1"), rawBlobs: {} }).text);
     const r = python("plan_parity.py", undefined, ["--dump", dump, "--all-degraded", allDegraded], productionEnv());
-    assert.ok(r.entries >= 600, `corpus shrank to ${r.entries} entries — regenerate it (capture/sitecustomize.py)`);
+    assert.ok(r.entries >= 600, `corpus shrank to ${r.entries} entries — the corpus is a fixed set and must not shrink`);
     assert.equal(r.golden, r.entries, "one golden Plan per corpus entry");
     assert.ok(r.with_signals >= 300, `only ${r.with_signals} entries carry signals — the corpus no longer exercises the accessor`);
     assert.ok(r.distinct_plans >= 400, `only ${r.distinct_plans} distinct Plans — the corpus no longer discriminates`);
-    assert.deepEqual(r.unrepresentable, []);
     assert.deepEqual(r.diverged, []);
     assert.equal(r.identical, r.entries);
     // #5083: the marker document (node could not run) plans byte-identically to the TS all-degraded document
@@ -1050,7 +1049,6 @@ describe("turn snapshot JSON: the replay contract — decide() reads only the si
     assert.ok(res.status === 0 || res.status === 1, `plan_parity.py exited ${res.status}: ${res.stderr}`);
     const summary = JSON.parse(res.stdout);
     const converted = readFileSync(dump, "utf-8").split("\n").filter(Boolean);
-    assert.deepEqual(summary.unrepresentable, []);
     assert.equal(converted.length, summary.entries, "one converted document per corpus entry (line i is entry i)");
     // Two more healthy-board documents, built from collector values like the
     // goldens, for the reads only a particular board drives: an idle orch board
