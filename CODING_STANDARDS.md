@@ -1,6 +1,6 @@
 # Coding Standards
 
-The Standards reviewer's rule catalog (ADR-0046). Each rule has a stable ID and one `enforced-by:` line: a repo-relative check path, or `reviewer`. Findings cite the rule ID. Default severity is low; a rule says when it is higher. Integrity (grammar, 2,000-word ceiling, dangling references) is enforced by `test/coding-standards-integrity.test.mts`.
+The Standards reviewer's rule catalog (ADR-0046). Each rule has a stable ID and one `enforced-by:` line: a repo-relative check path, or `reviewer`. A path followed by `(advisory)` runs only in an advisory workflow and blocks nothing. Findings cite the rule ID. Default severity is low; a rule says when it is higher. Integrity (grammar, 2,000-word ceiling, dangling references) is enforced by `test/coding-standards-integrity.test.mts`.
 
 ## Code
 
@@ -8,7 +8,7 @@ The Standards reviewer's rule catalog (ADR-0046). Each rule has a stable ID and 
 
 Runtime dependencies are operator-approved only: `express`, `ioredis`, `ws`, `@sentry/node`, `zod`, `pino`. Use the Node stdlib for everything else. Adding a runtime dependency is a blocker unless the PR cites the operator approval (ADR-0005).
 
-enforced-by: scripts/ci/dep-boundary-check.ts
+enforced-by: scripts/ci/dep-boundary-check.ts (advisory)
 
 ### STD-REDIS-SEAM
 
@@ -20,13 +20,13 @@ enforced-by: scripts/ci/redis-seam-check.ts
 
 HTTP request bodies validate through `src/schemas/<domain>.ts` with zod `safeParse`. On failure return 400 `{code:"schema-validation-failed", issues}`. The schema is the source of truth for both the parser and the inferred type (see Schemas in `CONTEXT.md`).
 
-enforced-by: scripts/ci/schema-seam-check.ts
+enforced-by: scripts/ci/schema-seam-check.ts (advisory)
 
 ### STD-VERIFY-NEVER-THROW
 
 Merge, grounding and verification code never throws. It returns result objects so callers decide how to report failure. A function whose own doc claims never-throw / returns a result object is the mechanically checked scope; the reviewer still owns which modules should make that claim.
 
-enforced-by: scripts/ci/never-throw-scan.ts, reviewer
+enforced-by: scripts/ci/never-throw-scan.ts (advisory), reviewer
 
 ### STD-GROUNDING-READONLY
 
@@ -44,7 +44,7 @@ enforced-by: reviewer
 
 Exceptional `throw` sites prefer a subclass from `src/errors.ts` (for example `InvalidArgumentError`) over a bare `Error`. Callers and tests discriminate on `err.code`, not `err.message`. Scope is `src/` and `scripts/`; subclass choice and `err.code` discrimination stay with the reviewer.
 
-enforced-by: src/ast-grep-rules/typed-error-throw.yml, reviewer
+enforced-by: src/ast-grep-rules/typed-error-throw.yml (advisory), reviewer
 
 ### STD-CATCH-FAIL-LOUD
 
@@ -76,7 +76,7 @@ enforced-by: reviewer
 
 Import the constant; never restate a literal the module defines, and never assert your own setup. A persisted wire-format constant (Redis key prefix, label name, event-stream name, pinned download version or SHA256) may be pinned as a drift-guard.
 
-enforced-by: src/ast-grep-rules/test-restates-module-literal.yml, reviewer
+enforced-by: src/ast-grep-rules/test-restates-module-literal.yml (advisory), reviewer
 
 ### STD-TEST-CAN-FAIL
 

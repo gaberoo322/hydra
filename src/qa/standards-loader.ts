@@ -9,7 +9,8 @@
  * Grammar: an h2 area section (`## Code`, `## Tests`, `## Design`, ...) holds
  * h3 rules `### STD-<AREA>-<NAME>`. A rule body runs to the next heading and
  * holds exactly one `enforced-by: <v>[, <v>...]` line, each `<v>` the literal
- * `reviewer` or a repo-relative path.
+ * `reviewer` or a repo-relative path. A path may carry one trailing space plus
+ * the literal `(advisory)` marker, declaring the check blocks nothing.
  *
  * `countWords` mirrors scripts/ci/skill-size-ratchet.ts (whitespace-split
  * tokens); src/ cannot import scripts/ (tsconfig rootDir), so it is defined here.
@@ -23,12 +24,16 @@ export const CODING_STANDARDS_WORD_CEILING = 2000;
 export const CODING_STANDARDS_FILENAME = "CODING_STANDARDS.md";
 
 const RULE_ID_RE = /^STD-[A-Z]+(-[A-Z0-9]+)+$/;
+const ADVISORY_MARKER_RE = /^(\S+) \(advisory\)$/;
 const ID_TOKEN_RE = /\bSTD-[A-Z]+(?:-[A-Z0-9]+)+\b/g;
 
 export interface StandardsRule {
   id: string;
   area: string;
+  /** Bare refs: the `(advisory)` marker is stripped. */
   enforcedBy: string[];
+  /** Subset of `enforcedBy` whose line carried the `(advisory)` marker. */
+  advisory: string[];
   /** Count of `enforced-by:` lines found in the body (integrity wants exactly 1). */
   enforcedByLines: number;
   body: string;
@@ -50,6 +55,8 @@ export type IntegrityCode =
   | "invalid-rule-id"
   | "missing-enforced-by"
   | "dangling-enforced-by"
+  | "unwired-enforced-by"
+  | "check-does-not-name-rule"
   | "dangling-fence-id"
   | "missing-section"
   | "empty-section";
@@ -82,6 +89,7 @@ export function parseCodingStandards(text: string): ParsedStandards {
     if (!current) return;
     current.body = bodyLines.join("\n").trim();
     const values: string[] = [];
+    const advisory: string[] = [];
     let count = 0;
     for (const line of bodyLines) {
       const m = /^\s*enforced-by:\s*(.*)$/.exec(line);
@@ -89,10 +97,18 @@ export function parseCodingStandards(text: string): ParsedStandards {
       count++;
       for (const v of m[1].split(",")) {
         const t = v.trim();
-        if (t) values.push(t);
+        if (!t) continue;
+        const marked = ADVISORY_MARKER_RE.exec(t);
+        if (marked && marked[1] !== "reviewer") {
+          values.push(marked[1]);
+          advisory.push(marked[1]);
+        } else {
+          values.push(t);
+        }
       }
     }
     current.enforcedBy = values;
+    current.advisory = advisory;
     current.enforcedByLines = count;
     bodyLines.length = 0;
     current = null;
@@ -104,7 +120,7 @@ export function parseCodingStandards(text: string): ParsedStandards {
     if (h3) {
       flush();
       const id = h3[1];
-      current = { id, area: area ?? "", enforcedBy: [], enforcedByLines: 0, body: "" };
+      current = { id, area: area ?? "", enforcedBy: [], advisory: [], enforcedByLines: 0, body: "" };
       rules.push(current);
       section?.ruleIds.push(id);
       continue;
@@ -133,6 +149,13 @@ export interface IntegrityDeps {
   pathExists: (relPath: string) => boolean;
   /** Section areas that must exist with >=1 rule. Default: Tests, Design. */
   requiredSections?: string[];
+  /**
+   * Is this cited path wired into a required (blocking) job? Omit to skip the
+   * `unwired-enforced-by` rule (Target catalogs, packet builder).
+   */
+  requiredWiring?: (relPath: string) => boolean;
+  /** Text of a cited path, or null when unreadable. Omit to skip `check-does-not-name-rule`. */
+  readText?: (relPath: string) => string | null;
 }
 
 /** Check the catalog's structural integrity. Pure; never throws. */
@@ -166,6 +189,31 @@ export function checkStandardsIntegrity(
         console.error(`[standards-loader] pathExists(${v}) threw:`, err);
       }
       if (!exists) add("dangling-enforced-by", `${r.id} cites enforced-by path "${v}" which does not exist`);
+    }
+    for (const v of r.enforcedBy) {
+      if (v === "reviewer") continue;
+      if (deps.requiredWiring && !r.advisory.includes(v)) {
+        let wired = false;
+        try {
+          wired = deps.requiredWiring(v);
+        } catch (err) {
+          console.error(`[standards-loader] requiredWiring(${v}) threw:`, err);
+        }
+        if (!wired) {
+          add("unwired-enforced-by", `${r.id} cites "${v}" as enforcement but no required job runs it; wire it or mark it "${v} (advisory)"`);
+        }
+      }
+      if (deps.readText) {
+        let src: string | null = null;
+        try {
+          src = deps.readText(v);
+        } catch (err) {
+          console.error(`[standards-loader] readText(${v}) threw:`, err);
+        }
+        if (src !== null && !new RegExp(`\\b${r.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(src)) {
+          add("check-does-not-name-rule", `${r.id} cites "${v}", but that file never names ${r.id}`);
+        }
+      }
     }
   }
 
