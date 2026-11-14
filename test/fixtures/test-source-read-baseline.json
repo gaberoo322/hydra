@@ -125,6 +125,7 @@
     "test/operator-actions-parity.test.mts": "drift-guard",
     "test/operator-actions-registry.test.mts": "grandfathered",
     "test/operator-channel.test.mts": "grandfathered",
+    "test/ops-collect.test.mts": "behaviour",
     "test/operator-notify-cli.test.mts": "behaviour",
     "test/otel-ingest.test.mts": "grandfathered",
     "test/pace-gate-allow.test.mts": "behaviour",
