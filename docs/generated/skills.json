@@ -133,7 +133,9 @@
       "composedFrom": [
         "docs/operator-playbooks/_vendor/implement.md",
         "docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md",
-        "docs/operator-playbooks/_fragments/hydra-dev-child-flow.md"
+        "docs/operator-playbooks/_fragments/hydra-dev-child-flow.md",
+        "docs/operator-playbooks/_fragments/lifecycle-seam-writes.md",
+        "docs/operator-playbooks/_fragments/blocked-slice-labelling.md"
       ],
       "route": "/docs/skill/hydra-dev",
       "source": {
@@ -221,7 +223,9 @@
           "via": "default"
         }
       ],
-      "composedFrom": [],
+      "composedFrom": [
+        "docs/operator-playbooks/_fragments/lifecycle-seam-writes.md"
+      ],
       "route": "/docs/skill/hydra-grill",
       "source": {
         "path": "docs/operator-playbooks/hydra-grill.md"
@@ -314,6 +318,8 @@
       "composedFrom": [
         "docs/operator-playbooks/_vendor/code-review.md",
         "docs/operator-playbooks/_fragments/hydra-qa-reference.md",
+        "docs/operator-playbooks/_fragments/lifecycle-seam-writes.md",
+        "docs/operator-playbooks/_fragments/qa-verdict-is-a-comment.md",
         "docs/operator-playbooks/_fragments/checks-fetch.md"
       ],
       "route": "/docs/skill/hydra-qa",

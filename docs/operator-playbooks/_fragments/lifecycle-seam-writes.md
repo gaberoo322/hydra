@@ -1,0 +1,1 @@
+**Lifecycle seam rule (ADR-0047 D4).** Every issue state move goes through `npx tsx scripts/lifecycle.ts advance|dispatch|release ...`. A non-zero exit is final for that step: log the JSON line and continue or stop as the step says. Never fall back to a direct label write; the `lifecycle-state-label-guard` PreToolUse hook denies it.

@@ -1,168 +1,52 @@
 # hydra-qa — REFERENCE (read on demand, not on every QA pass)
 
-This file is the `reference_files:` sidecar of `hydra-qa.md` (issue #5269, the
-#4827 sidecar precedent): it is copied beside `SKILL.md` and read only when a QA
-pass needs the background below. Nothing here is a step — the steps, the
-reviewer briefs and the T4 Verifier-Core checklist stay in `hydra-qa.md`. The
-text is moved verbatim from the pre-#5269 playbook; the plumbing it describes
-(steps 3, 5, 6, 6.5–6.7, 9.5, 9.6, 10) is now `scripts/qa/{preflight,packet,
-route,poll}.ts`, so read "step N" references below as the corresponding script.
+This file is the `reference_files:` sidecar of `hydra-qa.md`: it is copied beside `SKILL.md` and read only when a QA pass needs the background below. Nothing here is a step; the steps, the reviewer briefs and the T4 Verifier-Core checklist stay in `hydra-qa.md`. The plumbing is `scripts/qa/{preflight,packet,route,poll}.ts`.
 
-## Tier-aware verification depth (issue #739, ADR-0015)
+Verification depth, the severity fold, convergent review (class sweep, re-review context, round cap), the verdict literals and the tier table are not described here. Their homes: tier = `GET /api/tier`; depth and reviewer list = preflight `.fanout.mode` / `.fanout.reviewers` (`scripts/qa/preflight.ts`); fold, trailer and round action = the qa-verdict engine (`scripts/ci/qa-verdict.ts`, `src/qa/`, `decideQaRoundAction()`); tier table = `docs/reference.md`.
 
-QA depth ascends with the **Modification Tier** of the PR (`GET /api/tier`, the single tier authority — never self-classified by path):
+## `deep-qa-gate` — authoritative commit StatusContext vs advisory CheckRun mirror
 
-- **T1 / T2** — exactly **one standard QA pass**: the single parallel Standards + Spec fan-out described below. Behaviour-preserving; nothing in this section changes the T1/T2 path.
-- **T3** (core `src/` + demoted infra) — an **adversarial depth gate**: run `hydra-qa` in **refutation framing** (reviewers are prompted to actively *find a reason this change is wrong / regresses something*, not to confirm it), fanned out to **2 independent reviewers**. The verdict comes from the **severity-gated fold** below: any medium-or-higher finding from **either** reviewer is a FAIL; a low finding is always a non-blocking follow-up, even when both reviewers raised it.
-- **T4** (Verifier Core — `.github/workflows/ci.yml`, `.github/workflows/deploy.yml` [file removed; list entry persists], `.github/workflows/deep-qa-gate.yml`, `scripts/tier-classify.ts`, `src/tier-classifier.ts`, `src/untouchable.ts`) — the **Deep-QA Remediation Loop**: T4 **inherits the full T3 adversarial depth** (the same 2-reviewer refutation fan-out, unchanged) and **adds** on top (a) a **Verifier-Core checklist** the reviewers must run, and (b) the **block-and-escalate teeth** no other tier has. It never weakens or replaces the T3 gate — it is strictly additive. See step 10's T4 branch.
+The `deep-qa-gate` required CI check (`.github/workflows/deep-qa-gate.yml`) reports through **two** GitHub primitives that share the name `deep-qa-gate`, and the distinction is load-bearing:
 
-This is **additive verification depth, not a policy change**: the emitted verdict literal (`PASS` / `FAIL` / `PASS-pending-CI` / `FAIL-pending-CI`) is unchanged, and `decide.py`'s `should_auto_merge()` (and INV-007: `qa_verdict != PASS ⇒ hold`) are untouched. Only *how a review verdict is computed* changes — the severity-gated fold `foldReviewFindings()` in `scripts/ci/qa-verdict.ts` for T1–T3, and for T4 the unchanged any-blocker AND over two refutation reviewers (`aggregateAdversarialReview()`). T4's block-and-escalate is likewise **not** a new verdict literal — it routes through the existing `ready-for-human` pickup set (see below).
+- **Commit StatusContext** — the SINGLE authoritative enforcement primitive. The workflow POSTs it on every arm (`POST /repos/{owner}/{repo}/statuses/{sha}`) against the resolved head SHA. A tier-conditional **status** is the right primitive (ADR-0020 Decision 4): it can be set `success` for non-T4 PRs immediately, whereas a required *CheckRun* the workflow never produces for non-T4 PRs would block them forever.
+- **CheckRun** — an **advisory rollup mirror** only. The `issue_comment` arm also creates a CheckRun named `deep-qa-gate` on the same head SHA, reporting the same state, so the PR checks rollup (`statusCheckRollup`) shows an unambiguous latest result: the `pull_request` arm's own like-named CheckRun is cancelled by the shared concurrency group when the PASS marker fires, and would otherwise linger as a stale rollup entry.
 
-A T3 FAIL **bounces** the PR back to a dev agent via the universal remediation loop (re-label `needs-dev-resume` while the PR is open, `ready-for-agent` once it is not — step 10's FAIL routing), **not** block-and-escalate-to-operator (the Deep-QA Remediation Loop reserves block-and-escalate teeth for T4).
-
-### Severity-gated fold for T1–T3 (issue #4734)
-
-Every reviewer finding carries a `severity`, a `file:line` and a concrete fix (the findings contract at step 7). The rubric:
-
-- `high` — behaviour regression, data or work loss, or a weakened safety gate.
-- `medium` — a spec criterion unmet, or a real bug on a non-critical path.
-- `low` — wording, comments, citations, style.
-
-The T1–T3 fold (`foldReviewFindings()`) FAILs when **any** finding is `medium` or `high`. A `low` finding never blocks, whatever the reviewer count: when both independent reviewers (A and B of the T3 fan-out) raise the same `low`, it is listed once as a merged row, still non-blocking (issue #4916). Otherwise the verdict is PASS, and all low findings are listed under **Follow-ups (non-blocking)** in the comment. A finding with a missing or unknown severity counts as `high`, so a malformed row can never downgrade a verdict. The reason: in a 150-PR audit, 46 of 67 FAIL rounds were low-severity nits, and under the old any-blocker AND a single reviewer's nit cost a full dev bounce (~350k tokens). Two reviewers agreeing on a nit does not raise its severity — the class-sweep rule makes both scan the same defect classes, so they routinely converge on the same low.
-
-**T4 is unchanged.** A T4 PR (and a PR whose tier is unknown, fail-closed) keeps the any-blocker semantics: every finding blocks, whatever its severity, and the Verifier-Core checklist and Deep-QA Remediation Loop below apply as before.
-
-### Convergent review for T1–T3 (issue #4735)
-
-In the same audit, 17 of 67 FAIL rounds raised a blocker that already existed at an earlier round, and single PRs bounced up to 7 times. Three rules make review converge. All of them read the `QA-Verdict:` trailers on the PR (step 9.5); there is no other counter.
-
-- **Class sweep** (every reviewer, every round, step 7): when you raise a finding, list every instance of that defect class in the diff and the touched files in the same round. At 3+ instances, or on adversarial inputs, recommend the structural fix.
-- **Re-review context** (step 7.0a, prompt only): after a FAIL, the prior findings table is appended to the review packet, plus `git diff <prior sha>..HEAD` when the prior `sha=` is still an ancestor of HEAD. Reviewers still get the FULL diff and changed files, first state fixed/not-fixed for each prior finding, and justify anything new. Nothing in code filters or demotes a finding: `foldReviewFindings()` alone decides the verdict (operator decision on #4735).
-- **Round cap** (step 10): the 3rd reviewed FAIL round on a T1–T3 PR escalates instead of bouncing (`decideQaRoundAction()`). A CI-only round (the step-6.6 admission-gate skip) reviewed nothing and does not count; a round whose findings fold failed does count (its comment still carries a `### Findings` heading). The lifecycle seam parks the issue (`parked`, an off-list escalation per ADR-0047 D6 — never `ready-for-human`) and posts the unified cap-park comment; the issue also gets a round-by-round summary plus a recommendation. T4 keeps its 2nd-fail rule below.
-
-### `deep-qa-gate` — authoritative commit StatusContext vs advisory CheckRun mirror (issue #868)
-
-The `deep-qa-gate` required CI check (`.github/workflows/deep-qa-gate.yml`) reports its verdict through **two** GitHub primitives that share the name `deep-qa-gate`, and the distinction between them is **load-bearing**:
-
-- **Commit StatusContext** — the SINGLE authoritative enforcement primitive. The workflow POSTs it on every arm (`POST /repos/{owner}/{repo}/statuses/{sha}`, `statuses: write` scope) against the resolved head SHA. This is the check the operator adds to branch protection; it is the one merge automation must read as the source of truth. A tier-conditional **status** is the right primitive (ADR-0020 Decision 4): it can be set `success` for non-T4 PRs immediately, whereas a branch-protection-required *CheckRun* this workflow never produces for non-T4 PRs would block ~95% of PRs forever.
-- **CheckRun** — an **advisory rollup mirror** only. The `issue_comment` arm ALSO creates a CheckRun named `deep-qa-gate` on the same resolved head SHA (`POST /repos/{owner}/{repo}/check-runs`, `checks: write` scope), reporting the **same state** as the status. It exists solely so the PR checks **rollup** (`statusCheckRollup`) shows an unambiguous latest result for the name: at PR-open the `pull_request` arm emits its own like-named CheckRun (initially red for a T4 PR with no marker), which the shared concurrency group then CANCELS when the PASS marker fires — leaving a stale/cancelled CheckRun as the rollup's latest entry for the name even though the commit status is green (the #859 dogfood, memory note `reference_deep_qa_gate_checkrun_vs_status`). The `issue_comment` arm's CheckRun concludes AFTER that cancelled one, so it supersedes it and the rollup entry is clear.
-
-**Invariant — the CheckRun never contradicts the status, and never becomes a second required check.** The advisory CheckRun always mirrors the commit status's state; if the two ever disagreed, the commit status wins (it is the authoritative primitive). The CheckRun is deliberately **not** added to branch protection: two required checks of the same name is ambiguous, and a required CheckRun that the workflow never produces for non-T4 PRs re-introduces the non-T4-blocked-forever failure ADR-0020 Decision 4 rejected. When auditing a `deep-qa-gate` verdict, read the **commit status** as the truth; the CheckRun is a UI/rollup convenience that should always agree with it.
+**Invariant — the CheckRun never contradicts the status, and never becomes a second required check.** If the two disagree, the commit status wins. The CheckRun is deliberately not in branch protection: two required checks of the same name is ambiguous. When auditing a `deep-qa-gate` verdict, read the commit status as the truth.
 
 ## Spec axis when the artifact is missing (`DESIGN_CONCEPT_MODE`)
 
-The dispatch-side gate (`gateDispatch` in `src/lifecycle/gates.ts`) already refuses to dispatch a `needs-design-concept` anchor without an approved artifact. This section covers only what QA does at review time when an artifact is still missing (parent issues that pre-date the design-concept system):
+The dispatch-side gate (`gateDispatch` in `src/lifecycle/gates.ts`) refuses to dispatch a `needs-design-concept` anchor without an approved artifact. This section covers what QA does at review time when an artifact is still missing:
 
-- **`DESIGN_CONCEPT_MODE=warn` (default)** — missing artifact logs a warning, the Spec axis is skipped (reports "no artifact"), and QA proceeds with the Standards axis only.
-- **`DESIGN_CONCEPT_MODE=enforce`** — missing artifact fails the PR with the message: `design-concept artifact required; run hydra-grill on the parent issue or attach 'design-concept-exempt' label (operator-only)`.
+- **`DESIGN_CONCEPT_MODE=warn` (default)** — a missing artifact logs a warning, the Spec axis is skipped (reports "no artifact"), and QA proceeds with the Standards axis only.
+- **`DESIGN_CONCEPT_MODE=enforce`** — a missing artifact fails the PR with the message: `design-concept artifact required; run hydra-grill on the parent issue or attach 'design-concept-exempt' label (operator-only)`.
 
-The mode is read from the shell variable `$DESIGN_CONCEPT_MODE` (default: `warn`). In both modes, an explicit `design-concept-exempt` label on the PR (operator-only) bypasses the Spec axis with an audit-log comment, regardless of whether the artifact exists.
+The mode is read from the shell variable `$DESIGN_CONCEPT_MODE` (default `warn`). In both modes an explicit `design-concept-exempt` label on the PR (operator-only) bypasses the Spec axis with an audit-log comment, and a prompt-only PR diff (`isPromptOnlyChange()`) with no associated artifact bypasses it too.
 
-The Tier-1 auto-bypass (PR diff entirely prompt paths per `isPromptOnlyChange()` — step 6 — and no associated artifact) also remains in both modes — prompt-only changes never require the artifact.
+## Review invariants INV-A..INV-G
 
-## Verdict tiers (issue #405)
+The preflight's admission and short-circuit levers obey these invariants:
 
-The skill **never loops waiting on CI**. After the two-axis review it emits exactly one of four verdicts and returns:
+- **INV-A** — any admission or short-circuit lever is a derivation of `aggregateAdversarialReview()` / `classifyVerdict()` in `scripts/ci/qa-verdict.ts`, never an independent policy.
+- **INV-B** — a review may only be **deferred**, never depth-reduced below what the preflight's `.fanout.mode` requires, by any such lever.
+- **INV-C** — every PR that reaches auto-merge has been reviewed at the full depth the preflight requires: a deferred or pre-spawn-skipped PR never merges without a real review on a later pass.
+- **INV-D** — the emitted verdict literals, `aggregateAdversarialReview()`, `classifyVerdict()`, and `decide.py`'s `should_auto_merge()` (`INV-007`) are untouched by any such lever.
+- **INV-E** — every unknown input (an unreachable tier classifier, an unknown `mergeStateStatus`, a gate-script error) fails closed to FULL review depth, never to a skip.
+- **INV-F** — the Target's Risk-Critical Surface classification (`classifyTargetQaPath`) is untouched by any orchestrator-side QA-cost lever.
+- **INV-G** — no such lever introduces a Redis key, label, CI check or API endpoint.
 
-| Verdict | Meaning | Autopilot behaviour |
-|---|---|---|
-| `PASS` | The review fold found no blocking finding (T1–T3: lone low findings become follow-ups) AND every required CI check has concluded successfully. | Comment the verdict (never approve — the shared identity cannot self-approve, #848); the lifecycle seam's `qa-verdict` gate reads the PASS trailer and auto-merge lands the PR once required checks pass. |
-| `FAIL` | The review fold found a blocking finding (T1–T3: any medium/high — a low never blocks; T4: any finding), OR a required check has already failed/errored/timed-out. | Comment failing criteria and re-label via the bounce-label helper: `needs-dev-resume` while the linked PR is still open — any provenance (issue #4766) — `ready-for-agent` only when no open PR remains. See step 10. |
-| `PASS-pending-CI` | Both axes pass, no required check has failed, but at least one check (required or optional) is still `queued` / `in_progress` / `pending`. | Re-poll CI on the autopilot tick; merge once green or downgrade to `FAIL` if a required check later fails. The `hydra-qa` subagent has already exited. |
-| `FAIL-pending-CI` | Reserved tier — currently unused by the classifier. Documented so operators / future playbooks can route a "review passed but a non-required check is in a soft-failure tier that we want to surface" case without re-running QA. | Treat as `PASS-pending-CI` for merge gating; surface in the verdict body. |
+## Post-merge Regression Check — the Outcome Holdback producer
 
-Pure helpers backing the classifier live in `scripts/ci/qa-verdict.ts`. The regression test `test/hydra-qa-prompt-verdict.test.mts` locks in the smoking-gun case: `mutation-test: QUEUED` + everything-else-green → `PASS-pending-CI` (not a wait).
+Historical: this producer was specified by ADR-0004 step 4.
 
-**An incomplete reviewer fan-out is not a fifth verdict — it is a pre-verdict exit.** If step 7.5 finds a spawned reviewer missing (e.g. its worktree was reaped mid-review), the skill exits before reaching step 8/9 with none of the four verdicts above and `needs-qa` left in place for automatic retry — see step 7.5.
+Pre-merge QA is the **Pre-merge Gate**. The **Post-merge Regression Check** is the *producer* of the Outcome Holdback events (`holdback.reverted` / `holdback.cap-reached` / `holdback.revert_failed`) that the Operator Channel router (`src/operator-channel/route-event.ts`) consumes. It is request-scoped work the autopilot poll loop dispatches *after* a merge: no timer, no sampler, no long-lived loop (ADR-0006, ADR-0010, ADR-0012). The producer logic lives behind the orchestrator service (`src/holdback.ts` + `src/api/holdback.ts`); this skill only drives it over HTTP and performs the `git revert` when told to. Holdback is read-only with respect to merge: the only action it can take is to open a revert PR.
 
-**Invariants referenced above, formally defined (issue #3815).** Step 6.6's
-prose above cites INV-A through INV-G by tag, but until now those tags were
-defined only in the issue's (uncommitted, expiring) design-concept artifact —
-a dangling reference from any reviewer or future editor's point of view who
-has only this file. This closes that gap, called out as a Standards finding on
-PR #3874's adversarial-QA FAIL round and carried forward unresolved through
-PR #3881:
+### A. Enrollment belongs to the autopilot
 
-- **INV-A** — any admission/short-circuit lever added under issue #3815 is a
-  derivation of `aggregateAdversarialReview()` / `classifyVerdict()` in
-  `scripts/ci/qa-verdict.ts`, never an independent policy.
-- **INV-B** — T3/T4 reviews may only be **deferred**, never depth-reduced, by
-  any such lever — Verifier-Core verification depth is never cut.
-- **INV-C** — every PR that reaches auto-merge has been reviewed at the full
-  depth its tier requires: a deferred or pre-spawn-skipped PR never merges
-  without a real review having run on a later pass.
-- **INV-D** — the emitted verdict literals (`PASS` / `FAIL` / `PASS-pending-CI`
-  / `FAIL-pending-CI`), `aggregateAdversarialReview()`, `classifyVerdict()`,
-  and `decide.py`'s `should_auto_merge()` (`INV-007`) stay byte-unchanged by
-  any lever addressed under issue #3815.
-- **INV-E** — every unknown input (an unreachable tier classifier, an
-  unknown/absent `mergeStateStatus`, or the gate script's own runtime error,
-  per the `.catch()` fallbacks above) fails closed to FULL review depth, never
-  to a skip.
-- **INV-F** — the Target's Risk-Critical Surface classification
-  (`classifyTargetQaPath`, `hydra-target-qa`'s sibling gate) is untouched by
-  any orchestrator-side QA-cost lever under issue #3815 — these levers edit
-  only orchestrator files, zero Target files.
-- **INV-G** — no new Redis key, label, CI check, or API endpoint is introduced
-  by any lever under issue #3815 (`mergeStateStatus` rides the existing step-3
-  `gh pr view` call).
-
-## Post-merge Regression Check — the Outcome Holdback producer (issue #786, ADR-0004 step 4)
-
-Pre-merge QA (sections 1–11) is the **Pre-merge Gate**. This section is the
-**Post-merge Regression Check**: the *producer* of the Outcome Holdback events
-(`holdback.reverted` / `holdback.cap-reached` / `holdback.revert_failed`) that
-the notification consumer (the Operator Channel router, `src/operator-channel/route-event.ts`)
-consumes. The in-process watcher was deleted in the ADR-0006 cut-over and
-`src/holdback.ts` was rebuilt as the request-scoped producer this section drives;
-without enrollment, no merge (T2/T3/T4 — see "carries up the ladder" below) is
-watched for Target-Outcome regression.
-
-**This is NOT a resurrected in-process watcher.** It is request-scoped work
-the autopilot poll loop dispatches *after* a merge. There is no timer, no
-sampler, no long-lived loop — re-introducing one reintroduces the
-orphaned-recorder failure mode that retired the stuckness detector (ADR-0010)
-and violates the autopilot-only execution model (ADR-0006/0012). The producer
-logic lives behind the orchestrator service (`src/holdback.ts` +
-`src/api/holdback.ts`); this skill only drives it over HTTP and performs the
-`git revert` when told to.
-
-**Holdback is read-only with respect to merge.** Enrollment and checks run
-strictly AFTER a merge; a merge is never blocked or delayed. The only action a
-holdback can take is to open a revert PR.
-
-### A. Enroll at merge time — owned by the autopilot, NOT hydra-qa (issue #2055)
-
-**Enrollment does not happen here.** `hydra-qa` runs strictly **pre-merge** —
-it computes a verdict, posts it as a comment, and **never merges** (CI required
-checks are the merge gate; ADR-0006/0012, `feedback_qa_fail_cannot_block_automerge`).
-So a "snapshot the baseline immediately after a PASS merge" step in this skill
-could **never fire** — by the time a PR squash-merges, the `hydra-qa` subagent
-has already exited (single-pass exit, section "PASS-pending-CI"). The orphaned
-enroll-at-merge block that used to live here was dead code; #2055 removed it.
-
-The **only** point that runs AFTER a confirmed merge with the `prNumber` + `tier`
-in hand is the autopilot's `auto-merge` action handler, so enrollment lives
-there now — see **"Phase 6 holdback enrollment on auto-merge"** in
-`docs/operator-playbooks/hydra-autopilot.md`. It POSTs the merge SHA + tier to
-`/api/holdback/enroll` unconditionally; the server (`enrollHoldback` in
-`src/holdback.ts`) enforces the carry-up exemption — Outcome Holdback **carries
-up** the monotonic tier ladder (#741, ADR-0015), so **T2/T3/T4 merges enroll**
-while **T1 (prompt-shaped) and unknown-tier merges are exempt** (a no-op
-`{enrolled:false}`). A merge whose leading-outcome adapters return no data at
-merge time also sits as "no signal" rather than a false holdback.
-
-The **check** mechanism below (section B) DOES legitimately stay in `hydra-qa` /
-the autopilot poll loop — it watches each already-enrolled merge SHA on every
-tick. Only the *enroll-at-merge* step moved out, because that is the one step
-that needs the confirmed merge SHA + tier the auto-merge handler alone holds.
+`hydra-qa` runs strictly **pre-merge**: it posts a verdict comment and never merges, so it never holds a confirmed merge SHA. Enrollment is the autopilot `auto-merge` action handler's job (see "holdback enrollment on auto-merge" in `docs/operator-playbooks/hydra-autopilot.md`): it POSTs the merge SHA and tier to `/api/holdback/enroll`, and the server (`enrollHoldback` in `src/holdback.ts`) owns which tiers enroll and answers `{enrolled:false}` for the rest.
 
 ### B. Check enrolled merges each poll (the watch)
 
-On each autopilot poll tick, for every still-enrolled merge SHA, call `check`.
-The service re-samples the leading outcomes, compares against the persisted
-baseline, enforces the per-day revert cap, and emits the holdback.* events the
-digest reads. It returns a `decision`:
+On each autopilot poll tick, for every still-enrolled merge SHA, call `check`. The service re-samples the leading outcomes, compares against the persisted baseline, enforces the per-day revert cap, emits the holdback.* events, and returns a `decision`:
 
 ```bash
 RESP=$(curl -fsS -X POST http://localhost:4000/api/holdback/check \
@@ -172,13 +56,13 @@ DECISION=$(printf '%s' "$RESP" | jq -r '.decision')
 case "$DECISION" in
   revert)
     # A leading outcome regressed past its noise_epsilon AND the per-day cap is
-    # not yet reached. The service already emitted holdback.reverted and cleared
+    # not reached. The service already emitted holdback.reverted and cleared
     # the baseline + counted the revert. Perform the actual revert PR now.
     REGRESSED=$(printf '%s' "$RESP" | jq -r '.regressedOutcomes | join(", ")')
     if git -C <worktree> revert --no-edit "$merge_sha" && \
        gh pr create --title "revert: holdback regression on ${merge_sha:0:7}" \
-         --body "Outcome Holdback auto-revert (ADR-0004 step 4). Leading outcomes regressed past noise_epsilon vs the pre-merge baseline: ${REGRESSED}."; then
-      : # revert PR opened; CI is still the merge gate for the revert itself
+         --body "Outcome Holdback auto-revert. Leading outcomes regressed past noise_epsilon vs the pre-merge baseline: ${REGRESSED}."; then
+      : # revert PR opened; the revert PR goes through the normal PR flow
     else
       # Revert/PR-open failed — surface through the Operator Channel (a
       # holdback.revert_failed Page, ADR-0045) so the operator sees a
@@ -208,66 +92,22 @@ esac
 
 ### Invariants (must hold)
 
-- **Carry-up enrollment (T2/T3/T4 only).** Outcome Holdback carries up the
-  monotonic ladder (#741, ADR-0015): T2, T3, and T4 merges enroll; **T1 never
-  enrolls** (prompt-shaped, too low signal-to-noise — ADR-0004). The producer
-  enforces this server-side (`enrollHoldback` rejects T1/unknown), so a missing
-  client-side guard cannot enroll a T1 merge.
-- **Tier-aware, monotonic window.** The watch window length grows with blast
-  radius: `window(T4) >= window(T3) >= window(T2)`, with the 5-cycle T2 value
-  as the floor. The window is derived server-side from the enrolled `tier`
-  (`windowCyclesForTier` in `src/redis/holdback.ts`), clamped so an env
-  override can never invert the order. Only the window varies by tier — the
-  regression threshold and revert logic are identical across enrolled tiers.
-- **Leading outcomes only.** A revert fires only when a `kind: leading` outcome
-  regresses in the **unfavorable** direction by **more than** its
-  `noise_epsilon`. Terminal outcomes are too slow for the window and never
-  drive a revert (`outcomes.yaml` schema comment; CONTEXT.md).
-- **Adapter outage is no-data, not a regression.** A null reading on either
-  side of the comparison never counts as a regression ("no false revert").
-- **Fixed event names + payloads.** The producer emits exactly
-  `holdback.reverted` (`payload.commitSha`, `payload.regressedOutcomes`),
-  `holdback.cap-reached`, and `holdback.revert_failed` — the three names
-  the Operator Channel router (`src/operator-channel/route-event.ts`) consumes:
-  `holdback.revert_failed` is a Page, the other two are Morning Brief items
-  (ADR-0045). Renaming any leaves the consumer orphaned.
-- **Per-day cap precedes any revert.** Once `HYDRA_HOLDBACK_MAX_REVERTS_PER_DAY`
-  (default 3) is reached, the producer emits `holdback.cap-reached` and
-  suppresses further reverts for the UTC day.
-- **No new runtime dependency** (ADR-0005). Events publish via the orchestrator
-  event bus; the skill only shells `curl`/`gh`/`git`. Window/cap/TTL are named,
-  env-overridable config (defaults in `src/redis/holdback.ts`, documented in
-  `config/direction/outcomes.yaml`), never magic literals.
+- **Server-derived window.** The watch window is derived server-side from the enrolled tier (`src/redis/holdback.ts`); this skill never computes it.
+- **Leading outcomes only.** A revert fires only when a `kind: leading` outcome regresses in the **unfavorable** direction by **more than** its `noise_epsilon`. Terminal outcomes never drive a revert (`outcomes.yaml` schema comment; CONTEXT.md).
+- **Adapter outage is no-data, not a regression.** A null reading on either side never counts as a regression.
+- **Fixed event names + payloads.** The producer emits exactly `holdback.reverted` (`payload.commitSha`, `payload.regressedOutcomes`), `holdback.cap-reached` and `holdback.revert_failed`. `holdback.revert_failed` is a Page, the other two are Morning Brief items (ADR-0045); renaming any orphans the consumer.
+- **Per-day cap precedes any revert.** Once `HYDRA_HOLDBACK_MAX_REVERTS_PER_DAY` is reached, the producer emits `holdback.cap-reached` and suppresses further reverts for the UTC day.
+- **No new runtime dependency** (ADR-0005). Window, cap and TTL are named, env-overridable config (defaults in `src/redis/holdback.ts`, documented in `config/direction/outcomes.yaml`), never magic literals.
 
-## Slot lifecycle events — PostToolUse hook (issue #671)
+## Slot lifecycle events
 
-Every tool call inside this skill emits a `subagent_tool_call` event onto the
-Redis stream `hydra:autopilot:slot-events`. The classification is done at
-emit-time so the /now-pixel dashboard can route on `category` without
-re-deriving it from the tool name:
+Every tool call emits a `subagent_tool_call` event onto `hydra:autopilot:slot-events`. The category classification (a `milestone` is Bash matching `npm run build` or `npm run typecheck`, among others) and the never-propagate-errors contract are described once, in the "Slot lifecycle events" section of `hydra-dev.md`.
 
-- `milestone` — Write, Edit, MultiEdit, NotebookEdit, MCP write surfaces, and
-  Bash matching `^(git commit|gh pr|npm test|npm run build|npm run typecheck)`
-- `io` — other Bash, WebFetch, WebSearch, MCP read surfaces
-- `background` — Read, Grep, Glob
+### 9.4 Reviewer commit (class A) and class B (ADR-0046 Decision 2)
 
-**Hook script:** `scripts/autopilot/hooks/on-subagent-tool-call.sh`
-**Hook registration:** sibling `<this-playbook>.settings.json` →
-`~/.claude/skills/<this-skill>/.claude/settings.json` (propagated by
-`scripts/sync-skills.sh`)
+Run this block before `route`, after a FAIL fold, only when the `reviewer-commits` stage switch in the QA stage config under `config/orchestrator/` is on; inputs are `$PREFLIGHT_JSON` from `preflight`, `$FOLD_JSON`, `$REVIEW_VERDICT` and `$FIXED_SHA`, and `$QA_FIXES` / `$NEW_HEAD` go to the `trailer` phase. The PR head is checked out in a nested `git worktree add --detach` so the session tree stays untouched while the trusted scripts run from a separate master worktree (`$MASTER_WT`), with `HYDRA_REPO_ROOT` pointing the regenerators at the PR worktree and never running PR-authored scripts; the session tree is asserted unchanged on exit. With the switch off the `reviewer-commit` phase answers `none` (`reason=stage-off`) before it reads the diff, the changed paths or the body, and this block changes nothing.
 
-The hook MUST NEVER propagate errors back to this skill's session — a Redis
-outage, a malformed payload, or a missing `jq` all result in a stderr
-warning and `exit 0`. See `test/on-subagent-tool-call.test.mts` for the
-pinned behavior.
-
-### 9.4 Reviewer commit (class A) and class B (issues #5267, #5268, ADR-0046 Decision 2)
-
-> **Wiring status (issue #5267, after the #5269 plumbing refactor).** `route.ts` now runs fold -> trailer -> round action in-process, so this block is no longer a step of `hydra-qa.md`. The `reviewer-commit` engine phase, the class-A path classifier and the `QA-Fix:` trailer support are live and covered by `test/qa-reviewer-commit-a.test.mts`; the rollout switch `reviewer-commits` ships `off`, so no QA pass runs this block today. Enabling the switch requires wiring this block in before `route` (inputs: `$PREFLIGHT_JSON` from `preflight`, `$FOLD_JSON`, `$REVIEW_VERDICT`, `$FIXED_SHA`) and passing `$QA_FIXES`/`$NEW_HEAD` to the trailer phase. That wiring is a follow-up that must land before the switch is flipped (tracked as follow-up issue #5415; the design artifact's INV-11 `hydra-qa.md` placement is deferred to it). **Recorded INV-5 deviation:** the PR head is checked out in a nested `git worktree add --detach` (rather than a detached checkout inside the session tree) so the session tree stays untouched while the trusted scripts run from a separate master worktree; the session tree is asserted unchanged on exit.
-
-Runs only when step 9 produced `REVIEW_VERDICT=FAIL`. It is gated by the `reviewer-commits` rollout switch, which ships `off` in `config/orchestrator/qa-rollout.json`: with the switch off the `reviewer-commit` phase answers `none` (`reason=stage-off`) and this step changes nothing. The switch is read by the phase running from a dedicated detached worktree of `$FIXED_SHA` (origin/master), never the PR tree; with the switch off the phase answers before it reads the diff, the changed paths or the body, and the block below does not call it at all unless the verdict is FAIL. The PR head is checked out into a SEPARATE worktree and treated as data: the proof, the regenerators and the re-verify checks always run from that master worktree (`$MASTER_WT`) with `HYDRA_REPO_ROOT` pointing the regenerators at the PR worktree, never from PR-authored scripts; the session tree is asserted unchanged on exit.
-
-The `reviewer-commit` phase returns `commit-a`, `commit-b` or `commit-ab` only when ALL of these hold: the stage is `A` or `A+B`; the tier is 1-3; no changed file is Verifier Core; the one-way-door detector says `two-way` (`one-way` and `unknown` both refuse); and EVERY blocking finding of the fold sits in a class-A location (the PR body, or a path `classifyQaFixPath` calls `A`/`AB` that is not listed under the PR body's `## Files out of scope`; and, ONLY at stage `A+B`, a class-`B` test path, i.e. `test/**/*.test.mts` excluding the helpers subdirectory, likewise not out of scope). Under stage `A` a blocking finding at a class-B path is `ineligible-finding` exactly as before. A row located in `src/` (the "branch has no test" form) is never reviewer-fixable: a test edit cannot satisfy its per-row re-verify, so a reviewer who wants the class-B fix locates the coverage finding at the test file. The action is `commit-a` (class-A bucket only), `commit-b` (class-B only) or `commit-ab` (both); `blockingTestPaths[]` / `followUpTestPaths[]` carry the class-B paths, `blockingPaths[]` / `followUpPaths[]` keep their class-A meaning, and a blocking row AT an AB baseline stays in the class-A bucket. One blocking finding anywhere else makes the whole round `none`: nothing is committed, nothing is pushed, and steps 9.5-10 run unchanged on the original FAIL. The phase never edits, filters or re-grades a finding.
+The `reviewer-commit` phase returns `commit-a`, `commit-b` or `commit-ab` only when ALL of these hold: the stage is `A` or `A+B`; the tier is 1-3; no changed file is Verifier Core; the one-way-door detector says `two-way` (`one-way` and `unknown` both refuse); and EVERY blocking finding of the fold sits in a class-A location (the PR body, or a path `classifyQaFixPath` calls `A`/`AB` that is not listed under the PR body's `## Files out of scope`; and, ONLY at stage `A+B`, a class-`B` test path, i.e. `test/**/*.test.mts` excluding the helpers subdirectory, likewise not out of scope). Under stage `A` a blocking finding at a class-B path is `ineligible-finding` exactly as before. A row located in `src/` (the "branch has no test" form) is never reviewer-fixable: a test edit cannot satisfy its per-row re-verify, so a reviewer who wants the class-B fix locates the coverage finding at the test file. The action is `commit-a` (class-A bucket only), `commit-b` (class-B only) or `commit-ab` (both); `blockingTestPaths[]` / `followUpTestPaths[]` carry the class-B paths, `blockingPaths[]` / `followUpPaths[]` keep their class-A meaning, and a blocking row AT an AB baseline stays in the class-A bucket. One blocking finding anywhere else makes the whole round `none`: nothing is committed, nothing is pushed, and the trailer and route phases run unchanged on the original FAIL. The phase never edits, filters or re-grades a finding.
 
 ```bash
 QA_FIXES=""
@@ -463,14 +303,14 @@ fi
 if [ -n "$MASTER_WT" ]; then git worktree remove -f "$MASTER_WT" || echo "ERROR: could not remove $MASTER_WT" >&2; fi
 [ -z "$MASTER_ROOT_DIR" ] || rm -rf "$MASTER_ROOT_DIR"
 [ "$(git rev-parse HEAD)" = "$SESSION_HEAD" ] || echo "ERROR: session tree HEAD moved off $SESSION_HEAD" >&2
-[ "$(git -C "$SESSION_ROOT" status --porcelain)" = "$SESSION_STATUS" ] || echo "ERROR: session tree status changed during step 9.4" >&2
+[ "$(git -C "$SESSION_ROOT" status --porcelain)" = "$SESSION_STATUS" ] || echo "ERROR: session tree status changed during the reviewer commit" >&2
 ```
 
-A round makes at most one commit ending `QA-Fix: A` and at most one ending `QA-Fix: B`, never a combined trailer; the PASS trailer's `qa-fixes=` names every commit made. A class-B edit may never reduce coverage by deletion (`case-count-check`, fails closed), and the proof is per file: an edit whose file still passes at the merge-base, or whose import crashes there, is unproven and the round commits nothing; `qa-fix-proof.yml` re-runs the same proof on the pushed head and `qa-merge-guard` holds with `qa-fix-proof-not-green` until it is green. `config/orchestrator/qa-rollout.json` stays `off` until the operator merges the flip item `scripts/qa/commit-graduation.ts` files once ~10 clean class-A fixes have matured; #5415 stays a hard precondition for any flip. A reviewer-commit round is one `round=` like any other and never counts as a FAIL round; the round cap and the T4 2-strike rule are untouched. Bare `PASS` is unreachable on such a round: the verdict is `PASS-pending-CI` at the NEW head, and the autopilot's auto-merge goes through `qa-merge-guard`, which holds with `qa-fix-proof-not-green` until the `qa-fix-proof` workflow is green on that head. Step 9.5 passes `$QA_FIXES` and the new head SHA explicitly to the `trailer` phase.
+A round makes at most one commit ending `QA-Fix: A` and at most one ending `QA-Fix: B`, never a combined trailer; the PASS trailer's `qa-fixes=` names every commit made. A class-B edit may never reduce coverage by deletion (`case-count-check`, fails closed), and the proof is per file: an edit whose file still passes at the merge-base, or whose import crashes there, is unproven and the round commits nothing; `qa-fix-proof.yml` re-runs the same proof on the pushed head and `qa-merge-guard` holds with `qa-fix-proof-not-green` until it is green. The stage switch is flipped only by the operator-merged graduation item that `scripts/qa/commit-graduation.ts` files. A reviewer-commit round is one `round=` like any other and never counts as a FAIL round; the round cap and the T4 2-strike rule are untouched. Bare `PASS` is unreachable on such a round: the verdict is `PASS-pending-CI` at the NEW head, and the autopilot's auto-merge goes through `qa-merge-guard`, which holds with `qa-fix-proof-not-green` until the `qa-fix-proof` workflow is green on that head. The trailer inputs below pass `$QA_FIXES` and the new head SHA explicitly to the `trailer` phase.
 
-### 9.5 Trailer inputs after a reviewer commit (issue #5267)
+### 9.5 Trailer inputs after a reviewer commit
 
-When step 9.4 committed, the trailer phase receives the new head and the QA-Fix sha explicitly:
+When the reviewer commit above committed, the trailer phase receives the new head and the QA-Fix sha explicitly:
 
 ```bash
 TRAILER_JSON=$(jq -n --argjson pr "$pr_number" --arg verdict "$VERDICT" \

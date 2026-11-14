@@ -11,33 +11,31 @@ Run these numbered steps.
 
 1. **Verify isolation** — `pwd` + `git rev-parse --git-dir` under `.git/worktrees/`.
    Abort loudly if cwd is `/home/gabe/hydra` (never fall back to the main tree).
-1a. **Anchor claim — workers never write `in-progress` by hand** (issue #4271
-   INV-2, ADR-0047 D4, issue #5322). The `in-progress` claim keeps the anchor
-   out of the `glm-eligible` sweep for the whole dispatch (`isGlmEligibleCandidate`,
-   `src/scheduler/chores/glm-eligibility-sweep.ts`); it is the DISPATCHER's
-   write, not yours. Run from the repo root of the worktree:
+1a. **Anchor claim — the dispatcher writes `in-progress`, never you.** The
+   claim keeps the anchor out of the `glm-eligible` sweep for the whole dispatch
+   (`isGlmEligibleCandidate`, `src/scheduler/chores/glm-eligibility-sweep.ts`).
+   Run from the repo root of the worktree:
    - **Pinned anchor** (the issue number is in the `hydra-dispatch v1` sentinel
      / dispatch prompt): only READ the claim —
      `npx tsx scripts/lifecycle.ts claim-show "$ISSUE_NUMBER"`. If it reports no
-     open claim, log `[hydra-dev] WARN: no dispatch claim (pre-#5418 dispatcher)`
-     to stderr and continue. No write.
+     open claim, log `[hydra-dev] WARN: no dispatch claim` to stderr and
+     continue. No write.
    - **Unpinned, self-selected anchor**: fire the composite verb with the ids
      from the sentinel —
      `npx tsx scripts/lifecycle.ts dispatch "$ISSUE_NUMBER" --dispatch "$DISPATCH_ID" --class dev_orch --run "$RUN_ID" --purpose fresh`.
      A `claim-held` refusal means another dispatch owns that issue: pick a
      different issue.
-   Any other non-zero exit from the CLI is final for this step: log the JSON
-   line and continue (reap/reconcile own the hand-back); never fall back to a
-   direct label write (the deny hook refuses it). `claim-held` is the exception:
-   it is NOT log-and-continue — stop work on that issue and pick another.
+   The lifecycle-seam rule in SKILL.md applies: log the JSON line and continue
+   (reap/reconcile own the hand-back). `claim-held` is the exception: stop work on
+   that issue and pick another.
 2. Read CLAUDE.md / AGENTS.md, CONTEXT.md, relevant ADRs.
 3. Extract the `## Files in scope` + `## Files out of scope` lists from the issue body.
 4. **Fetch per-anchor Reflections via the live API** (see "Reflection injection"
    below) and weave any returned narrative into your implementation plan. Never
    skip — a retry of a prior-failure anchor depends on it.
 4a. **MANDATORY — deposit the reflection-source telemetry file AND the anchor
-   deposit** (issue #1136/#1912/#2112). Immediately after the step-4 fetch, run
-   the deposit recipe in "Reflection injection" below. It writes
+   deposit.** Immediately after the reflection fetch, run the deposit recipe in
+   "Reflection injection" below. It writes
    `${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-refl-sources-<task_id>` so `reap.py`
    can stamp the `reflectionMatchSource` metric, AND
    `${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-refl-anchor-<task_id>` so `reap.py`
@@ -51,52 +49,47 @@ Run these numbered steps.
    is reference-only in v1.1: refactoring is NOT part of the loop, it belongs in
    review) — and run `npm run typecheck` plus **single test files**
    (`npm run test:file -- test/<name>.test.mts`) **regularly as you go**,
-   reserving the full `npm test` sweep for step 8.
+   reserving the full `npm test` sweep for the verification item below.
 6. **Declare glossary/ADR impact** — per `docs/agents/domain.md`, add a
    `Glossary impact:` / `ADR impact:` line to the PR body for any term resolved
    or decision made. Do NOT edit `CONTEXT.md` in the code PR — that delta lands
    in a separate `ubiquitous-language`-labelled PR. That companion PR is a
    PARTIAL PR: it must reference the anchor as `Refs #N` or `Part of #N` and
-   never put any closing verb (negated or not) next to `#N` (issue #4767) —
-   the closing predicate (`scripts/autopilot/pr-refs.py` /
-   `src/github/pr-refs.ts`) AND GitHub's own auto-close both key on the verb,
-   and GitHub's auto-close IGNORES negation, so a companion carrying any
-   closing verb would close the anchor early and re-wedge the QA lane.
-   **Partial delivery of the anchor itself (issue #5400).** When a FRESH
-   dispatch ships only a slice of the anchor, never open a `Refs`-only PR: every
-   PR lane (QA, dev-resume) finds a PR through the issue it CLOSES, so a
-   `Refs #N`-only PR strands green and unreviewed (#5375, #5386). Instead:
-   (a) before `gh pr create`, file a child issue for exactly that slice, link it
-   as a native sub-issue (`gh api repos/gaberoo322/hydra/issues/<parent>/sub_issues -F sub_issue_id=<child-id>`),
-   with `## Files in scope` (the slice's files) and a `Parent design concept: issue-<parent>`
-   line; (b) the PR body says `Closes #<child>` plus `Part of #<parent>` and
-   never a closing verb next to the parent; (c) right after the PR exists,
-   label the child `needs-qa` (reap's needs-qa promotion is anchor-keyed and does
-   not fire for a child); (d) release the parent (`in-progress` -> `ready-for-agent`)
-   and post one comment naming the shipped slice, the child/PR and the remaining
-   slices. A `ubiquitous-language` companion stays `Refs`-only (above); the Turn
-   Snapshot's `orch_prs_no_closing_issue` signal now surfaces any open PR with no
-   closing issue to the operator as `surface-pr {cause: no-closing-issue}`.
+   never put any closing verb (negated or not) next to `#N` — the closing
+   predicate (`scripts/autopilot/pr-refs.py` / `src/github/pr-refs.ts`) AND
+   GitHub's own auto-close both key on the verb, and GitHub's auto-close IGNORES
+   negation, so a companion carrying any closing verb would close the anchor
+   early and re-wedge the QA lane.
+   **Partial delivery of the anchor itself** follows the slice and decomposition
+   rule in SKILL.md. Mechanics for this dispatch: file the child before
+   `gh pr create` and link it with
+   `gh api repos/gaberoo322/hydra/issues/<parent>/sub_issues -F sub_issue_id=<child-id>`;
+   right after the PR exists, label the child `needs-qa` (reap's needs-qa
+   promotion is anchor-keyed and does not fire for a child); release the parent
+   (`in-progress` -> `ready-for-agent`) and post one comment naming the shipped
+   slice, the child/PR and the remaining slices. A `ubiquitous-language`
+   companion stays `Refs`-only. The Turn Snapshot's `orch_prs_no_closing_issue`
+   signal surfaces any open PR with no closing issue to the operator.
 7. Run the full `npm test` per the canonical "Full `npm test` recipe" in
    `hydra-dev.md` (background launch into `npm-test.log` with a sentinel,
    foreground poll; the `*.log` ignore keeps it out of commits), then read the
    `# tests` / `# pass` / `# fail` footer, `NPM_TEST_EXIT=` and the VERDICT line
    from it. Also run `npm run typecheck` and `npm run build`.
-7a. **Fail-loud lint on changed files** (issue #4732, widened #5424) — run the
+7a. **Fail-loud lint on changed files** — run the
    ast-grep `fail-loud-catch` rule over the PR's changed `.ts`/`.mts` files,
    `fail-loud-except-py` over changed `.py` files, `fail-loud-devnull-sh` over
    changed `.sh` files and `typed-error-throw` over changed `src/`/`scripts/` `.ts`
    files (bare `throw new Error`, STD-ERROR-TYPED-CODE), and fix every hit before `gh pr create` (the shrink-only
    `test/fail-loud-ratchet.test.mts` in `npm test` blocks any new or edited hit). Recipe: "Fail-loud lint — changed files" below.
-7b. **Test-can-fail proof on changed tests** (issue #5447, STD-TEST-CAN-FAIL) —
+7b. **Test-can-fail proof on changed tests** (STD-TEST-CAN-FAIL) —
    run the same advisory judge CI runs over the test files you added or
    extended; for each `passes-at-merge-base` file make a case red-then-green, or
    justify it in the PR body. Recipe: "Test-can-fail proof — changed tests" below.
-8a. **MANDATORY — deposit the grounding test-count telemetry file** (issue
-   #2754). Immediately after `npm test` passes, run the grounding-deposit recipe
+8a. **MANDATORY — deposit the grounding test-count telemetry file.**
+   Immediately after `npm test` passes, run the grounding-deposit recipe
    in "Reflection injection" below. Best-effort on I/O error but mandatory.
-8b. **Author a changelog fragment (or opt out) BEFORE tier classification** (issue
-    #3658, epic #3676). This MUST run before step 9 so the `.changelog/<issue>-<slug>.md`
+8b. **Author a changelog fragment (or opt out) BEFORE tier classification.**
+    This MUST run before the classify item so the `.changelog/<issue>-<slug>.md`
     file is part of the diff the tier classifier reads. If the change ships anything
     user- or operator-visible, write **one** file `.changelog/<issue>-<slug>.md` —
     `<issue>` is the issue this PR closes, `<slug>` a short kebab-case description —
@@ -117,7 +110,7 @@ Run these numbered steps.
 8. **Classify the change via the live tier API** (see "Tier classification"
    below). Never self-classify by path patterns.
 9a. **Fetch the design-concept artifact unconditionally, then reconcile the
-   diff against it BEFORE opening the PR** (issues #2537, #2528, #4102). Run
+   diff against it BEFORE opening the PR.** Run
    the fetch recipe under "Design-concept artifact — live API" — the RESPONSE
    decides, not your memory of planning and not the issue's labels. Non-empty:
    run the "Design-concept reconciliation gate" below and write its
@@ -127,7 +120,7 @@ Run these numbered steps.
    NOT open the PR — emit a `## Friction Report` naming the unmet invariant
    and stop.
 9b. **MANDATORY — run the pre-PR mechanical gate BEFORE `gh pr create`**
-   (issue #4731). Write the PR body to a file first, then run all four checks
+   Write the PR body to a file first, then run all four checks
    under "Pre-PR mechanical gate" below — reconcile dry-run against that body
    file, baseline regeneration, foreground `npm test` + `npm run typecheck:test`,
    and the `Merge danger:` field check (Gate 4).
@@ -136,8 +129,8 @@ Run these numbered steps.
    submitted body.
 9. Open a PR with `closes #$issue_number`, a `## Files in scope` mirror of the
     issue's section, a `Tier: <1|2|3|4>` line from the API, and a
-    `Merge danger: <one-way|two-way> — <reason>` line (issue #5258, ADR-0046
-    D5) as its own top-level line beside `Tier:` — never inside
+    `Merge danger: <one-way|two-way> — <reason>` line (ADR-0046 D5) as its own
+    top-level line beside `Tier:` — never inside
     `## Files in scope`. It declares whether `git revert` plus the automatic
     redeploy restores the world. Self-check BEFORE looking at the detector:
     does the PR (1) change persistent state or its schema, (2) cause an
@@ -154,10 +147,10 @@ Run these numbered steps.
     Prose-only criteria are rejected by QA.
 10. Return: PR URL + summary table, then emit the `## Friction Report` (see below).
 
-## Reflection injection — live API (issue #841)
+## Reflection injection — live API
 
-A prior **failed** attempt on the same anchor (or, post-#326, a different anchor
-that touched the same files) leaves a per-anchor **Reflection** — "what was
+A prior **failed** attempt on the same anchor (or a different anchor that
+touched the same files) leaves a per-anchor **Reflection** — "what was
 attempted, why it failed, what to change". Fetch it at planning time and weave it
 into the plan. The endpoint composes the per-anchor + by-file reads server-side.
 
@@ -169,9 +162,9 @@ is prompt-ready markdown; `count: 0` / `formatted: ""` is a clean no-op.
 ```bash
 # ANCHOR_REF is anchor.reference, e.g. "issue-841". FILES_CSV is the
 # `## Files in scope` list, comma-separated.
-# Guard-compatible form (issue #3896): no command substitution at all.
+# Guard-compatible form: no command substitution at all.
 # curl -G --data-urlencode encodes each query value itself. rm -f first so a
-# failed fetch or a resumed run never leaves a stale file for the step-4a deposit.
+# failed fetch or a resumed run never leaves a stale file for the deposit.
 rm -f .hydra-refl.json
 curl -sf --max-time 5 -G -o .hydra-refl.json \
   --data-urlencode "anchor=${ANCHOR_REF}" \
@@ -179,27 +172,24 @@ curl -sf --max-time 5 -G -o .hydra-refl.json \
   "http://localhost:4000/api/reflections"
 # Then read .hydra-refl.json: its `.formatted` field is prompt-ready markdown to
 # prepend to your plan; do NOT repeat the prior approach. The file is also the
-# input to the step-4a deposit. Empty / unreachable → graceful no-op (the deposit
+# input to the deposit. Empty / unreachable → graceful no-op (the deposit
 # treats a missing file as an empty body). Never fail the dispatch over a miss.
 ```
 
-**Reflection-source + anchor telemetry deposit (issue #1136/#1912/#2112 —
-MANDATORY, child-step 4a).** The deposit key-derivation (#1945: derive the
-harness `task_id` from the `agent-<HASH>` worktree cwd, not env vars) and the
-unconditional anchor deposit (#2112) now live in the deterministic helper
-`scripts/reflection-deposit.sh` — run it right after the step-4 fetch. reap.py
-reads the deposit on its single authoritative `cycle-record` write; do NOT POST
-`cycle-record` yourself (reap is the sole writer):
-The worktree Bash guard refuses `bash <script-path>` and `$(git rev-parse …)`
-forms (#4753), so use the single-command npm alias — it wraps the helper, takes
-the body from the file the step-4 fetch wrote, and needs no shell variables
-beyond the anchor ref:
+**Reflection-source + anchor telemetry deposit (issue #1912, MANDATORY, the deposit item).**
+The deposit derives the harness `task_id` from the `agent-<HASH>` worktree cwd
+and always writes the anchor deposit; both live in the deterministic helper
+`scripts/reflection-deposit.sh`. reap.py reads the deposit on its single
+authoritative `cycle-record` write; do NOT POST `cycle-record` yourself. The
+worktree Bash guard refuses `bash <script-path>` and `$(git rev-parse …)` forms,
+so use the single-command npm alias — it wraps the helper, takes the body from
+the file the reflection fetch wrote, and needs no shell variables beyond the
+anchor ref:
 ```bash
 npm run deposit:reflect -- hydra-dev <ANCHOR_REF> --file .hydra-refl.json
 ```
 
-**Grounding test-count deposit (issue #2754 — MANDATORY, child-step 8a, right
-after `npm test` passes).** The helper parses the node:test footer of the log
+**Grounding test-count deposit (MANDATORY, right after `npm test` passes).** The helper parses the node:test footer of the log
 you just captured (it never re-runs the full suite with `--from-log`) and
 deposits `hydra-grounding-tests-<task_id>` (`testsAfter` / `testsPassingAfter`)
 keyed on the SAME harness `task_id`. Best-effort:
@@ -207,7 +197,7 @@ keyed on the SAME harness `task_id`. Best-effort:
 npm run deposit:grounding -- hydra-dev --from-log npm-test.log
 ```
 
-**Reap-time deposit-presence diagnostic (issue #2020).** A
+**Reap-time deposit-presence diagnostic.** A
 `reflectionMatchSource` of `'none'` is ambiguous; `reap.py completion` stamps
 `refl_presence=<token>` (`deposit-absent` / `deposit-empty` / `deposit-present` /
 `read-error` / `no-task-id`) on the `slot_complete` log line so an honest none
@@ -219,8 +209,8 @@ composition, not delivery).
 ## Design-concept artifact — live API (cue: design-concept-endpoint-path-plural)
 
 A grilled anchor carries a **design-concept artifact**. Its existence is
-invisible from the issue's labels — only the endpoint knows — so child-step 9a
-fetches it unconditionally, every dispatch:
+invisible from the issue's labels — only the endpoint knows — so the
+design-concept item fetches it unconditionally, every dispatch:
 
 ```bash
 DC_JSON=$(curl -sf --max-time 5 "http://localhost:4000/api/design-concepts/${ANCHOR_REF}" || echo '')
@@ -235,9 +225,8 @@ There is no singular design-concept route and no `?anchor=` query form. Response
 is NO `.concept` envelope, read `.invariants` directly. 404 → no artifact; do not
 retry alternate spellings.
 
-**Design-concept reconciliation gate (issues #2537, #2528, #4102 — MANDATORY
-pre-PR step).** Run as child-step 9a — AFTER the change is committed and
-tier-classified, BEFORE `gh pr create`. **Mechanical, not advisory:**
+**Design-concept reconciliation gate (MANDATORY pre-PR step).** Run it AFTER
+the change is committed and tier-classified, BEFORE `gh pr create`. **Mechanical, not advisory:**
 `test/design-concept-reconcile-check.test.mts` runs in the REQUIRED `test`
 job, re-fetches the artifact for your `Closes #N` anchor — whether or not you
 did — and re-executes every assertion you declare.
@@ -301,13 +290,11 @@ It fails OPEN on transport misses, never reddening on downtime.
 
 ## Pre-PR mechanical gate (issue #4731)
 
-A 150-PR QA audit found 13 of 67 FAIL rounds were pure process-gate failures
-with a one-line mechanical fix — a missing / paraphrased / `...`-truncated
-reconciliation section (7), an un-regenerated suite-count or test-subject
-baseline (3), the PR's own new test red (1+). Each cost a dev resume plus a
-full re-review (~350k tokens, median 5.4h to merge vs 0.6h clean). A script
-catches every one of them; run it yourself, child-step 9b, before
-`gh pr create`. All three checks run in the FOREGROUND.
+Process-gate failures (a missing, paraphrased or truncated reconciliation
+section, an un-regenerated suite-count or test-subject baseline, the PR's own
+new test red) each cost a dev resume plus a full re-review. A script catches
+every one of them; run all four gates yourself before `gh pr create`, in the
+FOREGROUND.
 
 ### Gate 1 — design-concept reconcile dry-run
 
@@ -367,7 +354,7 @@ either is red (including the PR's own new test). A failure you believe is a
 pre-existing master flake: confirm it fails on `origin/master` too and name it
 in the PR body; do not open silently over it.
 
-### Gate 4 — `Merge danger:` field present and not under-declared (issue #5258)
+### Gate 4 — `Merge danger:` field present and not under-declared
 
 The QA reviewer compares your declaration with the one-way-door detector; an
 `under-declared` call (you wrote `two-way`, the detector fired `one-way`) is a
@@ -434,10 +421,10 @@ fi
 `Tier:`) and pass `$TIER_LABEL_FLAG` so an unreachable classifier yields a
 `needs-triage` label, not a silently-wrong tier. GET not POST — `src/api/tier.ts`
 reads `req.query.files`; a POST body returns 400. The authoritative logic is
-`src/tier-classifier.ts` (the only source the CI merge gate consults) — a
+`src/tier-classifier.ts` (the only tier source CI consults) — a
 self-asserted tier that disagrees wastes a QA cycle.
 
-## Friction Report (issue #512 — ALWAYS, even on success)
+## Friction Report (ALWAYS, even on success)
 
 Emit a `## Friction Report` at the bottom of your return describing each piece of
 soft friction you worked around, so the next dispatch doesn't re-discover it:
@@ -452,10 +439,10 @@ Rules: `cue` MUST be kebab-case and stable across runs (NOT free text);
 `workaround` and `context` are exactly one line each. No friction worth noting →
 emit `## Friction Report` with the literal body `- (none)`.
 
-## Test-can-fail proof — changed tests (issue #5447)
+## Test-can-fail proof — changed tests
 
-STD-TEST-CAN-FAIL was the most-cited review rule in the 2026-11 retro (17 PRs):
-a new test that already passes at the merge-base cannot be pinning your change.
+STD-TEST-CAN-FAIL: a new test that already passes at the merge-base cannot be
+pinning your change.
 `scripts/ci/qa-fix-proof.ts` in `--mode changed-tests` overlays your changed `test/**`
 files onto a throwaway merge-base worktree and runs the candidates (added test
 files, plus modified ones that add a `test(`/`it(` call). It is the same CLI the
@@ -472,15 +459,13 @@ not a finding; `passes-at-merge-base` prints a `::warning file=...::` line. That
 finding is per FILE and may be legitimate (a drift guard for an already-true
 invariant): fix the case so it fails without your change, or say why in the PR body.
 
-## Fail-loud lint — changed files (issue #4732)
+## Fail-loud lint — changed files
 
 CLAUDE.md "Fail loud": every `catch` either logs with context or is annotated
-`/* intentional: <reason> */`. A silent catch was the single most common QA
-FAIL reason in the 2026-09 audit (9 of 67 FAIL rounds, each a full T3
-re-review). The ast-grep rule `src/ast-grep-rules/fail-loud-catch.yml` flags a
+`/* intentional: <reason> */`. The ast-grep rule `src/ast-grep-rules/fail-loud-catch.yml` flags a
 `try … catch` clause that neither logs (`console.error` / `console.warn` /
 `logger.error` / `logger.warn` / `process.stderr.write`), rethrows, nor carries
-a comment containing `intentional`. Run it as child-step 7a, over ONLY the
+a comment containing `intentional`. Run it as the fail-loud item, over ONLY the
 files this PR touches — existing hits elsewhere on master are advisory and not
 yours to fix:
 
@@ -497,7 +482,7 @@ for spec in "fail-loud-catch:*.ts *.mts" "fail-loud-except-py:*.py" "fail-loud-d
     npx tsx scripts/ast-search.ts --rule "$rule" --text "${LINT_ARGS[@]}"
   fi
 done
-# STD-ERROR-TYPED-CODE (#5434): bare `throw new Error(...)` in changed src/ + scripts/ .ts files.
+# STD-ERROR-TYPED-CODE: bare `throw new Error(...)` in changed src/ + scripts/ .ts files.
 TE_ARGS=()
 while IFS= read -r f; do
   [ -f "$f" ] && TE_ARGS+=(--path "$f")
@@ -529,18 +514,7 @@ this step catches them before the PR. Rule fixtures:
 `src/ast-grep-rule-tests/fail-loud-catch-test.yml`, run with
 `npx --yes -p @ast-grep/cli@0.43.0 ast-grep test --skip-snapshot-tests`.
 
-## Critical test/verification rules
+## Test and baseline commands
 
-- **Run tests via `npm test`, or `npm run test:file -- test/<name>.test.mts` for a
-  single file. NEVER a bare `node --test <file>`** — orchestrator modules keep a long-lived ioredis
-  connection + scheduler timeout alive, so `node:test` hangs forever after the
-  assertions pass (froze an 11h autopilot session, 2026-05-28). `npm test`
-  and `test:file` carry `--test-force-exit`; `test:file` also adds per-run Redis
-  DB isolation (CLAUDE.md "Single-file test run").
-- **To identify WHICH test failed in one run, use `npm run test:debug`, never
-  re-run + grep** (issue #1076). The default reporter buffers stdout and
-  force-exit tears down before the per-test `not ok` lines flush. `test:debug`
-  keeps the same flags plus a `tap → test-debug.tap` sink; read the `not ok`
-  lines out of `test-debug.tap`. Do NOT edit the `test` script — it declares
-  the run to be the whole suite (`HYDRA_FULL_SUITE=1`), which arms the file-set
-  coverage gate (issue #4141).
+The single-file runner, the failing-test reader and the SUITE-COUNT GATE are
+documented once, in CLAUDE.md "Common Pitfalls". Never run a bare `node --test`. Never edit the `npm test` script in `package.json`: its `HYDRA_FULL_SUITE=1` is what arms the file-set coverage gate (`docs/reference.md` "Pitfall mechanisms").

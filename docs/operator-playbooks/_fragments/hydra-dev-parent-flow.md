@@ -10,32 +10,24 @@ contract lives in the sibling `hydra-dev-child-flow.md`.
 ### 1. Select issue
 
 If `$issue_number` provided, use it. Otherwise, take the first
-`ready-for-agent` issue NOT already claimed by an open PR (#4103) AND NOT
-withheld by a live GLM dev-drainer partition (#4153). An issue keeps
-`ready-for-agent` while its PR is in flight (nothing relabels it until the PR
-merges or `reap.py` promotes it to `needs-qa`), so an unguarded `.[0]`
-manufactures a duplicate dispatch — a full wasted dev cycle (fresh worktree,
-implementation, `npm test`, duplicate PR) whenever a PR is open on the head of
-that list. The claim-check uses the ONE shared reference predicate
-(`scripts/autopilot/pr-refs.py`, issue #3852) — never re-implement the
-branch/body matching inline: the body-ref arm catches PRs whose head branch
-carries no issue number at all (`worktree-agent-*` branches link only via
-`Closes #N` in the body, invisible to a branch-name scan).
+`ready-for-agent` issue NOT already claimed by an open PR AND NOT withheld by a
+live GLM dev-drainer partition. An issue keeps `ready-for-agent` while its PR is
+in flight, so an unguarded `.[0]` manufactures a duplicate dispatch. The
+claim-check uses the ONE shared reference predicate
+(`scripts/autopilot/pr-refs.py`); never re-implement the branch/body matching
+inline, because `worktree-agent-*` branches link only via `Closes #N` in the body.
 
-**GLM lane exclusion (#4153, ADR-0040 Decision 5, #4254).** The selector is a
-projection consumer: it reads the `glm_withheld` issue-number list from
-`GET /api/autopilot/board-state` (the server folds drainer liveness and the lane
-rules into it) and excludes those numbers. It re-spells no label rule and reads
-no liveness itself. **Fail-open preserved (#3754):** a degraded body, an
-unreachable endpoint, or a malformed field resolves to an empty list, never a
-failed selection.
+**GLM lane exclusion (ADR-0040 Decision 5).** The selector reads the
+`glm_withheld` issue-number list from `GET /api/autopilot/board-state` and
+excludes those numbers; it re-spells no label rule and reads no liveness itself.
+**Fail-open preserved (#3754):** a degraded body, an unreachable endpoint, or a malformed field
+resolves to an empty list, never a failed selection.
 
 ```bash
 # Issue numbers already claimed by an open PR (branch convention OR body ref),
 # via the shared predicate. FAIL-OPEN: a failed or empty gh pr list yields an
 # empty CLAIMED, the jq filter below becomes a no-op, and selection falls back
-# to today's unfiltered .[0] — a transient GitHub hiccup loses only the dedup,
-# never the dispatch.
+# to the unfiltered .[0].
 CLAIMED=$(gh pr list --repo gaberoo322/hydra --state open --json headRefName,body \
   | python3 scripts/autopilot/pr-refs.py 2>/dev/null || true)
 CLAIMED_JQ=$(printf '%s' "$CLAIMED" | tr ' ' ',')
@@ -62,12 +54,12 @@ one-liner → stop, tell operator to run `/triage` first.
 ### 3. Size check — decompose if too large
 
 If body has **>5 acceptance criteria** OR description suggests **>8 files changed**:
-1. `/to-tickets $issue_number` to decompose (Claude; upstream renamed `to-issues`→`to-tickets` in Pocock v1.1)
-2. `npx tsx scripts/lifecycle.ts advance $issue_number blocked --reason blocked-by-issue --rationale "decomposed into #a #b ..." --actor hydra-dev` (list the child numbers; a non-zero exit is final — never fall back to a direct label write, ADR-0047 D4)
+1. `/to-tickets $issue_number` to decompose
+2. `npx tsx scripts/lifecycle.ts advance $issue_number blocked --reason blocked-by-issue --rationale "decomposed into #a #b ..." --actor hydra-dev` (list the child numbers; the lifecycle-seam rule in SKILL.md applies)
 3. Comment on parent listing children
 4. Stop — `/hydra-sweep` picks up children after triage
 
-### 3.5 Scope contract (issue #396)
+### 3.5 Scope contract
 
 Before dispatching, confirm the issue body contains a `## Files in scope` section
 (and ideally a `## Files out of scope` section). The CI `scope-check` gate treats
@@ -79,40 +71,33 @@ both sections as authoritative:
 - The only escape hatch is for the subagent to add a `scope-justification:` block
   to its PR body listing the specific files it had to touch and why.
 
-If the issue is missing `## Files in scope`, stop and re-triage. The
-`issue-label-validation` workflow blocks the `ready-for-agent` label transition
-when this section is missing, so this should be rare — but a freshly-labelled
-issue may still need a one-time correction.
+If the issue is missing `## Files in scope`, stop and re-triage.
 
-> **Code-span trap (recurring friction `scope-check-codespan-trap`):** the
-> `scope-check` parser unions **every** backticked code-span it finds *anywhere
-> inside* the `## Files in scope` / `## Files out of scope` sections into the
-> scope set — not just the bullet-list entries. So a backticked filename buried
-> in prose under those headings becomes a phantom scope entry that can HARD-block
-> an otherwise in-scope file. Keep filenames in such prose **plain-text** (no
-> backticks); reserve backticks for the actual bullet-list path entries.
+> **Code-span trap (friction cue `scope-check-codespan-trap`):** the `scope-check`
+> parser unions **every** backticked code-span anywhere inside the
+> `## Files in scope` / `## Files out of scope` sections into the scope set, so a
+> backticked filename in prose under those headings becomes a phantom scope entry.
+> Keep such filenames plain-text; reserve backticks for the bullet-list paths.
 
 The dispatched child prompt MUST include the scope-respect block below.
 
 ### 4. Claim the anchor (the parent is the dispatcher — ADR-0047 D4)
-The seam performs the `ready-for-agent` -> `in-progress` advance; workers never
-write the label directly.
+The seam performs the `ready-for-agent` -> `in-progress` advance.
 ```bash
 dispatch_id="hydra-dev-$(date +%s)"
 npx tsx scripts/lifecycle.ts dispatch $issue_number --dispatch "$dispatch_id" --class dev_orch --run interactive --purpose fresh
 ```
-Keep the `$dispatch_id`: step 6 releases the claim with it. `claim-held` ->
-exclude that issue and re-run selection (at most 3 picks, then stop with a
-report); `parked:*` or an enforce `advance-refused` -> stop and report. A
-non-zero exit is final; never fall back to a direct `in-progress` label write
-(the `lifecycle-state-label-guard` PreToolUse hook denies it).
+Keep the `$dispatch_id`: the Post-agent section releases the claim with it.
+`claim-held` -> exclude that issue and re-run selection (at most 3 picks, then
+stop with a report); `parked:*` or an enforce `advance-refused` -> stop and
+report.
 
 ### 5. Spawn worktree agent
 
 - **Claude:** `Agent(isolation: "worktree", prompt: <child-prompt>)`
 
-**Branch held by a stale sibling worktree (cue:
-pr-branch-checked-out-in-stale-sibling-worktree).** `git worktree add -b
+**Branch held by a stale sibling worktree (cue
+`pr-branch-checked-out-in-stale-sibling-worktree`).** `git worktree add -b
 issue-N-…` fails with `fatal: '<branch>' is already used by worktree …` when a
 prior dispatch's worktree still holds that branch. Do NOT delete the other
 worktree, do NOT `git branch -D` the held branch, do NOT fall back to the main
@@ -159,20 +144,19 @@ Do NOT fall back to running in `~/hydra`. Do NOT create a branch in the main tre
 If the harness exposes `EnterWorktree`/`ExitWorktree`, the child should call
 `EnterWorktree` only when its initial `pwd` check fails the worktree predicate.
 
-### Child-prompt path-anchoring contract (REQUIRED — issue #1861)
+### Child-prompt path-anchoring contract (REQUIRED)
 
 Append immediately after the worktree-guard preamble. It is the prompt-side half
 of the `worktree-write-fence.sh` PreToolUse hook — anchoring paths correctly from
-the first turn avoids the wasted recovery turns a deny would cost (the single
-most recurring friction pattern, #1861):
+the first turn avoids the wasted recovery turns a deny would cost:
 
 ```
-## PATH ANCHORING — every file op stays inside the worktree (issue #1861)
+## PATH ANCHORING — every file op stays inside the worktree
 
 Your cwd is a git worktree, but Read/Edit/Write/MultiEdit resolve absolute
 paths against the raw filesystem, NOT the worktree namespace. A path like
-`/home/gabe/hydra/src/foo.ts` or `/home/gabe/hydra-betting/web/x.ts` points at
-the MAIN checkout, not your worktree copy. Reading or writing it ghost-writes
+`/home/gabe/hydra/src/foo.ts` points at the MAIN checkout, not your worktree
+copy. Reading or writing it ghost-writes
 into the main tree (leaving your PR diff empty) or gets denied by the
 worktree-write-fence (burning turns).
 
@@ -180,9 +164,8 @@ RULES:
 1. Run `pwd` once and treat its output as your worktree root `$WT`.
 2. For EVERY Read/Edit/Write/MultiEdit `file_path`, use a path that is either
    repo-relative (resolved against $WT) OR absolute and prefixed with `$WT/`.
-   NEVER construct a bare `/home/gabe/hydra/...` or `/home/gabe/hydra-betting/...`
-   path for a file you intend to read-for-editing or write — that is the main
-   checkout.
+   NEVER construct a bare `/home/gabe/hydra/...` path for a file you intend to
+   read-for-editing or write; that is the main checkout.
 3. If a Read/Edit/Write is DENIED by worktree-write-fence, the deny reason
    names the corrected `$WT/...` path. Re-issue the call against THAT path; do
    not try to recompute it or to `cd` out of the worktree.
@@ -191,16 +174,15 @@ RULES:
    allowed and passes the fence — but never base an Edit on such a path.
 ```
 
-### Child-prompt EnterWorktree anchor contract (REQUIRED — issue #2371)
+### Child-prompt EnterWorktree anchor contract (REQUIRED)
 
-Append immediately after the PATH ANCHORING block. It resolves the
-write-fence-blocks-a-valid-in-worktree-Edit symptom (#2371) — a **redundant**
+Append immediately after the PATH ANCHORING block. A **redundant**
 `EnterWorktree` from an agent already launch-pinned to its worktree desyncs the
 harness's single writable-root anchor from cwd, so a later valid in-cwd
-Edit/Write is denied. The fix is preventive — don't trigger the redundant switch:
+Edit/Write is denied. The fix is preventive: don't trigger the redundant switch.
 
 ```
-## ENTERWORKTREE ANCHOR — do not desync the writable root (issue #2371)
+## ENTERWORKTREE ANCHOR — do not desync the writable root
 
 You were dispatched via Agent(isolation="worktree"), so the harness has already
 LAUNCH-PINNED your writable-worktree root to your cwd. The harness tracks ONE
@@ -226,15 +208,9 @@ RULES:
    workaround this contract exists to eliminate.
 ```
 
-> Orthogonal note (issue #1861 / #549 — NOT the #2371 fix): the custom
-> `worktree-write-fence.sh` PreToolUse ghost-write hook is installed (see
-> `scripts/setup-claude-hooks.sh`). It closes the ghost-write-to-main gap but
-> does NOT resolve the #2371 symptom above.
+### Child-prompt scope-respect block (REQUIRED)
 
-### Child-prompt scope-respect block (REQUIRED — issue #396)
-
-Append immediately after the worktree-guard preamble. It is the subagent-side
-replacement for the deleted `reconcilePlanVsActual()` step:
+Append immediately after the worktree-guard preamble:
 
 ```
 ## SCOPE CONTRACT — issue body is authoritative
@@ -266,12 +242,10 @@ The CI `scope-check` job at `.github/workflows/ci.yml` enforces this contract.
 
 Move the source issue to `needs-qa` through the lifecycle seam so `qa_orch`
 auto-fires on the open PR and a stale `ready-for-agent` can't re-surface the
-issue for a duplicate dispatch (the #770/#754 hazard, root cause of #846). The
-seam's `pr-open` gate verifies the PR is open and its body closes the issue; a
-non-zero exit is final for this step (log the JSON line; never fall back to a
-direct label write). In the autopilot path reap's needs-qa promotion already
-performs this move, so a `pr-merged` / `illegal-transition` refusal is not an
-error. Then release the claim:
+issue for a duplicate dispatch. The seam's `pr-open` gate verifies the PR is open
+and its body closes the issue. In the autopilot path reap's needs-qa promotion
+already performs this move, so a `pr-merged` / `illegal-transition` refusal is
+not an error. Then release the claim:
 
 ```bash
 npx tsx scripts/lifecycle.ts advance "$issue_number" needs-qa --evidence pr="$pr_number" --actor hydra-dev \
@@ -280,8 +254,8 @@ npx tsx scripts/lifecycle.ts release "$issue_number" --dispatch "$dispatch_id" -
 ```
 
 Dependents are NOT unblocked here: the PR is unmerged, so the blocker is not
-closed yet. The autopilot Phase 1.5 sweep (`recover-stale.sh` via
-`scripts/autopilot/blockers-cleared.ts`) owns unblocking (#4806).
+closed yet. The autopilot blockers-cleared sweep
+(`scripts/autopilot/blockers-cleared.ts`) owns unblocking.
 
 **Failure (including isolation-abort):**
 ```bash
@@ -312,21 +286,20 @@ if [ "$MAIN_BRANCH" != "master" ]; then
 fi
 ```
 
-#### 7a. Ghost-write canary (issue #549)
+#### 7a. Ghost-write canary
 
 cwd confusion is caught above; a ghost-write (cwd is the worktree but an
 Edit/Write landed in the main tree via an absolute `file_path`) is not. The
-primary guard is the PreToolUse hook from `bash scripts/setup-claude-hooks.sh`.
+primary guard is the `worktree-write-fence.sh` PreToolUse hook installed by `scripts/setup-claude-hooks.sh`.
 The skill-side canary is belt-and-braces:
 ```bash
 PRE_GHOST_SNAPSHOT=$(git -C ~/hydra diff --name-only HEAD 2>/dev/null || true)
 # ... dispatch the BG agent ...
 POST_GHOST_SNAPSHOT=$(git -C ~/hydra diff --name-only HEAD 2>/dev/null || true)
 # Guard-compatible form (issue #3837): the worktree-isolation Bash guard refuses
-# the original process-substitution form of this diff. Write each snapshot to a
-# temp file and `comm` the two files instead -- identical detection semantics
-# (files in POST not in PRE = newly dirtied in ~/hydra during the dispatch).
-# See "Guard-compatible shell forms" below.
+# process-substitution form of this diff. Write each snapshot to a temp file and
+# `comm` the two files (files in POST not in PRE = newly dirtied in ~/hydra during
+# the dispatch). See "Guard-compatible shell forms" below.
 printf '%s\n' "$PRE_GHOST_SNAPSHOT" | sort -u > /tmp/hydra-ghost-pre.$$
 printf '%s\n' "$POST_GHOST_SNAPSHOT" | sort -u > /tmp/hydra-ghost-post.$$
 NEW_DIRTY=$(comm -13 /tmp/hydra-ghost-pre.$$ /tmp/hydra-ghost-post.$$)
@@ -338,7 +311,7 @@ if [ -n "$NEW_DIRTY" ]; then
 fi
 ```
 
-### 8. Lesson capture on verification failure (issue #392)
+### 8. Lesson capture on verification failure
 
 When the BG agent returns a **failure** with `verification-failure`, `no-diff`,
 or `rollback`, capture a learning hit (the only post-cycle writer to
@@ -359,7 +332,7 @@ Cues: `verification-failure` (npm test / typecheck / build failed), `no-diff`
 (zero file changes), `rollback` (merged then auto-reverted). Idempotent on
 `(skill, outcome, cue)`.
 
-### 9. Friction Report (issue #512 — ALWAYS, even on success)
+### 9. Friction Report (ALWAYS, even on success)
 
 The child emits a `## Friction Report` section at the bottom of its return — even
 on a clean success. Parse it and POST each item to
@@ -378,7 +351,7 @@ curl -fsS -X POST http://localhost:4000/api/memory/subagent-friction \
 Idempotent on `(skill, cue)`; crossing 3 hits auto-opens a `meta-friction`
 issue. Best-effort — a failed POST does not fail the build.
 
-## Guard-compatible shell forms (issue #3837)
+## Guard-compatible shell forms
 
 The harness's worktree-isolation Bash guard refuses Bash commands it judges too
 complex to verify stay inside the worktree. Confirmed triggers (refused in
@@ -390,13 +363,13 @@ loop is refused, a fixed-iteration `for` is accepted, see the last bullet):
 - **Clock-budgeted loops** -- `deadline=$((SECONDS + N)); while [ "$SECONDS" -lt "$deadline" ]`
   is refused ("evaluates SECONDS arithmetically"). A fixed-iteration
   `for i in $(seq 1 N); do ...; if [ cond ]; then break; fi; sleep 15; done`
-  WAS accepted (verified in-dispatch 2026-10-25) -- budget by count, not clock.
+  is accepted -- budget by count, not clock.
 
 This is about our snippets meeting the guard halfway. Two workarounds:
 
 1. **Split compound commands into plain sequential ones.** Write intermediate
    results to temp files or plain variables, then operate on those -- never nest
-   `$( $( ) )` and never use `<(...)`. The Step 7a canary above is the canonical
+   `$( $( ) )` and never use `<(...)`. The ghost-write canary above is the canonical
    rewrite: two `printf ... > file` lines, then `comm -13 fileA fileB`.
 2. **Poll CI with a foreground command sequence, not `Monitor`.** `Monitor`'s own
    documented CI-poll example uses `comm -13 <(...) <(...)`, so it is refused;
@@ -407,7 +380,4 @@ This is about our snippets meeting the guard halfway. Two workarounds:
    worktree dispatch first (guard behavior can differ by harness config), and
    mind the zsh `$status` hazard in any loop variable (use `st` / `run_state`).
 
-Do NOT disable or work around the guard itself -- it is the isolation fence
-(AC #4 of #3837). This issue rewrites only our own snippets to meet it halfway;
-the wider sweep of the same forms across other playbooks is left to a fast-follow
-enumerated in #3837's PR body.
+Do NOT disable or work around the guard itself; it is the isolation fence.
