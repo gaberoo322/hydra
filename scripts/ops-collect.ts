@@ -76,7 +76,7 @@ async function runCollector(name: string, count: number): Promise<CollectorResul
       ]);
       if (r.ok) return collectBoard(r.data);
       const failed = r as { code: string; stderr: string };
-      return { ok: false, code: failed.code, reason: failed.stderr.slice(0, 200) };
+      return { ok: false, code: failed.code, reason: String(failed.stderr ?? "").slice(0, 200) };
     }
     case "memory":
       return collectMemory();
@@ -90,11 +90,14 @@ export async function main(argv: string[]): Promise<void> {
     console.log(`usage: ops-collect.ts --collectors <${COLLECTOR_NAMES.join(",")}> [--text] [--count N]`);
     return;
   }
-  const flag = (n: string) => argv[argv.indexOf(n) + 1];
-  const names = (argv.includes("--collectors") ? flag("--collectors") : COLLECTOR_NAMES.join(","))
+  const flag = (n: string) => {
+    const v = argv[argv.indexOf(n) + 1];
+    return v === undefined || v.startsWith("--") ? undefined : v;
+  };
+  const names = (flag("--collectors") ?? COLLECTOR_NAMES.join(","))
     .split(",")
     .filter(Boolean);
-  const count = Number(argv.includes("--count") ? flag("--count") : 50) || 50;
+  const count = Number(flag("--count") ?? 50) || 50;
   const results: Record<string, CollectorResult<unknown>> = {};
   for (const n of names) results[n] = await runCollector(n, count);
   if (argv.includes("--text")) for (const n of names) console.log(renderText(n, results[n]));

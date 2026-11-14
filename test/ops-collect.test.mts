@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -31,6 +32,8 @@ describe("collectCycles", () => {
     assert.deepEqual(r.data.anchors, { a: 2, b: 1 });
     assert.deepEqual(r.data.repeatedTasks, [{ title: "t1", count: 2 }]);
     assert.equal(r.data.testsDelta, 110 - 0);
+    assert.equal(r.data.avgCostUsd, null);
+    assert.equal(r.data.totalCostUsd, null);
     assert.deepEqual(r.data.coverage?.classesNotRecorded, ["research_orch"]);
   });
 
@@ -41,6 +44,51 @@ describe("collectCycles", () => {
     if (!empty.ok) assert.equal(empty.code, "no-data");
     const bad = collectCycles({});
     assert.equal(bad.ok, false);
+  });
+});
+
+describe("collectCycles cost and malformed entries", () => {
+  test("reports avg and total cost per cycle over cycles that recorded cost", () => {
+    const r = collectCycles({ trend: [{ costUsd: 1.5 }, { costUsd: 0.5 }, {}] });
+    assert.equal(r.ok, true);
+    if (!r.ok) return;
+    assert.equal(r.data.avgCostUsd, 1);
+    assert.equal(r.data.totalCostUsd, 2);
+  });
+  test("null trend entries are skipped instead of throwing", () => {
+    const r = collectCycles({ trend: [null, { tasksMerged: 1 }] });
+    assert.equal(r.ok, true);
+    if (r.ok) assert.equal(r.data.cycles, 1);
+    const allBad = collectCycles({ trend: [null] });
+    assert.equal(allBad.ok, false);
+  });
+});
+
+describe("ops-collect CLI always exits 0 and degrades", () => {
+  const cli = new URL("../scripts/ops-collect.ts", import.meta.url).pathname;
+  const run = (args: string[]) =>
+    spawnSync(process.execPath, ["--experimental-strip-types", cli, ...args], {
+      encoding: "utf8",
+      env: { ...process.env, HYDRA_API_URL: "http://127.0.0.1:1" },
+      timeout: 30000,
+    });
+  test("unreachable API yields ok:false and exit 0", () => {
+    const r = run(["--collectors", "cycles,scheduler"]);
+    assert.equal(r.status, 0);
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.cycles.ok, false);
+    assert.equal(out.cycles.code, "unreachable");
+    assert.equal(out.scheduler.ok, false);
+  });
+  test("unknown collector yields unknown-collector, exit 0; --text prints a line", () => {
+    const r = run(["--collectors", "bogus", "--text"]);
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /^bogus: unknown-collector/);
+  });
+  test("trailing --collectors with no value falls back to defaults without crashing", () => {
+    const r = run(["--collectors"]);
+    assert.equal(r.status, 0);
+    assert.ok(JSON.parse(r.stdout).cycles);
   });
 });
 

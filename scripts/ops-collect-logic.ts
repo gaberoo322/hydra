@@ -29,6 +29,8 @@ export interface CycleSummary {
   mergeRatePct: number;
   avgDurationSec: number | null;
   medianDurationSec: number | null;
+  avgCostUsd: number | null;
+  totalCostUsd: number | null;
   testsFirst: number;
   testsLast: number;
   testsDelta: number;
@@ -47,11 +49,10 @@ export function collectCycles(raw: unknown): CollectorResult<CycleSummary> {
     return fail("bad-input", "metrics response is not an object");
   }
   const body = raw as Record<string, unknown>;
-  const trend = Array.isArray(body.trend)
-    ? (body.trend as Array<Record<string, unknown>>)
-    : Array.isArray(body.metrics)
-      ? (body.metrics as Array<Record<string, unknown>>)
-      : null;
+  const rawTrend = Array.isArray(body.trend) ? body.trend : Array.isArray(body.metrics) ? body.metrics : null;
+  const trend = rawTrend
+    ? (rawTrend.filter((m) => m !== null && typeof m === "object") as Array<Record<string, unknown>>)
+    : null;
   if (trend === null) return fail("bad-input", "metrics response has no trend array");
   if (trend.length === 0) return fail("no-data", "no cycle metrics recorded");
 
@@ -60,6 +61,8 @@ export function collectCycles(raw: unknown): CollectorResult<CycleSummary> {
     .map((m) => num(m.totalDurationMs))
     .filter((d) => d > 0)
     .sort((a, b) => a - b);
+  const costs = trend.map((m) => num(m.costUsd)).filter((c) => c > 0);
+  const totalCost = costs.reduce((a, b) => a + b, 0);
   const anchors: Record<string, number> = {};
   const titles = new Map<string, number>();
   for (const m of trend) {
@@ -84,6 +87,8 @@ export function collectCycles(raw: unknown): CollectorResult<CycleSummary> {
         ? Math.floor(durations.reduce((a, b) => a + b, 0) / durations.length / 1000)
         : null,
       medianDurationSec: durations.length ? Math.floor(durations[Math.floor(durations.length / 2)] / 1000) : null,
+      avgCostUsd: costs.length ? Math.round((totalCost / costs.length) * 100) / 100 : null,
+      totalCostUsd: costs.length ? Math.round(totalCost * 100) / 100 : null,
       testsFirst,
       testsLast,
       testsDelta: testsLast - testsFirst,
