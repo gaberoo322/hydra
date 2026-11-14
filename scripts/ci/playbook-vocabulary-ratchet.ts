@@ -7,7 +7,8 @@
  * copying it, and reads the Target's shape from the Target facts seam. This
  * module counts the mechanically detectable breaches of that standard in every
  * operator playbook and fragment, and caps each count per file with a
- * shrink-only baseline.
+ * shrink-only baseline. It enforces STD-PLAYBOOK-POINT-DONT-RESTATE,
+ * STD-PLAYBOOK-CURRENT-BEHAVIOUR and STD-PLAYBOOK-TARGET-SEAM.
  *
  * Four banned shapes:
  *

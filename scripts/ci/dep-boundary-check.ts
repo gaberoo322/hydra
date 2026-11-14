@@ -1,7 +1,7 @@
 #!/usr/bin/env -S npx tsx
 /**
  * dep-boundary-check — import-graph boundary scanner (issue #2205,
- * tool-scout: dependency-hygiene).
+ * tool-scout: dependency-hygiene; STD-DEPS-APPROVED).
  *
  * Thin Adapter over `dependency-cruiser` (sverweij/dependency-cruiser): it shells
  * out to `npx dependency-cruiser`, runs the rule set in `.dependency-cruiser.cjs`

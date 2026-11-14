@@ -55,6 +55,7 @@
     "test/builder-page.test.mts": "grandfathered",
     "test/ci-scope-check.test.mts": "grandfathered",
     "test/class-state.test.mts": "grandfathered",
+    "test/coding-standards-integrity.test.mts": "drift-guard",
     "test/claude-cli-exec.test.mts": "grandfathered",
     "test/claude-cli-seam-check.test.mts": "invariant-lint",
     "test/cost-layers.test.mts": "grandfathered",
