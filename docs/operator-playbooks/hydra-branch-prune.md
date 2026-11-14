@@ -20,14 +20,14 @@ Run it by hand only to look at what is accumulating, or after a merge wave when 
 
 ## When NOT to run this
 
-- From inside a worktree: the script refuses (exit 3). Run it from the main checkout.
+- From inside a worktree: the script refuses and the pass hard-fails (exit 1). Run it from the main checkout.
 - When local git state looks corrupt (`[gone]` markers can lie); run `/hydra-doctor` first.
 - Inside a `dev_orch` / `dev_target` subagent.
 
 ## Process
 
 ```bash
-scripts/branch-prune.sh           # audit only (default): prints the report, mutates nothing
+scripts/branch-prune.sh           # audit only (default): prints the report, deletes no branches or worktrees
 scripts/branch-prune.sh --apply   # delete
 ```
 
@@ -38,7 +38,7 @@ Skips you should expect and leave alone:
 - `skip-live-agent`: a live process holds the worktree lock; the next run retries.
 - `skip-too-young`: under the age floor or age unknown; deferred, never deleted.
 - `skip-dirty-unpushed`: uncommitted work could not be committed and pushed to its own branch first; the worktree stays and is retried.
-- `skip-current-branch` / `skip-cap`: refusing the checked-out branch, or the 250-deletions-per-repo cap.
+- `skip-current-branch` / `skip-cap`: refusing the checked-out branch, or the per-repo deletion cap.
 
 The script processes the orchestrator repo, then the Target workspace resolved through the target-config seam; an unresolved Target skips that pass with a warning and still exits 0. The report is appended to `$HYDRA_BRANCH_PRUNE_LOG` (default `/tmp/hydra-branch-prune.log`).
 

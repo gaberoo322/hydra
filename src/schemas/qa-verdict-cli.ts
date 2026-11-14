@@ -10,6 +10,7 @@
  */
 
 import { z } from "zod";
+import { REVIEWER_COMMITS_VALUES } from "../qa/rollout-switches.ts";
 
 const pr = z.number().int().positive();
 const tier = z.number().int().nullable();
@@ -83,6 +84,8 @@ export const QaVerdictCliSchemas = {
     changedPaths: z.array(z.string()).optional(),
     diff: z.string().optional(),
     prBody: z.string().optional(),
+    /** The EFFECTIVE `reviewer-commits` stage, supplied by a caller that already read it at the fixed point (#5415). */
+    stage: z.enum(REVIEWER_COMMITS_VALUES).optional(),
   }),
   "round-action": z.object({
     pr,
