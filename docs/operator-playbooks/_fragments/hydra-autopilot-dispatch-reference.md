@@ -89,7 +89,7 @@ default 2). `prompt_args.prior_attempt_status` records what triggered the
 escalation, for turn-journal visibility. A dispatch with no `escalate_model` key
 uses the static routing map unchanged (zero behavior change for non-escalated
 work). The escalation policy + reducer live in `scripts/autopilot/decide.py`
-(`ESCALATION_POLICY`, `decide_escalation`); a class absent from that dict never
+(`ESCALATION_POLICY` in `decide_base.py`, `decide_escalation` in `decide.py`); a class absent from that dict never
 escalates.
 
 **MANDATORY — deposit the escalation provenance (issue #3284).** The moment you
