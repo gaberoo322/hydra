@@ -4,13 +4,15 @@
  * One deterministic tick over the open board. It NEVER undoes an operator's
  * label edit: out-of-seam state changes are journaled as `external` and the
  * journal's notion of state becomes GitHub's. It only fires record-checked
- * transitions, and only through the seam's `advance()` with `actor: 'reconcile'`:
+ * transitions (the PR-covered arm fires a pr-open-gated one), and only through
+ * the seam's `advance()` with `actor: 'reconcile'`:
  *
  *   - `qa-passed` exits (read live at head by the shared `classifyQaPassedExit`)
  *   - zero state labels -> `needs-triage` (epics, `keep-open`, `wayfinder:*` exempt)
  *   - 2+ state labels -> journaled once as invalid, never edited, surfaced on attention
  *   - an external `parked ->` exit -> one `Hydra-Cap-Reset:` marker
  *   - external close / reopen -> journal entries (+ retention clock)
+ *   - `ready-for-agent` covered by exactly one open PR -> `needs-qa` (#5489; skipped after a QA-FAIL bounce)
  *
  * Never throws (STD-VERIFY-NEVER-THROW): a failed open-board read aborts the
  * pass with zero writes; a per-issue failure is recorded and the loop goes on.
@@ -38,6 +40,8 @@ import { stateLabelsOf } from "./transitions.ts";
 
 export const MAX_TIMELINE_FETCHES = 25;
 export const MAX_QA_EXIT_EVALS = 20;
+/** Bound on `ready-for-agent` -> `needs-qa` PR-covered promotions per reconcile pass (#5489). */
+export const MAX_PR_COVERED_PROMOTIONS = 20;
 export const RECENTLY_CLOSED_WINDOW_MS = 48 * 60 * 60 * 1000;
 export const RECENTLY_CLOSED_LIMIT = 100;
 export const REPORT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -51,6 +55,8 @@ export const INVALID_STATE_RESULT = "invalid:state-ambiguous";
 export interface OpenPrRef {
   number: number;
   body: string;
+  /** Absent means not-draft. */
+  isDraft?: boolean;
 }
 
 export interface ReconcileDeps {
@@ -68,6 +74,7 @@ export interface ReconcileOptions {
   dryRun?: boolean;
   maxTimelineFetches?: number;
   maxQaExitEvals?: number;
+  maxPrCoveredPromotions?: number;
 }
 
 export interface ReconcileReport {
@@ -94,6 +101,13 @@ export interface ReconcileReport {
     none: number;
     unresolved: number;
   };
+  /**
+   * PR-covered arm (#5489): `ready-for-agent` issues with exactly one open non-draft closing PR.
+   * promoted = written (or would-promote in dry-run); ambiguous = 2+ candidates; claimHeld = a
+   * worker owns the issue; refused = the seam refused the write; skippedQaFail = the issue's last
+   * written transition was a needs-qa bounce (QA-FAIL), so it is not re-promoted.
+   */
+  prCovered: { promoted: number; ambiguous: number; claimHeld: number; refused: number; skippedQaFail: number };
   seamTransitions: number;
   wouldRefuseByReason: Record<string, number>;
   wouldParkByArm: Record<string, number>;
@@ -114,6 +128,7 @@ export function emptyReport(repo: string, ts: number, dryRun: boolean): Reconcil
     capResetsPosted: 0,
     staleClaims: { scanned: 0, closed: 0, spared: 0, deferred: 0, failed: 0 },
     qaExits: { "needs-dev-resume": 0, "needs-qa": 0, closed: 0, "ready-for-agent": 0, none: 0, unresolved: 0 },
+    prCovered: { promoted: 0, ambiguous: 0, claimHeld: 0, refused: 0, skippedQaFail: 0 },
     seamTransitions: 0,
     wouldRefuseByReason: {},
     wouldParkByArm: {},
@@ -169,9 +184,30 @@ export function resolveQaPr(
     if (n !== null && n > 0) return n;
     break;
   }
+  return singleClosingPr(openPrs, issue);
+}
+
+/**
+ * The one OPEN, non-draft PR whose body closes the issue; null for a failed PR
+ * read, zero candidates or 2+ candidates. Drafts are dropped before counting.
+ */
+export function singleClosingPr(openPrs: readonly OpenPrRef[] | null, issue: number): number | null {
   if (openPrs === null) return null;
-  const candidates = openPrs.filter((p) => bodyClosesIssue(p.body, issue));
+  const candidates = closingPrs(openPrs, issue);
   return candidates.length === 1 ? candidates[0].number : null;
+}
+
+/** The one definition of a candidate: OPEN, non-draft PRs whose body closes the issue (#5489 INV-3). */
+export function closingPrs(openPrs: readonly OpenPrRef[], issue: number): OpenPrRef[] {
+  return openPrs.filter((p) => p.isDraft !== true && bodyClosesIssue(p.body, issue));
+}
+
+/** The newest written entry that carries a destination state, or null. */
+function lastWrittenTransition(entries: readonly LifecycleJournalEntry[]): LifecycleJournalEntry | null {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (entries[i].written && entries[i].to !== null) return entries[i];
+  }
+  return null;
 }
 
 function externalEntry(
@@ -202,6 +238,7 @@ export async function runReconcile(deps: ReconcileDeps, opts: ReconcileOptions =
   const dryRun = opts.dryRun === true;
   const maxTimeline = opts.maxTimelineFetches ?? MAX_TIMELINE_FETCHES;
   const maxQa = opts.maxQaExitEvals ?? MAX_QA_EXIT_EVALS;
+  const maxPrCovered = opts.maxPrCoveredPromotions ?? MAX_PR_COVERED_PROMOTIONS;
   const repo = deps.seam.repo;
   const now = deps.seam.now();
   const report = emptyReport(repo, now, dryRun);
@@ -228,6 +265,7 @@ export async function runReconcile(deps: ReconcileDeps, opts: ReconcileOptions =
 
     let timelineFetches = 0;
     let qaEvals = 0;
+    let prCoveredAttempts = 0;
     for (const issue of open.rows) {
       try {
         await reconcileOpenIssue(issue);
@@ -328,6 +366,11 @@ export async function runReconcile(deps: ReconcileDeps, opts: ReconcileOptions =
         }
       }
 
+      if (current === "ready-for-agent") {
+        await promotePrCovered(issue, entries);
+        return;
+      }
+
       if (current === "qa-passed" && qaEvals < maxQa) {
         qaEvals++;
         const pr = resolveQaPr(entries, issue.number, openPrs);
@@ -359,6 +402,50 @@ export async function runReconcile(deps: ReconcileDeps, opts: ReconcileOptions =
             report.qaExits[target]++;
           }
         }
+      }
+    }
+
+    // PR-covered arm (#5489): a ready-for-agent issue covered by exactly one open PR has no
+    // lane (dev_orch skips it, qa_orch needs needs-qa); route it to needs-qa through the seam.
+    async function promotePrCovered(issue: IssueRow, entries: readonly LifecycleJournalEntry[]): Promise<void> {
+      if (openPrs === null) return;
+      const covering = closingPrs(openPrs, issue.number);
+      if (covering.length === 0) return;
+      if (covering.length > 1) {
+        report.prCovered.ambiguous++;
+        return;
+      }
+      // A QA-FAIL may bounce needs-qa -> ready-for-agent (qa-fail cap row); re-promoting that
+      // issue would ping-pong it back to needs-qa. The last written transition decides.
+      if (lastWrittenTransition(entries)?.from === "needs-qa") {
+        report.prCovered.skippedQaFail++;
+        return;
+      }
+      if (prCoveredAttempts >= maxPrCovered) return;
+      const claim = await deps.seam.journal.readClaim(repo, issue.number);
+      if (claim.ok === false) {
+        report.errors.push(`claim-read-failed:#${issue.number}`);
+        return;
+      }
+      if (claim.claim !== null) {
+        report.prCovered.claimHeld++;
+        return;
+      }
+      prCoveredAttempts++;
+      const pr = covering[0].number;
+      const res = await apply({
+        issue: issue.number,
+        to: "needs-qa",
+        evidence: { pr: String(pr) },
+        actor: RECONCILE_ACTOR,
+        reason: "pr-covered",
+        rationale: `ready-for-agent issue covered by open PR #${pr}; no lane reaches it (#5489)`,
+      });
+      if (res !== null && res.ok === false) {
+        report.prCovered.refused++;
+        report.errors.push(`pr-covered-refused:#${issue.number}:${res.code}`);
+      } else {
+        report.prCovered.promoted++;
       }
     }
 

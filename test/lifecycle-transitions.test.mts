@@ -87,6 +87,13 @@ describe("transition table (INV-2)", () => {
     }
   });
 
+  test("ready-for-agent -> needs-qa is reconcile-fired through pr-open with no cap (#5489)", () => {
+    const t = findTransition("ready-for-agent", "needs-qa");
+    assert.equal(t?.firedBy, "reconcile");
+    assert.equal(t?.gate, "pr-open");
+    assert.equal(t?.cap, undefined);
+  });
+
   test("the dispatcher owns ready-for-agent -> in-progress", () => {
     assert.equal(findTransition("ready-for-agent", "in-progress")?.firedBy, "dispatcher");
   });
