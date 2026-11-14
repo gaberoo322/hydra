@@ -684,6 +684,37 @@ describe("PR-covered ready-for-agent promotion (#5489)", () => {
     assert.equal(report.prCovered.skippedQaFail, 1);
   });
 
+  test("an external needs-qa -> ready-for-agent move detected in the same pass is not undone by a re-promote (QA round 3)", async () => {
+    const { w, add, journal } = world();
+    add(560, ["ready-for-agent"]);
+    w.prs = [closing(560)];
+    w.prRecords.set(1460, { number: 1460, state: "OPEN", body: "Closes #560" });
+    journal(560).push(je({ from: "in-progress", to: "needs-qa", ts: NOW - 900 }));
+    w.timelines.set(560, [
+      { event: "labeled", label: "needs-qa", tsMs: T1 },
+      { event: "unlabeled", label: "needs-qa", tsMs: T2 },
+      { event: "labeled", label: "ready-for-agent", tsMs: T2 },
+    ]);
+    const report = await runReconcile(w.deps);
+    assert.equal(report.externalEntries, 1);
+    assert.equal(w.edits.length, 0);
+    assert.equal(report.prCovered.promoted, 0);
+    assert.equal(report.prCovered.skippedQaFail, 1);
+    assert.equal(lastKnownState(journal(560)), "ready-for-agent");
+  });
+
+  test("a journal still at needs-qa while GitHub reads ready-for-agent is skipped even when the timeline budget is spent", async () => {
+    const { w, add, journal } = world();
+    add(561, ["ready-for-agent"]);
+    w.prs = [closing(561)];
+    w.prRecords.set(1461, { number: 1461, state: "OPEN", body: "Closes #561" });
+    journal(561).push(je({ from: "in-progress", to: "needs-qa", ts: NOW - 900 }));
+    const report = await runReconcile(w.deps, { maxTimelineFetches: 0 });
+    assert.equal(w.timelineFetches, 0);
+    assert.equal(w.edits.length, 0);
+    assert.equal(report.prCovered.skippedQaFail, 1);
+  });
+
   test("a seam refusal counts refused with the pr-covered-refused error and no promotion", async () => {
     const { w, add } = world();
     add(550, ["ready-for-agent"]);

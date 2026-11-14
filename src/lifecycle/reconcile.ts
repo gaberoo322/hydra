@@ -105,7 +105,8 @@ export interface ReconcileReport {
    * PR-covered arm (#5489): `ready-for-agent` issues with exactly one open non-draft closing PR.
    * promoted = written (or would-promote in dry-run); ambiguous = 2+ candidates; claimHeld = a
    * worker owns the issue; refused = the seam refused the write; skippedQaFail = the issue's last
-   * written transition was a needs-qa bounce (QA-FAIL), so it is not re-promoted.
+   * move was out of needs-qa (a QA-FAIL bounce or an external edit, journaled or not yet), so it
+   * is not re-promoted.
    */
   prCovered: { promoted: number; ambiguous: number; claimHeld: number; refused: number; skippedQaFail: number };
   seamTransitions: number;
@@ -343,6 +344,8 @@ export async function runReconcile(deps: ReconcileDeps, opts: ReconcileOptions =
       }
 
       const current = states[0];
+      // External moves this pass appends; the PR-covered guard must see them (QA round 3).
+      const passEntries: LifecycleJournalEntry[] = [];
       // Diff-first external detection (INV-8): fetch the timeline only on a mismatch.
       if (known !== null && known !== current && timelineFetches < maxTimeline) {
         timelineFetches++;
@@ -357,17 +360,16 @@ export async function runReconcile(deps: ReconcileDeps, opts: ReconcileOptions =
           // (journal != GitHub) fires again next tick and the marker is retried.
           if (parkExitMs !== null && !(await postResetOnce(issue.number, parkExitMs))) return;
           for (const m of moves) {
-            await append(
-              issue.number,
-              externalEntry(m.tsMs > 0 ? m.tsMs : now, m.from, m.to, { at: new Date(m.tsMs > 0 ? m.tsMs : now).toISOString() }, "external"),
-            );
+            const entry = externalEntry(m.tsMs > 0 ? m.tsMs : now, m.from, m.to, { at: new Date(m.tsMs > 0 ? m.tsMs : now).toISOString() }, "external");
+            await append(issue.number, entry);
+            passEntries.push(entry);
             report.externalEntries++;
           }
         }
       }
 
       if (current === "ready-for-agent") {
-        await promotePrCovered(issue, entries);
+        await promotePrCovered(issue, [...entries, ...passEntries]);
         return;
       }
 
@@ -415,9 +417,11 @@ export async function runReconcile(deps: ReconcileDeps, opts: ReconcileOptions =
         report.prCovered.ambiguous++;
         return;
       }
-      // A QA-FAIL may bounce needs-qa -> ready-for-agent (qa-fail cap row); re-promoting that
-      // issue would ping-pong it back to needs-qa. The last written transition decides.
-      if (lastWrittenTransition(entries)?.from === "needs-qa") {
+      // A move out of needs-qa (a QA-FAIL bounce, or an operator/agent label edit) must not be
+      // undone by re-promoting. `entries` includes this pass's external appends, so the last
+      // written transition decides; a journal still at needs-qa while GitHub reads
+      // ready-for-agent is an external move not yet journaled (timeline budget spent).
+      if (lastWrittenTransition(entries)?.from === "needs-qa" || lastKnownState(entries) === "needs-qa") {
         report.prCovered.skippedQaFail++;
         return;
       }
