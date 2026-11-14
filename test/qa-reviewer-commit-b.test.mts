@@ -407,8 +407,7 @@ describe("commit graduation: harvest source (QA round 1 finding 1)", () => {
 
   test("harvest no longer reads candidate PRs from the fixture", () => {
     const src = readFileSync(join(ROOT, "scripts", "qa", "commit-graduation.ts"), "utf8");
-    assert.ok(!src.includes("fixture?.inputs?.prs"));
-    assert.ok(!src.includes("fixture?.metrics?.pending"));
+    assert.ok(!/fixture\?\.(inputs\?\.prs|metrics\?\.pending)/.test(src));
   });
 });
 
