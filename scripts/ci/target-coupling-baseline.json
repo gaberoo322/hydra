@@ -8,7 +8,6 @@
     "playbooks::docs/operator-playbooks/hydra-architect.md::hydra-betting::name",
     "playbooks::docs/operator-playbooks/hydra-architecture-scan.md::hydra-betting::name",
     "playbooks::docs/operator-playbooks/hydra-autopilot.md::hydra-betting::name",
-    "playbooks::docs/operator-playbooks/hydra-cleanup.md::hydra-betting::name",
     "playbooks::docs/operator-playbooks/hydra-digest.md::hydra-betting::name",
     "playbooks::docs/operator-playbooks/hydra-discover.md::hydra-betting::name",
     "playbooks::docs/operator-playbooks/hydra-grill.md::hydra-betting::name",

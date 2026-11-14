@@ -47,10 +47,6 @@
     "docs/operator-playbooks/hydra-branch-prune.md": {
       "status": 6
     },
-    "docs/operator-playbooks/hydra-cleanup.md": {
-      "status": 3,
-      "target": 1
-    },
     "docs/operator-playbooks/hydra-dev.md": {
       "status": 2
     },

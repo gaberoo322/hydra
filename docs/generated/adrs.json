@@ -52,7 +52,6 @@
         "docs/adr/0019-tier-policy-predicates.md",
         "docs/adr/0020-deep-qa-pass-marker-gates-t4-auto-merge.md",
         "docs/adr/0032-glm-dev-drainer-worker-lane.md",
-        "docs/operator-playbooks/hydra-cleanup.md",
         "docs/reference.md"
       ],
       "source": {
@@ -115,7 +114,6 @@
         "docs/adr/0026-target-manifest.md",
         "docs/adr/0028-builder-health-measurement-subsystem.md",
         "docs/operator-playbooks/hydra-architecture-scan.md",
-        "docs/operator-playbooks/hydra-cleanup.md",
         "docs/operator-playbooks/hydra-skill-prune.md",
         "docs/operator-playbooks/thermo-nuclear-code-quality-review.md",
         "docs/reference.md"
