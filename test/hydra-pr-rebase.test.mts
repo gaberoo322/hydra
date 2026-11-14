@@ -18,6 +18,9 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { buildRunnerOutput } from "../scripts/ci/pr-rebase-runner.ts";
 import {
   classifyPR,
   classifyBatch,
@@ -195,5 +198,45 @@ describe("renderReport — deterministic single-pass summary", () => {
     const out = renderReport(classifyBatch([]), "2026-05-14");
     assert.match(out, /Scanned: 0 open PRs/);
     assert.match(out, /_none_/);
+  });
+});
+
+describe("pr-rebase-runner — stdin rows to action plan", () => {
+  test("builds a plan with expected head SHAs and drops malformed rows", () => {
+    const rows = [
+      { number: 401, mergeStateStatus: "BEHIND", headRefName: "a", labels: [], headRefOid: "abc123" },
+      { number: 403, mergeStateStatus: "DIRTY", headRefName: "b", labels: [] },
+      { number: 402, mergeStateStatus: "CLEAN", headRefName: "c", labels: [] },
+      { number: 404, mergeStateStatus: "BEHIND", headRefName: "d", labels: [{ name: "no-rebase" }] },
+      { mergeStateStatus: "BEHIND" },
+      null,
+    ];
+    const out = buildRunnerOutput(rows, "2026-11-14");
+    assert.deepEqual(out.plan.rebase, [
+      { number: 401, headRefName: "a", expectedHeadSha: "abc123" },
+    ]);
+    assert.deepEqual(out.plan.surface, [{ number: 403, headRefName: "b" }]);
+    assert.equal(out.plan.skipped, 2);
+    assert.equal(out.plan.malformed, 2);
+    assert.match(out.report, /Scanned: 4 open PRs/);
+  });
+
+  test("a row with no labels array is treated as unlabelled, not crashed on", () => {
+    const out = buildRunnerOutput([{ number: 1, mergeStateStatus: "BEHIND", headRefName: "x" }], "d");
+    assert.equal(out.plan.rebase.length, 1);
+    assert.equal(out.plan.rebase[0].expectedHeadSha, null);
+  });
+
+  test("CLI prints the plan JSON for stdin rows and exits 2 on non-array input", () => {
+    const script = fileURLToPath(new URL("../scripts/ci/pr-rebase-runner.ts", import.meta.url));
+    const args = ["--experimental-strip-types", "--no-warnings", script];
+    const ok = spawnSync(process.execPath, args, {
+      input: JSON.stringify([{ number: 7, mergeStateStatus: "DIRTY", headRefName: "z", labels: [] }]),
+      encoding: "utf-8",
+    });
+    assert.equal(ok.status, 0);
+    assert.deepEqual(JSON.parse(ok.stdout).plan.surface, [{ number: 7, headRefName: "z" }]);
+    const bad = spawnSync(process.execPath, args, { input: "{}", encoding: "utf-8" });
+    assert.equal(bad.status, 2);
   });
 });
