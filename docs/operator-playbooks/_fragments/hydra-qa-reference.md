@@ -101,7 +101,7 @@ esac
 
 ## Slot lifecycle events
 
-Every tool call emits a `subagent_tool_call` event onto `hydra:autopilot:slot-events`. The category classification and the never-propagate-errors contract are described once, in the "Slot lifecycle events" section of `hydra-dev.md`.
+Every tool call emits a `subagent_tool_call` event onto `hydra:autopilot:slot-events`. The category classification (a `milestone` is Bash matching `npm run build` or `npm run typecheck`, among others) and the never-propagate-errors contract are described once, in the "Slot lifecycle events" section of `hydra-dev.md`.
 
 ### 9.4 Reviewer commit (class A) and class B (ADR-0046 Decision 2)
 
