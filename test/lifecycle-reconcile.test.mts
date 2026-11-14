@@ -684,7 +684,7 @@ describe("PR-covered ready-for-agent promotion (#5489)", () => {
     assert.equal(report.prCovered.skippedQaFail, 1);
   });
 
-  test("an external needs-qa -> ready-for-agent move detected in the same pass is not undone by a re-promote (QA round 3)", async () => {
+  test("an external needs-qa -> ready-for-agent move detected in the same pass is not undone by a re-promote", async () => {
     const { w, add, journal } = world();
     add(560, ["ready-for-agent"]);
     w.prs = [closing(560)];

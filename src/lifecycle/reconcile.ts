@@ -344,7 +344,7 @@ export async function runReconcile(deps: ReconcileDeps, opts: ReconcileOptions =
       }
 
       const current = states[0];
-      // External moves this pass appends; the PR-covered guard must see them (QA round 3).
+      // External moves this pass appends; the PR-covered guard must see them.
       const passEntries: LifecycleJournalEntry[] = [];
       // Diff-first external detection (INV-8): fetch the timeline only on a mismatch.
       if (known !== null && known !== current && timelineFetches < maxTimeline) {
