@@ -1,0 +1,1 @@
+- fix: QA review packet and preflight now diff the PR head sha instead of the worktree HEAD (#5520)
