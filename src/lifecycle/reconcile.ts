@@ -4,7 +4,8 @@
  * One deterministic tick over the open board. It NEVER undoes an operator's
  * label edit: out-of-seam state changes are journaled as `external` and the
  * journal's notion of state becomes GitHub's. It only fires record-checked
- * transitions (the PR-covered arm fires a pr-open-gated one), and only through the seam's `advance()` with `actor: 'reconcile'`:
+ * transitions (the PR-covered arm fires a pr-open-gated one), and only through
+ * the seam's `advance()` with `actor: 'reconcile'`:
  *
  *   - `qa-passed` exits (read live at head by the shared `classifyQaPassedExit`)
  *   - zero state labels -> `needs-triage` (epics, `keep-open`, `wayfinder:*` exempt)
@@ -103,9 +104,10 @@ export interface ReconcileReport {
   /**
    * PR-covered arm (#5489): `ready-for-agent` issues with exactly one open non-draft closing PR.
    * promoted = written (or would-promote in dry-run); ambiguous = 2+ candidates; claimHeld = a
-   * worker owns the issue; refused = the seam refused the write.
+   * worker owns the issue; refused = the seam refused the write; skippedQaFail = the issue's last
+   * written transition was a needs-qa bounce (QA-FAIL), so it is not re-promoted.
    */
-  prCovered: { promoted: number; ambiguous: number; claimHeld: number; refused: number };
+  prCovered: { promoted: number; ambiguous: number; claimHeld: number; refused: number; skippedQaFail: number };
   seamTransitions: number;
   wouldRefuseByReason: Record<string, number>;
   wouldParkByArm: Record<string, number>;
@@ -126,7 +128,7 @@ export function emptyReport(repo: string, ts: number, dryRun: boolean): Reconcil
     capResetsPosted: 0,
     staleClaims: { scanned: 0, closed: 0, spared: 0, deferred: 0, failed: 0 },
     qaExits: { "needs-dev-resume": 0, "needs-qa": 0, closed: 0, "ready-for-agent": 0, none: 0, unresolved: 0 },
-    prCovered: { promoted: 0, ambiguous: 0, claimHeld: 0, refused: 0 },
+    prCovered: { promoted: 0, ambiguous: 0, claimHeld: 0, refused: 0, skippedQaFail: 0 },
     seamTransitions: 0,
     wouldRefuseByReason: {},
     wouldParkByArm: {},
@@ -416,6 +418,7 @@ export async function runReconcile(deps: ReconcileDeps, opts: ReconcileOptions =
       // A QA-FAIL may bounce needs-qa -> ready-for-agent (qa-fail cap row); re-promoting that
       // issue would ping-pong it back to needs-qa. The last written transition decides.
       if (lastWrittenTransition(entries)?.from === "needs-qa") {
+        report.prCovered.skippedQaFail++;
         return;
       }
       if (prCoveredAttempts >= maxPrCovered) return;

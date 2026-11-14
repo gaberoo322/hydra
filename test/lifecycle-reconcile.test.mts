@@ -630,7 +630,7 @@ describe("PR-covered ready-for-agent promotion (#5489)", () => {
     w.prRecords.set(1400, { number: 1400, state: "OPEN", body: "Closes #500" });
     const report = await runReconcile(w.deps);
     assert.deepEqual(w.edits, [{ issue: 500, remove: ["ready-for-agent"], add: ["needs-qa"] }]);
-    assert.deepEqual(report.prCovered, { promoted: 1, ambiguous: 0, claimHeld: 0, refused: 0 });
+    assert.deepEqual(report.prCovered, { promoted: 1, ambiguous: 0, claimHeld: 0, refused: 0, skippedQaFail: 0 });
     const entry = journal(500).find((e) => e.to === "needs-qa");
     assert.equal(entry?.actor, RECONCILE_ACTOR);
     assert.equal(entry?.evidence?.pr, "1400");
@@ -642,7 +642,7 @@ describe("PR-covered ready-for-agent promotion (#5489)", () => {
     w.prs = [closing(501, { isDraft: true })];
     const report = await runReconcile(w.deps);
     assert.equal(w.edits.length, 0);
-    assert.deepEqual(report.prCovered, { promoted: 0, ambiguous: 0, claimHeld: 0, refused: 0 });
+    assert.deepEqual(report.prCovered, { promoted: 0, ambiguous: 0, claimHeld: 0, refused: 0, skippedQaFail: 0 });
   });
 
   test("2+ closing PRs are ambiguous: counted, no write", async () => {
@@ -681,6 +681,7 @@ describe("PR-covered ready-for-agent promotion (#5489)", () => {
     const report = await runReconcile(w.deps);
     assert.deepEqual(w.edits.map((e) => e.issue), [541]);
     assert.equal(report.prCovered.promoted, 1);
+    assert.equal(report.prCovered.skippedQaFail, 1);
   });
 
   test("a seam refusal counts refused with the pr-covered-refused error and no promotion", async () => {
@@ -717,9 +718,12 @@ describe("PR-covered ready-for-agent promotion (#5489)", () => {
     add(520, ["needs-dev-resume"]);
     add(521, ["in-progress"]);
     w.prs = [closing(520), closing(521)];
+    w.prRecords.set(1420, { number: 1420, state: "OPEN", body: "Closes #520" });
+    w.prRecords.set(1421, { number: 1421, state: "OPEN", body: "Closes #521" });
     const report = await runReconcile(w.deps);
     assert.equal(w.edits.length, 0);
-    assert.equal(report.prCovered.promoted, 0);
+    assert.deepEqual(report.prCovered, { promoted: 0, ambiguous: 0, claimHeld: 0, refused: 0, skippedQaFail: 0 });
+    assert.equal(report.errors.length, 0);
   });
 
   test("a failed open-PR read does nothing; dry-run counts a would-promote and writes nothing", async () => {
