@@ -27,8 +27,8 @@ The mode is read from the shell variable `$DESIGN_CONCEPT_MODE` (default `warn`)
 The preflight's admission and short-circuit levers obey these invariants:
 
 - **INV-A** — any admission or short-circuit lever is a derivation of `aggregateAdversarialReview()` / `classifyVerdict()` in `scripts/ci/qa-verdict.ts`, never an independent policy.
-- **INV-B** — T3/T4 reviews may only be **deferred**, never depth-reduced, by any such lever.
-- **INV-C** — every PR that reaches auto-merge has been reviewed at the full depth its tier requires: a deferred or pre-spawn-skipped PR never merges without a real review on a later pass.
+- **INV-B** — a review may only be **deferred**, never depth-reduced below what the preflight's `.fanout.mode` requires, by any such lever.
+- **INV-C** — every PR that reaches auto-merge has been reviewed at the full depth the preflight requires: a deferred or pre-spawn-skipped PR never merges without a real review on a later pass.
 - **INV-D** — the emitted verdict literals, `aggregateAdversarialReview()`, `classifyVerdict()`, and `decide.py`'s `should_auto_merge()` (`INV-007`) are untouched by any such lever.
 - **INV-E** — every unknown input (an unreachable tier classifier, an unknown `mergeStateStatus`, a gate-script error) fails closed to FULL review depth, never to a skip.
 - **INV-F** — the Target's Risk-Critical Surface classification (`classifyTargetQaPath`) is untouched by any orchestrator-side QA-cost lever.
@@ -42,7 +42,7 @@ Pre-merge QA is the **Pre-merge Gate**. The **Post-merge Regression Check** is t
 
 ### A. Enrollment belongs to the autopilot
 
-`hydra-qa` runs strictly **pre-merge**: it posts a verdict comment and never merges, so it never holds a confirmed merge SHA. Enrollment is the autopilot `auto-merge` action handler's job (see "holdback enrollment on auto-merge" in `docs/operator-playbooks/hydra-autopilot.md`): it POSTs the merge SHA and tier to `/api/holdback/enroll`, and the server (`enrollHoldback` in `src/holdback.ts`) enforces the carry-up exemption: T2/T3/T4 merges enroll, T1 and unknown-tier merges are a no-op `{enrolled:false}` (ADR-0015).
+`hydra-qa` runs strictly **pre-merge**: it posts a verdict comment and never merges, so it never holds a confirmed merge SHA. Enrollment is the autopilot `auto-merge` action handler's job (see "holdback enrollment on auto-merge" in `docs/operator-playbooks/hydra-autopilot.md`): it POSTs the merge SHA and tier to `/api/holdback/enroll`, and the server (`enrollHoldback` in `src/holdback.ts`) owns which tiers enroll and answers `{enrolled:false}` for the rest.
 
 ### B. Check enrolled merges each poll (the watch)
 
@@ -62,7 +62,7 @@ case "$DECISION" in
     if git -C <worktree> revert --no-edit "$merge_sha" && \
        gh pr create --title "revert: holdback regression on ${merge_sha:0:7}" \
          --body "Outcome Holdback auto-revert. Leading outcomes regressed past noise_epsilon vs the pre-merge baseline: ${REGRESSED}."; then
-      : # revert PR opened; CI is still the merge gate for the revert itself
+      : # revert PR opened; the revert PR goes through the normal PR flow
     else
       # Revert/PR-open failed — surface through the Operator Channel (a
       # holdback.revert_failed Page, ADR-0045) so the operator sees a
@@ -92,7 +92,7 @@ esac
 
 ### Invariants (must hold)
 
-- **Tier-aware, monotonic window.** The watch window grows with blast radius (`window(T4) >= window(T3) >= window(T2)`), derived server-side from the enrolled tier in `src/redis/holdback.ts`; only the window varies by tier.
+- **Server-derived window.** The watch window is derived server-side from the enrolled tier (`src/redis/holdback.ts`); this skill never computes it.
 - **Leading outcomes only.** A revert fires only when a `kind: leading` outcome regresses in the **unfavorable** direction by **more than** its `noise_epsilon`. Terminal outcomes never drive a revert (`outcomes.yaml` schema comment; CONTEXT.md).
 - **Adapter outage is no-data, not a regression.** A null reading on either side never counts as a regression.
 - **Fixed event names + payloads.** The producer emits exactly `holdback.reverted` (`payload.commitSha`, `payload.regressedOutcomes`), `holdback.cap-reached` and `holdback.revert_failed`. `holdback.revert_failed` is a Page, the other two are Morning Brief items (ADR-0045); renaming any orphans the consumer.

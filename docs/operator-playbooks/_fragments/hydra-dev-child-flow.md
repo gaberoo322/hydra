@@ -421,7 +421,7 @@ fi
 `Tier:`) and pass `$TIER_LABEL_FLAG` so an unreachable classifier yields a
 `needs-triage` label, not a silently-wrong tier. GET not POST — `src/api/tier.ts`
 reads `req.query.files`; a POST body returns 400. The authoritative logic is
-`src/tier-classifier.ts` (the only source the CI merge gate consults) — a
+`src/tier-classifier.ts` (the only tier source CI consults) — a
 self-asserted tier that disagrees wastes a QA cycle.
 
 ## Friction Report (ALWAYS, even on success)
@@ -509,4 +509,4 @@ this step catches them before the PR. Rule fixtures:
 ## Test and baseline commands
 
 The single-file runner, the failing-test reader and the SUITE-COUNT GATE are
-documented once, in CLAUDE.md "Common Pitfalls". Never run a bare `node --test`.
+documented once, in CLAUDE.md "Common Pitfalls". Never run a bare `node --test`. Never edit the `npm test` script in `package.json`: its `HYDRA_FULL_SUITE=1` is what arms the file-set coverage gate (`docs/reference.md` "Pitfall mechanisms").

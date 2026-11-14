@@ -157,13 +157,13 @@ Preflight is **read-only** and fails closed exactly as the old bash did: no tier
 
 - **`.ok == false`** (`no-issue` | `no-pr` | `spec-missing-enforce`) — run `route` (below) with the same `--preflight "$PF"` and nothing else: it posts the one stop comment (`.stop`, if any) and ends. Then **stop**; no review runs. With `DESIGN_CONCEPT_MODE=enforce` a missing artifact is `spec-missing-enforce`; with `warn` (the default) it is a logged skip, not a stop.
 - **`.gate.action == "defer"`** — a non-reviewable blocker makes the verdict moot this pass (`mergeStateStatus == DIRTY`, or a T4 PR with a required check already failed). Run `route --preflight "$PF" --defer`: it posts the deferral comment, bounces the issue (not leaving `needs-qa`, issue #974) and emits **no verdict**. Then **stop**.
-- **`.gate.action == "skip-required-failed"`** (T1/T2/T3 only) — a required check already failed, so no reviewer can change the FAIL. Run `route --preflight "$PF"` with **no** `--findings`/`--summaries` and spawn **zero** reviewers; it posts the FAIL and routes the bounce.
+- **`.gate.action == "skip-required-failed"`** (any mode except `adversarial` on a T4 PR; the preflight decides) — a required check already failed, so no reviewer can change the FAIL. Run `route --preflight "$PF"` with **no** `--findings`/`--summaries` and spawn **zero** reviewers; it posts the FAIL and routes the bounce.
 - **`.gate.action == "admit"`** — the common path: continue at the Spawn section with `.fanout`.
 
 What the preflight fields mean for the reviewers:
 
 - `.spec.input` is the flat design-concept artifact for the Spec sub-agent; `.spec.skippedReason` is the audit reason when the Spec axis is skipped (`design-concept-exempt` on the PR, `cleanup-scan`/`design-concept-exempt` on the parent issue, the Tier-1 prompt-only bypass, or the `warn`-mode missing-artifact skip). A skip MUST be recorded as an audit line in `specSummary` (Aggregate section).
-- `.fanout.mode` sizes the review: `single` → the single-reviewer section (one reviewer, both axes; only T1–T3 PRs whose changed-file shape is not `code`); `standard` → the standard-pass section; `adversarial` → the adversarial fan-out section. A T4 PR or a `code` PR always gets the full fan-out for its tier, and so does an unknown tier. `.fanout.reviewers` is the exact list of reviewer names to spawn and to check in the completeness check.
+- `.fanout.mode` sizes the review: `single` → the single-reviewer section (one reviewer, both axes; only when the preflight selects it); `standard` → the standard-pass section; `adversarial` → the adversarial fan-out section. The preflight, not this playbook, decides which mode applies. `.fanout.reviewers` is the exact list of reviewer names to spawn and to check in the completeness check.
 - `.tier.num` is the tier (`null` = classifier unreachable); `.tier.adversarial` is false in `single` mode so the fold reads one reviewer's verdict.
 
 ### 5. Collect current CI state — manual fallback only
@@ -176,7 +176,7 @@ PR_NUMBER="$pr_number"
 # INV-7 fallback: the shared fetch failed (contexts or rollup unreadable) —
 # the QA verdict must still be produced, so fall back to the legacy
 # rollup-only mapping with every check optional (today's behaviour; branch
-# protection remains the real merge gate, and the autopilot builder
+# protection remains the real enforcement, and the autopilot builder
 # independently holds PENDING on its own failed read).
 if [ -z "$CHECKS_JSON" ]; then
   echo "WARN: checks-fetch failed — falling back to the legacy rollup-only mapping (every check optional)" >&2
@@ -206,7 +206,7 @@ jq '{reviewPacketPath, standardsPacketPath, standardsFound, specInputPath, prior
 `packet.ts` is a pure read (temp files only). It builds the diff + the full contents of every changed file at HEAD ONCE, appends the re-review context (7.0a) and the informational Merge-danger line (7.0b), and loads `CODING_STANDARDS.md` through the loader. An unreadable catalog exits 1 **before** any reviewer is spawned. In the prompts below: `$REVIEW_PACKET` = the contents of `.reviewPacketPath`; `$STANDARDS_PACKET` = the contents of `.standardsPacketPath` (the Standards-only rule catalog; it is NEVER part of `$REVIEW_PACKET` and the Spec reviewer never receives it); `$SPEC_INPUT_JSON` = the contents of `.specInputPath` (absent when the Spec axis is skipped); `$SPEC_SKIPPED_REASON` = the preflight's `.spec.skippedReason`; `$FIXED_SHA` = the preflight's `.fixedSha`.
 
 **Shared packet discipline (applies to EVERY reviewer sub-agent — both axes,
-both tiers, T1 through T4).** Embed `$REVIEW_PACKET` inline at the top of each
+every `.fanout.mode`).** Embed `$REVIEW_PACKET` inline at the top of each
 reviewer's prompt, then instruct the reviewer:
 
 > *The diff and the full contents of every changed file are in the packet above
@@ -228,7 +228,7 @@ judged against the packet instead of against a self-assembled view of the repo.
 
 #### 7.0a Re-review context after a FAIL
 
-On a T1–T3 PR whose latest QA verdict was a FAIL with a findings table, `packet.ts` appends the prior findings (and the incremental `git diff <prior sha>..HEAD` when the prior `sha=` is still an ancestor of HEAD) to the packet — `.priorFindings` / `.rereviewDiffBase` are non-empty. This is prompt context only: reviewers still review the FULL diff and changed files, and the engine fold alone decides the verdict. Nothing is filtered or demoted. Every unreadable input means no context: a plain first-pass review.
+On a PR whose latest QA verdict was a FAIL with a findings table, `packet.ts` appends the prior findings (and the incremental `git diff <prior sha>..HEAD` when the prior `sha=` is still an ancestor of HEAD) to the packet — `.priorFindings` / `.rereviewDiffBase` are non-empty. This is prompt context only: reviewers still review the FULL diff and changed files, and the engine fold alone decides the verdict. Nothing is filtered or demoted. Every unreadable input means no context: a plain first-pass review.
 
 With re-review context, add this **re-review brief** to every reviewer prompt, after the findings contract:
 
@@ -238,23 +238,23 @@ With re-review context, add this **re-review brief** to every reviewer prompt, a
 
 The dev declares `Merge danger: <one-way|two-way> — <reason>` in the PR body; the one-way-door detector observes the diff; `packet.ts` compares them and prints `.mergeDanger` (`finding` and `gapLine`). Pass `--packet "$PK"` to `route`: it adds a non-null `finding` to the step-8 map under the synthetic key `merge-danger-check` (`under-declared` is a **medium**, `missing`/`malformed` a **low**, `over-declared` no finding) and appends the `Merge-danger-gap:` line to the verdict comment. Do NOT add `merge-danger-check` to `.fanout.reviewers`, and do not write the row yourself.
 
-#### 7a. T1/T2 — single standard pass (`.fanout.mode` = `standard`)
+#### 7a. Standard pass (`.fanout.mode` = `standard`)
 
 Spawn exactly two parallel sub-agents — the **Standards** and **Spec** axes described below. 
 
-#### 7b. T3/T4 — adversarial fan-out (`.fanout.mode` = `adversarial`)
+#### 7b. Adversarial fan-out (`.fanout.mode` = `adversarial`)
 
-Run the review in **refutation framing** across **2 independent reviewers**. Each reviewer is its own Standards + Spec pair (the same two-axis contract below), so a T3 fan-out spawns **four** `general-purpose` sub-agents in one message: `reviewer-A-standards`, `reviewer-A-spec`, `reviewer-B-standards`, `reviewer-B-spec`. The two reviewers are **independent** — neither is told the other exists, same context-separation rule as the Standards/Spec split — so one cannot anchor the other.
+Run the review in **refutation framing** across **2 independent reviewers**. Each reviewer is its own Standards + Spec pair (the same two-axis contract below), so an adversarial fan-out spawns **four** `general-purpose` sub-agents in one message: `reviewer-A-standards`, `reviewer-A-spec`, `reviewer-B-standards`, `reviewer-B-spec`. The two reviewers are **independent** — neither is told the other exists, same context-separation rule as the Standards/Spec split — so one cannot anchor the other.
 
-Prepend the **refutation framing** to every T3 sub-agent prompt, before the axis brief:
+Prepend the **refutation framing** to every adversarial sub-agent prompt, before the axis brief:
 
 > *You are an adversarial reviewer. Your job is to actively find a concrete reason this change is wrong, regresses existing behaviour, or fails to do what it claims — not to confirm it works. Assume there IS a blocker and hunt for it. Only report a finding if you can point to the specific line/behaviour it concerns, and grade it honestly on the severity rubric — refutation framing is about hunting, not about inflating severity; do not invent speculative concerns. If after a genuine adversarial pass you find nothing, say so explicitly and emit an empty findings list.*
 
-Each reviewer (A and B) independently emits its findings (the findings contract below). The fold (Route section) treats them as follows: **T3** — FAIL on any medium/high finding from either reviewer; every low is a follow-up, even one both reviewers raised. **T4** — any finding from either reviewer is a FAIL (unchanged).
+Each reviewer (A and B) independently emits its findings (the findings contract below). The fold is the qa-verdict engine's (`scripts/ci/qa-verdict.ts`); do not restate or pre-apply it here.
 
 #### 7c. Docs/tests/prompt-only — single reviewer (`.fanout.mode` = `single`)
 
-Spawn exactly **one** blocking `general-purpose` sub-agent, `reviewer-single`, with `run_in_background: false`. Its prompt carries the Standards brief AND the Spec brief below (both axes, one agent), and asks for the report under two headings, `## Standards` and `## Spec`, so the Aggregate section renders it unchanged. Drop the T3 refutation framing; the smell battery, Hydra checks and the findings contract still apply. The fold treats its findings as above: only a medium/high finding FAILs.
+Spawn exactly **one** blocking `general-purpose` sub-agent, `reviewer-single`, with `run_in_background: false`. Its prompt carries the Standards brief AND the Spec brief below (both axes, one agent), and asks for the report under two headings, `## Standards` and `## Spec`, so the Aggregate section renders it unchanged. Drop the refutation framing; the smell battery, Hydra checks and the findings contract still apply. The engine folds its findings.
 
 **Findings contract.** Every prompt carries this block verbatim, after the axis brief:
 
@@ -273,7 +273,7 @@ Spawn exactly **one** blocking `general-purpose` sub-agent, `reviewer-single`, w
 >
 > *Class sweep (issue #4735): when you raise a finding, search the whole diff and every touched file for other instances of the same defect class, and list every instance in this round, one row each. Do not leave any for a later round. When there are 3 or more instances, or the inputs are adversarial (parsers, quoting, guards, untrusted strings), recommend the structural fix in `fix` (a tokenizer, a shared helper, a property test), not another point patch.*
 
-Judgement calls that are not defects do not go in the findings list. On T1–T3 a lone `low` finding does not block (Route section), so there is no reason to escalate a nit to `medium` to be heard; it is listed as a follow-up.
+Judgement calls that are not defects do not go in the findings list. The engine's severity gate decides what blocks, so there is no reason to escalate a nit to `medium` to be heard; it is listed as a follow-up.
 
 **Standards sub-agent prompt** — include:
 
@@ -323,12 +323,12 @@ Foreground dispatch (`run_in_background: false`) guarantees each `Agent` call bl
 The expected set is the preflight's `.fanout.reviewers`:
 
 - `single` (1 spawn): `reviewer-single`, whose report must carry both `## Standards` and `## Spec` (a Spec-skip recorded by the preflight is a clean skip). One missing heading = an incomplete fan-out.
-- T1/T2 `standard` (2 spawns): a Standards report and a Spec report (or an explicit Spec-skip already accounted for by the preflight — that is a clean skip, not a missing result).
-- T3/T4 `adversarial` (4 spawns): all of `reviewer-A-standards`, `reviewer-A-spec`, `reviewer-B-standards`, `reviewer-B-spec`.
+- `standard` (2 spawns): a Standards report and a Spec report (or an explicit Spec-skip already accounted for by the preflight — that is a clean skip, not a missing result).
+- `adversarial` (4 spawns): all of `reviewer-A-standards`, `reviewer-A-spec`, `reviewer-B-standards`, `reviewer-B-spec`.
 
 A "real result" is the reviewer's actual finding text — not a tool error, not an empty/truncated response, not silence. If **any** expected reviewer is missing or non-substantive:
 
-- **Do not** proceed to the Aggregate or Route sections, and never fold a missing reviewer silently into the T3/T4 AND (`aggregateAdversarialReview()`) as an implicit PASS — a verdict built on partial coverage must never look identical to one built on full coverage. This is stricter than "uncertain, lean FAIL": **no verdict at all** is emitted.
+- **Do not** proceed to the Aggregate or Route sections, and never fold a missing reviewer silently into the adversarial fold (`aggregateAdversarialReview()`) as an implicit PASS — a verdict built on partial coverage must never look identical to one built on full coverage. This is stricter than "uncertain, lean FAIL": **no verdict at all** is emitted.
 - Post a PR comment naming exactly which reviewer(s)/axis are missing, e.g.:
   ```
   > *Automated QA — incomplete review fan-out*
@@ -362,18 +362,18 @@ rm -f "$FINDINGS_FILE" "$SUMMARIES_FILE"
 NEXT=$(printf '%s' "$ROUTE_JSON" | jq -er '.nextStep') || exit 1
 ```
 
-`route.ts` makes exactly ONE pass through the engine — fold → classify → trailer → round action, in-process — then performs the verdict effects and prints `{verdict, reason, reviewVerdict, blockers, maxSeverity, worstFinding, trailer, round, deepQa, effects:[{kind, target, ok}], nextStep, degraded}`. `--dry-run` prints the identical plan with zero writes. Findings are bound RAW so a malformed file reaches the fold and fails closed to the high `reviewer-output-malformed` blocker; T1–T3 fold severity-gated, T4 (or an unknown tier) keeps the unchanged any-blocker AND (`aggregateAdversarialReview()`).
+`route.ts` makes exactly ONE pass through the engine — fold → classify → trailer → round action, in-process — then performs the verdict effects and prints `{verdict, reason, reviewVerdict, blockers, maxSeverity, worstFinding, trailer, round, deepQa, effects:[{kind, target, ok}], nextStep, degraded}`. `--dry-run` prints the identical plan with zero writes. Findings are bound RAW so a malformed file reaches the fold and fails closed to the high `reviewer-output-malformed` blocker; the fold itself is the engine's (`aggregateAdversarialReview()`).
 
 - **A non-zero fold / trailer / round-action result is a pre-verdict exit.** `route` exits 1 with at most one `QA-Verdict-Error` comment and `needs-qa` untouched; the next dispatch retries. There is no bash verdict fallback, and no path from a degraded fold or an empty round-action to a PASS. `--defer` is the only path that posts without a verdict.
 - **Every verdict comment ends with exactly one canonical trailer line** (the human header above it is free to drift; this line is not): `QA-Verdict: <PASS|FAIL|PASS-pending-CI|FAIL-pending-CI> pr=<N> round=<k> sha=<head12> blockers=<n> max_severity=<high|medium|low|none>`. The `trailer` engine phase derives `round` from the PR thread and owns the fail-closed `QA-Verdict-Error:` line. The full review lives only on the PR; the issue gets a short pointer that keeps its bounce-marker header line.
 - **Issue state moves only through the lifecycle seam** (the rule above): `route` writes no state label by hand, and a refused seam call exits non-zero rather than editing labels. A `pr-merged` refusal is not an error (reconcile owns it) and ends `route` with exit 0.
-- **PASS** comments FIRST (the seam's `qa-verdict` gate reads the PASS trailer at head), then at T4 posts the SHA-bound Deep-QA PASS marker the engine rendered, then enters `qa-passed` through the seam. A refused entry posts a `QA-Verdict-Error` and defers the issue off `needs-qa` (`nextStep` stays `none`, `degraded` gains `qa-passed-refused`). **PASS-pending-CI** comments and enters `qa-passed` the same way; the reconcile pass reads CI live. **FAIL** disarms auto-merge FIRST on every tier, comments, then bounces — `needs-dev-resume` while the PR is open (a failed or empty state read defaults there too), `ready-for-agent` only on a confirmed CLOSED/MERGED read; GLM provenance changes comment wording only. The 3rd reviewed T1–T3 FAIL is PARKED by the seam (`parked`, an off-list escalation per ADR-0047 D6, never `ready-for-human`; the seam posts the unified cap-park comment). T4 posts the `.failMarker` comment and block-and-escalates (`ready-for-human`) on the 2nd consecutive deep-QA FAIL.
-- **The auto-merge call site stays here, in this playbook** (the QA merge guard's call-site detector pins it). When `nextStep` is `arm-auto-merge` (a PASS), enable auto-merge (squash) — CI is the merge gate, so `--auto` lets GitHub squash-merge the instant the checks settle without this dispatch blocking on them. The issue already left `needs-qa` through the seam, so even if this call errors it is not left in the #974 busy-loop:
+- **PASS** comments FIRST (the seam's `qa-verdict` gate reads the PASS trailer at head), then posts the SHA-bound Deep-QA PASS marker when the engine rendered one, then enters `qa-passed` through the seam. A refused entry posts a `QA-Verdict-Error` and defers the issue off `needs-qa` (`nextStep` stays `none`, `degraded` gains `qa-passed-refused`). **PASS-pending-CI** comments and enters `qa-passed` the same way; the reconcile pass reads CI live. **FAIL** disarms auto-merge FIRST, comments, then bounces — `needs-dev-resume` while the PR is open (a failed or empty state read defaults there too), `ready-for-agent` only on a confirmed CLOSED/MERGED read; GLM provenance changes comment wording only. The round cap and any park are the lifecycle seam's call (`src/lifecycle/`); `route` only reports the seam's result. a rendered `.failMarker` is posted as a comment; the T4 block-and-escalate rule is in the T4 section above.
+- **The auto-merge call site stays here, in this playbook** (the QA merge guard's call-site detector pins it). When `nextStep` is `arm-auto-merge` (a PASS), enable auto-merge (squash) — `--auto` lets GitHub squash-merge the instant the checks settle without this dispatch blocking on them. The issue already left `needs-qa` through the seam, so even if this call errors it is not left in the #974 busy-loop:
 
 ```bash
 if [ "$NEXT" = "arm-auto-merge" ]; then
   gh pr merge $pr_number --repo gaberoo322/hydra --auto --squash --delete-branch \
-    || echo "WARN: failed to enable auto-merge on PR #${pr_number} (non-fatal — issue already in qa-passed; CI is the merge gate)"
+    || echo "WARN: failed to enable auto-merge on PR #${pr_number} (non-fatal — issue already in qa-passed)"
 fi
 ```
 
