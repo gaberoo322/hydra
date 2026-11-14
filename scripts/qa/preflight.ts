@@ -31,6 +31,7 @@ import {
   type PlumbingPorts,
 } from "./_lib.ts";
 import { PreflightResultSchema, type PreflightResult } from "../../src/schemas/qa-plumbing-cli.ts";
+import { ensurePrHead } from "../../src/qa/pr-head.ts";
 
 export interface PreflightOptions {
   issue?: number;
@@ -180,7 +181,9 @@ export async function runPreflight(opts: PreflightOptions, ports: PlumbingPorts)
   const rev = await ports.git(["rev-parse", `origin/${baseRefName}`]);
   if (!rev.ok) throw new Error(`git rev-parse origin/${baseRefName} failed: ${rev.stderr}`);
   const fixedSha = rev.stdout.trim();
-  const paths = await ports.git(["diff", "--no-renames", "--name-only", `${fixedSha}...HEAD`]);
+  const head = await ensurePrHead(ports.git, prNumber, pr.headSha);
+  if (!head.ok) throw new Error(head.reason);
+  const paths = await ports.git(["diff", "--no-renames", "--name-only", `${fixedSha}...${pr.headSha}`]);
   if (!paths.ok) throw new Error(`git diff --name-only failed: ${paths.stderr}`);
   const changedPaths = paths.stdout.split("\n").map((l) => l.trim()).filter((l) => l !== "");
 

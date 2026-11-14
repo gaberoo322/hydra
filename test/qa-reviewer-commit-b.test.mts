@@ -381,9 +381,10 @@ describe("playbook step 9.4 class-B pins (INV-5, INV-6, INV-13)", () => {
     assert.ok(!/\+refs|\+HEAD/.test(step94));
   });
 
-  test("step 9.5 splits the comma-separated qa-fixes into the trailer array", () => {
-    const step95 = PLAYBOOK.slice(PLAYBOOK.indexOf("### 9.5 "), PLAYBOOK.indexOf("### 9.6 "));
-    assert.ok(step95.includes('split(",")'));
+  test("route (not a sidecar step 9.5) hands every verified reviewer commit to the trailer phase as the qaFixes array (#5415)", () => {
+    assert.ok(!PLAYBOOK.includes("### 9.5 "), "route owns the trailer inputs; the sidecar section is gone");
+    const route = readFileSync(join(ROOT, "scripts", "qa", "route.ts"), "utf8");
+    assert.ok(route.includes("qaFixes: shas12"));
   });
 });
 

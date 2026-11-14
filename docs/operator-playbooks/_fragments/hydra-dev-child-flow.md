@@ -88,6 +88,7 @@ Run these numbered steps.
    changed `.sh` files and `typed-error-throw` over changed `src/`/`scripts/` `.ts`
    files (bare `throw new Error`, STD-ERROR-TYPED-CODE), and fix every hit before `gh pr create` (the shrink-only
    `test/fail-loud-ratchet.test.mts` in `npm test` blocks any new or edited hit). Recipe: "Fail-loud lint — changed files" below.
+   Also run the whole-tree pin-site ratchet (`npx tsx scripts/ci/test-source-read-scan.ts`, under a second) and convert any `pin-count-grew` hit in a test file this PR touches before `gh pr create` (STD-TEST-RUN-THE-CODE / STD-TEST-PIN-PHRASE, #5487).
 7b. **Test-can-fail proof on changed tests** (issue #5447, STD-TEST-CAN-FAIL) —
    run the same advisory judge CI runs over the test files you added or
    extended; for each `passes-at-merge-base` file make a case red-then-green, or
@@ -504,6 +505,16 @@ while IFS= read -r f; do
 done < <(git diff --name-only --diff-filter=AM origin/master...HEAD -- '*.ts')
 if [ "${#TE_ARGS[@]}" -gt 0 ]; then
   npx tsx scripts/ast-search.ts --rule typed-error-throw --text "${TE_ARGS[@]}"
+fi
+# Pin-site ratchet (#5487): whole tree, <1 s; `pin-count-grew` names the test file to fix.
+npx tsx scripts/ci/test-source-read-scan.ts
+# STD-TEST-OWN-FEATURE (#5511): QA-history provenance in titles/comments of changed test files.
+TP_FILES=()
+while IFS= read -r f; do
+  [ -f "$f" ] && TP_FILES+=("$f")
+done < <(git diff --name-only --diff-filter=AM origin/master...HEAD -- 'test/*.test.mts')
+if [ "${#TP_FILES[@]}" -gt 0 ]; then
+  npx tsx scripts/ci/test-title-provenance-scan.ts --files "${TP_FILES[@]}"
 fi
 # Prints `file:line:col: <catch text>` per hit (0-based line/col); no output = clean.
 # Python/shell use `# intentional: <reason>` as the annotation.

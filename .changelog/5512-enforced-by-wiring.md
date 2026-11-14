@@ -1,0 +1,1 @@
+- feat: integrity test now checks CODING_STANDARDS enforced-by claims are wired into a required job and name their rule (#5512)

@@ -376,7 +376,7 @@ export function renderTitle(finding: CleanupFinding): string {
  * The `## What to do` section embeds the knip false-positive classification
  * taxonomy (issue #1299): the classification probe plus the four sub-cases
  * (a delete / b demote-export / c drop-re-export / d coupled Redis-key-set),
- * pointing at Step 2.5 of the playbook for the full table. The picking
+ * pointing at Step 2.5 of the playbook for the outcomes. The picking
  * hydra-dev agent reads THIS rendered body, not the playbook prose, so the
  * taxonomy MUST live here for the doc and the emitted issue to agree — a body
  * that only said "remove the unused export" left the recurrence (naive delete
@@ -465,7 +465,7 @@ export function renderBody(finding: CleanupFinding, isoDate: string): string {
   lines.push("```");
   lines.push("");
   lines.push(
-    "Then apply the matching fix — **delete is the exception, not the default** (full table with evidence anchors lives in Step 2.5 of the hydra-cleanup playbook, `docs/operator-playbooks/hydra-cleanup.md`):",
+    "Then apply the matching fix — **delete is the exception, not the default** (the outcomes below are the ones in Step 2.5 of the hydra-cleanup playbook, `docs/operator-playbooks/hydra-cleanup.md`; (a) Delete, (b) Demote, (c) Fix at the relay, (d) the atomic-set variant of Delete; when ambiguous, take the narrowest edit):",
   );
   lines.push("");
   lines.push(
@@ -864,7 +864,7 @@ export function renderBatchBody(
   lines.push("```");
   lines.push("");
   lines.push(
-    "Then apply the matching fix — **delete is the exception, not the default** (full table with evidence anchors lives in Step 2.5 of the hydra-cleanup playbook, `docs/operator-playbooks/hydra-cleanup.md`):",
+    "Then apply the matching fix — **delete is the exception, not the default** (the outcomes below are the ones in Step 2.5 of the hydra-cleanup playbook, `docs/operator-playbooks/hydra-cleanup.md`; (a) Delete, (b) Demote, (c) Fix at the relay, (d) the atomic-set variant of Delete; when ambiguous, take the narrowest edit):",
   );
   lines.push("");
   lines.push(
