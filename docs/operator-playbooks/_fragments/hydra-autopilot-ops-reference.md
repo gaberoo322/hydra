@@ -1,163 +1,126 @@
 # hydra-autopilot — Operations reference
 
-Troubleshooting, historical context, and operational internals for the
-autopilot. Read when diagnosing a wedge, slot accounting failure, Redis
-state loss, or merge-rate anomaly.
+Troubleshooting and operational internals for the autopilot. Read when
+diagnosing a wedge, a slot accounting failure, Redis state loss or a merge-rate
+anomaly.
 
 ## Where to look when something goes wrong
 
-
 - Wrong dispatch for a class → `decide.py:_select_for_slot` / `_select_for_signal`
-- PR merged without a PASS verdict → the merge-verdict invariant documented in the `assert_invariants.py` docstring; run log
+- PR merged without a PASS verdict → the merge-verdict invariant in the `assert_invariants.py` docstring; the run log
 - Burned class still got dispatched → INV-003; `burned_classes` in `state.json`
-- Failure pattern keeps retrying → `self_heal.py` + `state.failure_log` + Phase 3 backstop
+- Failure pattern keeps retrying → `self_heal.py`, `state.failure_log` and the Phase 3 backstop
 - A subagent in flight wedged → Phase 2 reap or `subagent-hard-max-tokens`
+- Back-to-back master merges left prod stale → `bash scripts/deploy.sh` (CLAUDE.md "CI/CD & Deployment")
 
+Historical: `ci.yml` scopes `cancel-in-progress` to non-master refs (closes #712).
 
-## Cross-run state: Redis mirror survives reboot (issue #2715)
+## Cross-run state: the Redis mirror
 
+`/tmp/hydra-autopilot-state.json` is the run-local home of autopilot state, and
+`/tmp` is wiped on boot. Most of it is **run-scoped** and dies with the run:
+`pid`, `turn`, `dispatches`, `slots`, `burned_classes` (the concurrent-run PID
+guard and slot re-seeding depend on those resetting). Only the **cross-run
+durable subset** survives a reboot:
 
-`/tmp/hydra-autopilot-state.json` is the run-local home of all autopilot
-state, but `/tmp` is boot-wiped by the host tmpfiles policy (`D /tmp …
-30d`). Most of state.json is **run-scoped** and legitimately dies with the
-run — `pid`, `turn`, `dispatches`, `slots`, `burned_classes`
-(the concurrent-run PID guard and the #1352 slot re-seeding DEPEND on those
-resetting). Only the **cross-run durable subset** must survive:
+- `signal_last_fired`, the per-class cooldown timestamps. The classes whose
+  `classes.json` row carries a large `cooldownSeconds` are the load-bearing ones;
+  short-cooldown classes re-arm to 0 each run by design. It also carries the
+  `research_target` pipeline re-fire stamp, which decide.py writes at plan time
+  to enforce that slot's minimum re-fire interval
+  (`HYDRA_RESEARCH_TARGET_REFIRE_SEC`); bootstrap carries it forward so a
+  relaunch cannot reset the interval.
+- `research_force_counter`, the date-keyed forced-research counter.
 
-- `signal_last_fired` (the per-class cooldown timestamps — the long-cooldown
-  classes, i.e. the `classes.json` rows with a large `cooldownSeconds`, are the
-  load-bearing ones; the short-cooldown classes re-arm to 0 each run by design). It also carries the
-  `research_target` **pipeline re-fire stamp** (#4611) — decide.py writes it at
-  plan time to enforce that slot's 6h minimum re-fire interval
-  (`HYDRA_RESEARCH_TARGET_REFIRE_SEC`), and bootstrap carries it forward with
-  the long-cooldown classes so a relaunch cannot reset the interval
-- `research_force_counter` (the 4/day forced-research cap, #1666)
-
-The #2575 prior-file carry-forward reseeds these from the *prior state.json*
-on each bootstrap — which survives a pace-gate relaunch (no `/tmp` wipe) but
-NOT a host **reboot** (which wipes `/tmp`, so there is no prior file). After a
-reboot the long-cooldown classes reset to epoch 0 and all fire in the first
-post-boot run — a per-reboot recurrence of the #2575 token churn.
-
-The durable fix mirrors the cross-run subset to **Redis** (which survives
-reboot via AOF + the docker volume) and reads it back as a seed tier:
+Bootstrap seeds these from the prior `state.json` first, which survives a
+pace-gate relaunch but not a host reboot. The Redis mirror is the reboot-survival
+backstop (AOF plus the docker volume):
 
 - **Keys** (bare `redis-cli`, the docker-exec seam the autopilot scripts use):
-  `hydra:autopilot:signal-last-fired` — a **Hash** (field = signal class, value
-  = last-fired epoch); `REDIS_RESEARCH_FORCE_KEY` (scripts/autopilot/bootstrap.sh) — a **String**
-  holding the canonical-JSON date-keyed counter object.
-- **Seed order** (bootstrap.sh): prior state file → **Redis** → 0. The prior
-  file stays FIRST (fast local path, survives relaunches); Redis is the
-  reboot-survival backstop; 0 is the first-install default (no prior file AND
-  no Redis key — unchanged behaviour).
-- **Write seam**: `reap.py run_completion` mirrors the whole subset on EVERY
-  completion (the reliable "a signal class fired" executor seam — reap runs on
-  every terminal dispatch, signal classes included). `decide.py` additionally
-  mirrors `research_force_counter` on the same turn it stamps it (a force can
-  advance without a reap).
-- **decide.py's READ path is unchanged**: it reads `signal_last_fired` /
-  `research_force_counter` ONLY from the loaded state dict, never from Redis.
-  Redis is exclusively a bootstrap SEED source and an executor MIRROR sink.
-- **Fail-open everywhere**: every Redis read (seed) and write (mirror) is
-  best-effort — a Redis error logs and degrades to the pre-#2715 behaviour
-  (seed → 0, write → state.json only) and NEVER aborts bootstrap or a decision
+  `hydra:autopilot:signal-last-fired` is a Hash (field = signal class, value =
+  last-fired epoch); `hydra:autopilot:research-force-counter` (`REDIS_RESEARCH_FORCE_KEY` in
+  `scripts/autopilot/run_ledger.py`) is a String holding the canonical-JSON
+  counter object.
+- **Seed order** (`bootstrap.sh`): prior state file, then Redis, then 0. The
+  prior file stays first (fast local path); 0 is the first-install default.
+- **Write seam**: `reap.py run_completion` mirrors the whole subset on every
+  completion, signal classes included. `decide.py` also mirrors
+  `research_force_counter` on the turn it stamps it, because a force can advance
+  without a reap.
+- **Read path**: `decide.py` reads `signal_last_fired` and `research_force_counter`
+  only from the loaded state dict, never from Redis. Redis is a bootstrap seed
+  source and an executor mirror sink.
+- **Fail-open**: every Redis read and write is best-effort. An error logs and
+  degrades to state.json-only behaviour, and never aborts bootstrap or a decision
   turn. `HYDRA_AUTOPILOT_REDIS_CLI` overrides the `docker exec hydra-redis-1
   redis-cli` prefix for hermetic tests.
 
-## Termination detail
-
 ## Termination
 
-`decide.py` emits a single `terminate` action — always the plan's LAST action,
-preceded only by any `auto-merge` actions the auto-merge sweep produces from
-that turn's QA PASS verdicts (session `qa-verdict` events and #5052 recheck
-entries, all holds unchanged; issue #5144) — when any of these trip:
+`decide.py` emits a single `terminate` action, always the plan's LAST action,
+preceded only by the `auto-merge` actions the sweep produces from that turn's QA
+PASS verdicts (session `qa-verdict` events and recheck entries, all holds
+unchanged). It fires when any of these trip:
 
 1. `cumulative_tokens >= limits.token_budget`
 2. `elapsed >= limits.wall_clock_max_sec`
-3. (retired, #5070: the `idle_turns` arm — nothing ever incremented the counter; idle ends via cause 5)
-4. 5 consecutive failures of the same pattern (failure backstop; see `self_heal.py`)
-5. The turn is wait-only with zero occupied slots (issue #1352): nothing
-   dispatched, no other actions, no slots in flight → `terminate` with cause
-   `idle`. A `claude -p` print-mode session exits the moment the model emits
-   its final message, so an idle-heartbeat `wait` was never honoured — the
-   process died and the ExecStopPost reap stamped the run `interrupted`,
-   leaving retro with zero drillable dispatches. Per ADR-0021 D5, continuity
-   comes from the pace-gate relaunch, so the designed exit is recorded as the
-   clean idle drain it is.
-6. `turn > 0` AND `turn % limits.context_compaction_turns == 0` (issue #3787;
-   default **8 Autopilot Turns**, `state.limits.context_compaction_turns` /
-   `HYDRA_AUTOPILOT_CONTEXT_COMPACTION_TURNS`; 0 disables it) → `terminate`
-   cause `context_compaction`. Checked LAST (a budget/wall-clock/idle/
-   failure-backstop trip on the same turn still wins) and NOT gated on
-   `slots_occupied == 0` (unlike cause 5) — a busy run is exactly what
-   accumulates the most cache-read growth.
+3. Five consecutive failures of the same pattern (the failure backstop; see
+   `self_heal.py`)
+4. The turn is wait-only with zero occupied slots: nothing dispatched, no other
+   actions, nothing in flight. The cause is `idle`. A `claude -p` print-mode
+   session exits the moment the model emits its final message, so an idle
+   heartbeat `wait` is never honoured; per ADR-0021 D5 continuity comes from the
+   pace-gate relaunch, and the designed exit is recorded as a clean idle drain.
+5. `turn > 0` AND `turn % limits.context_compaction_turns == 0` gives cause
+   `context_compaction`. The limit is `state.limits.context_compaction_turns`
+   (`HYDRA_AUTOPILOT_CONTEXT_COMPACTION_TURNS`; 0 disables it). It is checked
+   LAST, so a budget, wall-clock, idle or failure-backstop trip on the same turn
+   wins, and it is NOT gated on `slots_occupied == 0`, because a busy run
+   accumulates the most cache-read growth. The unit is Autopilot Turns (one
+   `decide.py decide` invocation), not raw API calls. It reuses the same
+   terminate and pace-gate relaunch path as the other causes: clean `exit 0`,
+   next launch at the next `hydra-pace-gate.timer` tick, slot re-seeding via
+   `/api/autopilot/inflight-slots`. Phase 7's `hydra-digest` dispatch is skipped
+   for this cause; `drain.sh` still runs.
 
-   **Unit note:** the default is 8, not the issue's literal "80-120" — that
-   figure was computed over the sampled transcript's 245 raw Anthropic API
-   calls, not `state.turn` (one `decide.py decide` invocation; no raw-call
-   counter exists in state.json). The same transcript shows only ~20 decide
-   invocations across those calls (~12.25 raw calls/turn); rescaling the
-   issue's own "conservative end" instruction by that ratio lands at ~6.5-10
-   Autopilot Turns.
+   **The session must actually end.** `bootstrap.sh` refuses a second run from
+   the process that already ran one when `HYDRA_AUTOPILOT_TRIGGER` is set, so the
+   context, the per-run quota caps and the pace gate reset on every relaunch.
+   Children still running at the terminate are reaped as they complete, as on a
+   `quota` terminate, and nothing new is dispatched. Interactive sessions
+   (trigger unset) may re-bootstrap in place.
 
-   Reuses the SAME terminate -> pace-gate-relaunch path as causes 1-4 (clean
-   `exit 0`, no `Restart=on-failure`, next launch at the next
-   `hydra-pace-gate.timer` tick) — no new relaunch machinery, no new
-   in-flight bookkeeping, since slot re-seeding via `/api/autopilot/inflight-
-   slots` (#1352) is already cause-agnostic. Phase 7's `hydra-digest`
-   dispatch (a costed `Agent()` call) is SKIPPED for `context_compaction`
-   specifically, to avoid multiplying that cost at the tighter cadence;
-   `drain.sh` still runs unconditionally.
-
-   **The session must actually end (issue #4825).** For six days every
-   `context_compaction` terminate was followed by `bootstrap.sh` re-run in the
-   same session, so the context carried over (106k → 400k), the per-run quota
-   caps reset and the pace gate was skipped. `bootstrap.sh` now refuses a
-   second run from the process that already ran one when
-   `HYDRA_AUTOPILOT_TRIGGER` is set. Children still running at the terminate
-   are reaped as they complete — the same path a `quota` terminate already
-   takes — and nothing new is dispatched. Interactive sessions (trigger
-   unset) may still re-bootstrap in place.
-
-When the emitted plan carries a `terminate`, the decide CLI itself POSTs
-`/api/autopilot/run-end` with the plan's cause before printing the plan
-(issue #1352) — the
-reap backstop would otherwise stamp `interrupted`. The POST is idempotent
-(first terminal cause wins) and skipped when state carries no `run_id` or
+When the plan carries a `terminate`, the decide CLI itself POSTs
+`/api/autopilot/run-end` with the plan's cause before printing the plan; the reap
+backstop would otherwise stamp `interrupted`. The POST is idempotent (the first
+terminal cause wins) and is skipped when state carries no `run_id` or
 `HYDRA_AUTOPILOT_RUN_END_POST=off`.
 
-**Handoff baton-pass (issue #1903).** The cases above all leave ZERO slots in
-flight at exit. The residual real-world exit is the OPPOSITE: the print-mode
-session reaches a natural final message while subagent slots ARE occupied (the
-plan was `wait`, but print mode has no event loop that survives the model going
-quiet across a multi-minute nap). This is not a truncation — it is an honest
-baton-pass: the in-flight subagents live in the durable dispatch ledger
-(`hydra:dispatches:subagent:*`) that the next pace-gate-launched run re-seeds
-(#1352). It is recorded with the clean `term_reason=handoff` (in
-`CLEAN_TERM_REASONS`, `src/autopilot/runs.ts`), by ONE scripted writer (#5323):
-the ExecStopPost reap backstop (`bootstrap.sh __reap_derive_cause`, wired in
-`hydra-autopilot.service`) derives `handoff` whenever a CLEAN exit (code
-0/143/130) shows `state.json` slots occupied > 0. The parent session posts
-nothing for a baton-pass. `interrupted` is now reserved for a clean ZERO-slot exit that bypassed
-decide.py's terminate (a genuine print-mode end with nothing pending).
+**Handoff baton-pass.** A print-mode session can reach a natural final message
+while subagent slots are occupied, because print mode has no event loop that
+survives the model going quiet across a long nap. That is a baton-pass, not a
+truncation: the in-flight subagents live in the durable dispatch ledger
+(`hydra:dispatches:subagent:*`) that the next pace-gate-launched run re-seeds. It
+is recorded as the clean `term_reason=handoff` (in `CLEAN_TERM_REASONS`,
+`src/autopilot/runs.ts`) by ONE scripted writer: the ExecStopPost reap backstop
+(`bootstrap.sh __reap_derive_cause`, wired in `hydra-autopilot.service`) derives
+`handoff` whenever a clean exit (code 0, 143 or 130) shows occupied slots in
+`state.json`. The parent session posts nothing for a baton-pass. `interrupted` is
+reserved for a clean zero-slot exit that bypassed decide.py's terminate.
 
-The clean-termination rate over recent runs is surfaced as
-`terminationHealth` (with a pre-derived `starved` alarm boolean) on
-`GET /api/autopilot/runs` — `starved: true` means ≥5 ended dispatch-bearing
-runs sustain a clean-termination rate below the floor (the #1352/#1847
-retro-starvation condition). Reclassifying baton-passes from `interrupted` to
-the clean `handoff` (issue #1903) makes this rate measure REAL starvation
-(crashes / zero-progress) instead of counting every honest baton-pass as
-non-clean.
+`GET /api/autopilot/runs` surfaces the clean-termination rate as
+`terminationHealth`, with a pre-derived `starved` alarm boolean. `starved: true`
+means at least five ended dispatch-bearing runs sustain a clean-termination rate
+under the floor, which is the retro-starvation condition (crashes or zero
+progress).
 
-## Slot lifecycle events (issue #509)
+## Slot lifecycle events
 
-Subagent slot accounting is event-driven, not poll-driven. Claude Code's
-`SubagentStop` and `Notification` hooks XADD lifecycle events onto a
-Redis stream that the autopilot drains every turn:
+Subagent slot accounting is event-driven. Claude Code's `SubagentStop` and
+`Notification` hooks XADD lifecycle events onto a Redis stream that the autopilot
+drains every turn:
 
-- **Stream:** `hydra:autopilot:slot-events` (`XADD ... MAXLEN ~ 1000`)
+- **Stream:** `hydra:autopilot:slot-events` (`XADD ... MAXLEN ~`)
 - **Hook scripts:** `scripts/autopilot/hooks/on-subagent-stop.sh`,
   `scripts/autopilot/hooks/on-subagent-permission-wait.sh`
 - **Hook registration:** `docs/operator-playbooks/hydra-autopilot.settings.json`
@@ -168,178 +131,100 @@ Redis stream that the autopilot drains every turn:
 
 ```
 event=subagent_stop
-  slot=<dev_orch|dev_target|qa_orch|qa_target|research_orch|research_target|design_concept_orch|unknown>
+  slot=<a pipeline slot name, or unknown>
   status=<success|failure|no_op|budget_exceeded|unknown>
   task_id=<harness-task-id>
   subagent_type=<hydra-dev|hydra-target-build|...>
-  summary=<truncated 200-char text>
+  summary=<truncated text>
   ts_epoch=<unix-epoch>
 
 event=slot_waiting_permission
   slot=<slot-or-unknown>
-  prompt=<truncated 200-char text>
+  prompt=<truncated text>
   ts_epoch=<unix-epoch>
 ```
 
 ### How the turn consumes them
 
 1. The Turn Snapshot's `slot-events` collector calls `hydra raw GET
-   /autopilot/slot-events?last_id=<last-id>&count=100` (issue #4510 — a
-   thin HTTP adapter over a plain, non-consumer-group `XREAD` the
-   orchestrator performs server-side via `EventBus.readRaw()`,
-   `src/event-bus.ts`) and carries the response as its `slot_events` blob
-   (`{events:[...], last_id:"..."}`). `turn_snapshot.py apply`
-   stores it on `state.slot_events` and updates
-   `state.slot_events_last_id` to the latest seen id so the next turn
-   doesn't re-read. `bootstrap.sh` seeds `state.slot_events_last_id` at
-   run start (`<STARTED_EPOCH>000-0`, issue #4441) so a fresh run's FIRST
-   collect, before the brain has exported the running cursor, still reads
-   only entries after the run began instead of replaying the stream from
-   `0`; `turn.sh` then passes that (advancing) cursor on every subsequent
-   collect via `HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID`.
-2. `decide.py` consumes `state.slot_events`, first dropping any entry whose
-   event time is provably earlier than `state.started_epoch` (issue #4441 —
-   the seed above is an efficiency layer, not the correctness guarantee: a
-   forgotten cursor export or a context-compaction re-bootstrap still falls
-   back toward `0`, and this filter is what makes that replay inert
-   regardless). An entry with no resolvable time is kept (fail-open):
-   - Each surviving `subagent_stop` is translated into a `completion` event
-     (the existing reap path) AND appended to `state.slot_history` (capped
-     at 50 entries, FIFO).
-   - `failure` and `budget_exceeded` statuses also append to
-     `state.failure_log` so `self_heal.py` sees them.
-   - Each surviving `slot_waiting_permission` appends to
-     `state.failure_log` with `pattern=permission_wait` but does NOT free
-     the slot — the subagent is paused, not done.
-   - The cascade-routing escalation re-dispatch rule reads the SAME
-     pre-run-filtered `state.slot_events`, so a stale `subagent_stop` can
-     no longer trigger a stale escalation either.
+   /autopilot/slot-events?last_id=<last-id>&count=<n>`, a thin HTTP adapter over
+   a plain, non-consumer-group `XREAD` that the orchestrator performs server-side
+   through `EventBus.readRaw()` (`src/event-bus.ts`). It carries the response as
+   its `slot_events` blob (`{events:[...], last_id:"..."}`).
+   `turn_snapshot.py apply` stores it on `state.slot_events` and advances
+   `state.slot_events_last_id` so the next turn does not re-read. `bootstrap.sh`
+   seeds `state.slot_events_last_id` at run start (`<STARTED_EPOCH>000-0`) so a
+   fresh run's first collect reads only entries after the run began, and `turn.sh`
+   passes the advancing cursor on every later collect via
+   `HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID`.
+2. `decide.py` consumes `state.slot_events`, first dropping any entry whose event
+   time is provably earlier than `state.started_epoch`. The seed is an efficiency
+   layer, not the correctness guarantee: a forgotten cursor export or a
+   context-compaction re-bootstrap falls back toward `0`, and this filter makes
+   that replay inert. An entry with no resolvable time is kept (fail-open).
+   - Each surviving `subagent_stop` becomes a `completion` event (the reap path)
+     and is appended to `state.slot_history` (a capped FIFO).
+   - `failure` and `budget_exceeded` statuses also append to `state.failure_log`,
+     where `self_heal.py` reads them.
+   - Each surviving `slot_waiting_permission` appends to `state.failure_log` with
+     `pattern=permission_wait` and does NOT free the slot: the subagent is
+     paused, not done.
+   - The cascade-routing escalation re-dispatch rule reads the same pre-filtered
+     `state.slot_events`, so a stale `subagent_stop` cannot trigger a stale
+     escalation.
 
 ### Silent-wedge fallback
 
-If the hook itself silently fails (e.g. the subagent process crashed
-before reaching the harness's `SubagentStop` dispatch), `decide.py`
-falls back to a wall-clock timer. When an active slot's `started_epoch`
-is older than `subagent_max_wall_seconds` (default `3600`, env override
-`HYDRA_AUTOPILOT_SUBAGENT_MAX_WALL_SECONDS`) AND no matching
-`subagent_stop` event has been observed for the slot's `task_id`,
-`decide.py` emits a `wait_or_reap` action. The brain runs
+If the hook itself fails silently (for example the subagent process crashed
+before the harness's `SubagentStop` dispatch), `decide.py` falls back to a
+wall-clock timer. When an active slot's `started_epoch` is older than
+`subagent_max_wall_seconds` (env `HYDRA_AUTOPILOT_SUBAGENT_MAX_WALL_SECONDS`) and
+no `subagent_stop` event has been observed for the slot's `task_id`, `decide.py`
+emits a `wait_or_reap` action. The brain runs
 `reap.py wait-or-reap <slot> <task_id>` from the playbook's `wait_or_reap`
-action-table row (liveness by transcript mtime, then the forced reap). A transcript `stat()` failure stays `verdict=unknown` (no reap) only until the slot has been occupied past `subagent_max_wall_seconds`; after that it is treated as dead and reaped.
-
-`reap.py` is the reap executor: the playbook's `reap` and `wait_or_reap` action rows both call it.
+action-table row: liveness by transcript mtime, then the forced reap. A
+transcript `stat()` failure stays `verdict=unknown` (no reap) only until the slot
+has been occupied past `subagent_max_wall_seconds`; after that it is treated as
+dead and reaped. `reap.py` is the executor for both the `reap` and `wait_or_reap`
+rows.
 
 ### Best-effort guarantees
 
-The hook scripts MUST NEVER propagate an error back to the parent
-autopilot session. A Redis outage, a malformed payload, or a missing
-`jq` — any of these results in a stderr warning and `exit 0`. The
-regression test `test/autopilot-hooks.test.mts` enforces this.
+The hook scripts never propagate an error back to the parent autopilot session. A
+Redis outage, a malformed payload or a missing `jq` results in a stderr warning
+and `exit 0`. `test/autopilot-hooks.test.mts` enforces this.
 
 ### Environment overrides
 
-| Var | Default | Purpose |
+Defaults live in the file named in each row; read them there.
+
+| Var | Owner | Purpose |
 |---|---|---|
-| `HYDRA_REDIS_HOST` | `docker` | When `docker`, hooks shell into `hydra-redis-1`. Otherwise `redis-cli -h $HOST -p $PORT` |
-| `HYDRA_REDIS_PORT` | `6379` | |
-| `HYDRA_AUTOPILOT_SLOT_EVENTS_STREAM` | `hydra:autopilot:slot-events` | Used by the hooks and the regression tests. The Turn Snapshot does not read this var (issue #4510) — `GET /autopilot/slot-events` hard-codes the one production stream name server-side rather than accepting a stream-name query param, to avoid turning a narrow autopilot-internal read into a general Redis-stream proxy. |
-| `HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID` | `0` | Cursor passed by the autopilot to `XREAD` so each turn only reads new events. `bootstrap.sh` seeds `state.slot_events_last_id = <STARTED_EPOCH>000-0` at run start (issue #4441); `turn.sh` exports it from `state.slot_events_last_id` on every turn so the FIRST turn doesn't fall back to the `0` default and replay a prior run's stream tail. `turn-snapshot.ts` itself stays stateless and never reads `state.json` for this. |
-| `HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT` | `100` | Max events per `XREAD` batch |
-| `HYDRA_AUTOPILOT_SLOT_EVENTS_MAXLEN` | `1000` | `XADD MAXLEN ~` cap |
-| `HYDRA_AUTOPILOT_SUBAGENT_MAX_WALL_SECONDS` | `3600` | Silent-wedge fallback cap (`decide.py` only) |
-| `HYDRA_AUTOPILOT_DAILY_SPEND_CAP_USD` | `50.0` | **No reader since #5175 (gate removed).** Total daily spend cap (issue #532; bootstrap writes into `state.limits.daily_spend_cap_usd`) |
-| `HYDRA_AUTOPILOT_SCOUT_COST_SHARE` | `0.04` | **No reader since #5175 (gate removed).** Scout slice of the daily cap (issue #532; `0` = kill-switch). Writes `state.limits.scout_cost_share` |
-| `HYDRA_USAGE_5H_THROTTLE_T1` | `0.60` | Graduated 5h-utilization throttle Tier-1 threshold (issue #1087), a fraction in (0,1). Inert while the OAuth meter reports no 5h window (none on the current plan). At/above this `percentLast5h` (authoritative OAuth meter only), `projectEligibility` sheds the lowest-value pipeline + backfill classes (`research_orch`/`research_target`/`architecture_orch`/`retro_orch`/`cleanup_orch`/`discover_orch`). Inert on the transcript estimate; set-but-invalid → default (fail-loud). Read by `src/cost/usage-tracker.ts` |
-| `HYDRA_USAGE_5H_THROTTLE_T2` | `0.75` | Tier-2 threshold (issue #1087). At/above this `percentLast5h` it ADDITIONALLY sheds `design_concept_orch` + `dev_orch` (the largest 5h consumer); `qa_*` + `dev_target` are never shed. Mis-set below T1 is clamped up so the T2 cut never inverts. Read by `src/cost/usage-tracker.ts` |
-| `HYDRA_EXTRA_USAGE_POLICY` | `block` | How the admission verdict treats an account with paid overage ("extra usage") armed (issue #4560; the signal is #4075's `reasons.extraUsageArmed`, read off the OAuth meter). `block`: armed → `allow=false` at ANY burn level until it is disabled in the Claude console. `allow`: armed is reported but not folded into `allow` (`reasons.extraUsageBlocking` stays `false`); the 5h/weekly hard-stops are the brake. For an account whose overage is plan-level (not the operator's to switch off) and capped at an insignificant amount. Set-but-invalid → default (fail-loud). Read by `src/cost/config.ts`; `pace-gate.sh` keys its skip arm off `extraUsageBlocking` |
-| `HYDRA_USAGE_EMERGENCY_STOP_PERCENT` | `90` | The 5h + weekly hard-stop threshold, % of a window's quota in (0, 100], that `deriveHardStop` compares the OAuth meter against (issue #4560; the constant is #2041's `EMERGENCY_STOP_PERCENT`). The check runs BETWEEN dispatches and in-flight subagents keep burning after it trips, so keep a margin below 100. Set-but-invalid → default (fail-loud). Read by `src/cost/config.ts` |
+| `HYDRA_REDIS_HOST` | the hooks | `docker` makes the hooks shell into `hydra-redis-1`; any other value uses `redis-cli -h $HOST -p $PORT` |
+| `HYDRA_REDIS_PORT` | the hooks | Port for the non-docker form |
+| `HYDRA_AUTOPILOT_SLOT_EVENTS_STREAM` | hooks and tests | Stream name. The Turn Snapshot does not read it: `GET /autopilot/slot-events` hard-codes the production stream name server-side so a narrow autopilot read never becomes a general Redis-stream proxy |
+| `HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID` | `turn.sh` | Cursor for each turn's read. `turn.sh` exports it from `state.slot_events_last_id` so the first turn cannot replay a prior run's stream tail; `turn-snapshot.ts` stays stateless |
+| `HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT` | the collector | Max events per read batch |
+| `HYDRA_AUTOPILOT_SLOT_EVENTS_MAXLEN` | the hooks | `XADD MAXLEN ~` cap |
+| `HYDRA_AUTOPILOT_SUBAGENT_MAX_WALL_SECONDS` | `decide.py` | Silent-wedge fallback cap |
+| `HYDRA_AUTOPILOT_DAILY_SPEND_CAP_USD` | bootstrap | Written to `state.limits.daily_spend_cap_usd`; nothing reads it (the spend gate was removed) |
+| `HYDRA_AUTOPILOT_SCOUT_COST_SHARE` | bootstrap | Written to `state.limits.scout_cost_share`; nothing reads it (the spend gate was removed) |
+| `HYDRA_USAGE_5H_THROTTLE_T1` | `src/cost/usage-tracker.ts` | Tier-1 fraction of the 5h window. Once reached on the authoritative OAuth meter (never the transcript estimate), `projectEligibility` sheds the lowest-value pipeline and backfill classes. Inert when the meter reports no 5h window. Set-but-invalid falls back to the default and logs |
+| `HYDRA_USAGE_5H_THROTTLE_T2` | `src/cost/usage-tracker.ts` | Tier-2 fraction. Additionally sheds `design_concept_orch` and `dev_orch`; `qa_*` and `dev_target` are never shed. A value under T1 is clamped up |
+| `HYDRA_EXTRA_USAGE_POLICY` | `src/cost/config.ts` | `block` forces `allow=false` while paid overage is armed (`reasons.extraUsageArmed`); `allow` reports it without folding it into `allow`, for an account whose overage is plan-level and capped. `pace-gate.sh` keys its skip arm off `extraUsageBlocking`. Set-but-invalid falls back to the default and logs |
+| `HYDRA_USAGE_EMERGENCY_STOP_PERCENT` | `src/cost/config.ts` | The 5h and weekly hard-stop threshold, percent of a window's quota in (0, 100], that `deriveHardStop` compares the OAuth meter against. The check runs between dispatches while in-flight subagents keep burning, so keep a margin under 100. Set-but-invalid falls back to the default and logs |
 
-## Merge-rate stabilization history (2026-05 → 2026-06)
+## Reading the two merge-rate metrics
 
-### Reading the two merge-rate metrics
+`GET /api/scheduler/status` exposes two figures. Keep them separate:
 
-`/api/scheduler/status` exposes two distinct figures — keep them separate:
-
-| Field | Formula | What it means |
+| Field | Formula | Use |
 |---|---|---|
-| `mergeRate` | merged / cyclesInWindow (last N=50) | **The health signal.** Current operational health; use this to judge whether the autopilot is working. |
-| `mergeRateLifetime` | cyclesMerged / cyclesRun (all time) | **Audit-only accumulator.** Permanently skewed by past failures; introduced by #232 precisely because it cannot reflect current health. Never alert on this metric. |
+| `mergeRate` | merged / cyclesInWindow (rolling window) | The health signal. Alert on this one, and treat a sustained drop as a reason to investigate. |
+| `mergeRateLifetime` | cyclesMerged / cyclesRun (all time) | Audit-only accumulator. Early failures skew it permanently, so it cannot reflect current health. Never alert on it. |
 
-As of 2026-06-25 the live counters read: `mergeRate=96%` (window 50),
-`mergeRateLifetime=17%`. **This is the healthy steady state.** A high rolling
-rate alongside a low lifetime rate means the system recovered; it does NOT
-signal an ongoing problem.
-
-> **Accounting identity caveat.** `cyclesRun` (7557) exceeds
-> `cyclesMerged + cyclesFailed + cyclesUnaccounted` (6957) by ~600. Those
-> ~600 cycles predate the `cyclesUnaccounted` counter introduced in #1919 /
-> #2150 — they were housekeeping/no-op era cycles that were never bucketed
-> and permanently inflate the lifetime denominator. The identity holds only
-> for cycles recorded after those PRs merged.
-
-### What broke, how it was fixed
-
-The high historical failure count is the sum of several compounding issues
-fixed across spring/summer 2026. The most impactful clusters, in order of
-root-cause severity:
-
-**1. Autopilot runs hung and were never reaped (2026-05, #711)**
-`claude -p /hydra-autopilot` logged `run complete` but the process was never
-reaped — systemd stuck in `activating (start)` blocked every subsequent
-pace-gate launch. Fix: `fix(autopilot): reap hung runs (Type=exec) +
-force-exit test lesson (#711)`. This was the single largest failure multiplier:
-all cycles dispatched after a hung run failed silently.
-
-**2. CI cancelled in-progress master merges (2026-05, #760)**
-`cancel-in-progress: true` in `ci.yml`'s `concurrency` block caused back-to-back
-pushes to master to cancel each other's deploy. Two rapid merges could leave
-prod stale and the second merge's CI red. Fix: `fix(ci): don't cancel
-in-progress master CI runs (closes #712) (#760)` — scoped the cancel to
-non-master refs only.
-
-**3. QA false-greened on QUEUED status (2026-05, #769)**
-`qa-verdict.ts` compared GitHub's UPPERCASE enum strings case-sensitively; a
-`QUEUED` check appeared as not-completed, causing the verdict to pass a PR
-before CI finished. Fix: `fix(qa): case-insensitive CI status matching (#769)`.
-
-**4. Scope-check blocked valid in-scope files (2026-06, #837 + #1873)**
-`scope-check.ts` short-circuited on code-spans before reading bullet-list
-paths, and later hard-failed when a code-span in out-of-scope prose matched an
-in-scope file. Both caused CI to eject valid PRs. Fixes: `fix(scope-check):
-union code-span + bullet Files-in-scope (#837)` and `fix(scope-check): in-scope
-wins over incidental out-of-scope code-span (#1873)`.
-
-**5. Stale-claim reaper was mis-routing merged work (2026-06, #1758 + #2085)**
-`reapStaleClaims()` had an open-PR guard but no merged-PR guard: when an agent
-merged its PR and died before releasing its backlog claim, the reaper re-queued
-the work as `queued` instead of `done`, causing duplicate dispatches. A separate
-path silently moved reconciled items to `done` when the PR matched only by
-fuzzy-token rather than issue-ref. Fixes: `fix(reaper): merged-PR guard (#1758)`
-and `fix(backlog): escalate unconfirmable stale claims to blocked (#2085)`.
-
-**6. Worktree write-fence blocked valid in-worktree edits (2026-06, #2371)**
-~16 cross-run friction hits: a redundant `EnterWorktree` call desynced the
-harness's writable-root anchor from the agent's cwd, causing in-cwd Edits to be
-denied. This stalled or aborted dev cycles. Fix: `docs(playbooks): EnterWorktree
-anchor contract (#2372)` — preventive playbook rule, no code change needed.
-
-**7. Agent-tool subagents were not registered (2026-06, #2412)**
-The `SessionStart` hook that populated `hydra:dispatches:subagent:*` never fires
-for `Agent`-tool dispatches; as a result slot accounting was blind to running
-subagents, causing double-dispatches and silent capacity waste. Fix:
-`fix(autopilot): register Agent-tool subagents via PostToolUse hook (#2412)`.
-
-### Confidence that the recovery is sustained
-
-- `mergeRate=96%` over the last 50 cycles (as of 2026-06-25); no consecutive
-  errors; `lastError=null`.
-- The seven failure modes above are each closed by a discrete, tested fix — not
-  configuration changes that could drift.
-- Structural guards added: atomic Lua lane transitions (#2160), merged-PR guard
-  in reaper (#1758), scope-check tiebreaker (#1873), and the EnterWorktree
-  anchor contract (#2372) close the recurrence vectors.
-- Monitoring: `GET /api/scheduler/status` → `mergeRate` (rolling window) is the
-  single authoritative health gauge. Any sustained drop below ~80% in the rolling
-  window warrants investigation; `mergeRateLifetime` is informational only and
-  will trend upward very slowly as the denominator is dominated by historical runs.
-
+A high rolling rate beside a low lifetime rate is the healthy steady state: the
+system recovered, and the lifetime denominator is dominated by history.
+`cyclesRun` exceeds `cyclesMerged + cyclesFailed + cyclesUnaccounted` by the
+cycles that predate the `cyclesUnaccounted` counter, so that identity holds only
+for cycles recorded after it landed.
