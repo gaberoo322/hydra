@@ -157,6 +157,7 @@
     "test/target-coupling-check.test.mts": "grandfathered",
     "test/target-design-concept.test.mts": "grandfathered",
     "test/target-qa-verdict.test.mts": "grandfathered",
+    "test/target-reframe.test.mts": "behaviour",
     "test/test-pools.test.mts": "drift-guard",
     "test/taxonomy-classes.test.mts": "behaviour",
     "test/telegram-seam-check.test.mts": "invariant-lint",
