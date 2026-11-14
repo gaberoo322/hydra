@@ -42,7 +42,7 @@ Skips you should expect and leave alone:
 
 The script processes the orchestrator repo, then the Target workspace resolved through the target-config seam; an unresolved Target skips that pass with a warning and still exits 0. The report is appended to `$HYDRA_BRANCH_PRUNE_LOG` (default `/tmp/hydra-branch-prune.log`).
 
-Exit codes: 3 inside a worktree, 127 missing `jq` or `npx`, 4 classifier produced no output (before any deletion), 1 if any per-branch deletion failed (the rest still ran).
+Exit codes: 0 on success, including per-branch deletion errors (logged as a WARNING and retried next run); 1 when a pass hard-failed (worktree refusal or classifier produced no output; the log line says which); 127 when `jq` or `npx` is missing; 2 for an unknown argument.
 
 ## Rules
 
