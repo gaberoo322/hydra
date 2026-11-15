@@ -28,7 +28,7 @@ Counter controls tier:
 - Limit to 0–2 new issues per iteration
 - Tier 1+2 < 3 min; Tier 3 adds up to 5 min via subagents
 - Never create vague issues without quantitative evidence
-- Target-project findings are out of scope here: log them in the summary and leave filing to `hydra-target-discover`, which files `needs-triage` issues on the Target board (the `target-backlog` sweep lane is deleted)
+- Target-project findings are out of scope here: log them in the summary and leave filing to `hydra-target-discover`, which files `needs-triage` issues on the Target board
 
 ## Tier 1: Runtime (every iteration, parallel)
 
@@ -37,7 +37,6 @@ hydra metrics --count 50
 hydra scheduler status
 hydra health
 hydra raw GET "/autopilot/board-state?scope=target" | jq -r 'if .degraded then "board-state: degraded (gh read failed)" else "ready_for_agent=\(.ready_for_agent) needs_qa=\(.needs_qa) needs_triage=\(.needs_triage) needs_research=\(.needs_research) in_progress=\(.in_progress) blocked=\(.blocked)" end'
-docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:work-queue
 systemctl --user list-units --type=service --state=failed 2>/dev/null | grep hydra
 journalctl --user -u hydra-orchestrator.service --since "10 min ago" --no-pager 2>/dev/null | tail -80
 docker ps --filter name=hydra --format "{{.Names}}: {{.Status}}" 2>/dev/null
@@ -45,11 +44,11 @@ docker ps --filter name=hydra --format "{{.Names}}: {{.Status}}" 2>/dev/null
 
 Check: service down/unhealthy, redis disconnected, scheduler errors >0, failed units, log errors/panics, container restarts.
 
-### Container-health evidence rule (issue #1755 — MANDATORY before filing)
+### Container-health evidence rule (MANDATORY before filing)
 
-A `docker ps` status string is a *lead*, not evidence — transcribed or misread
-status strings filed a false unhealthy-but-serving bug against a container that
-was healthy the whole time (#1755). Before filing ANY container-health finding:
+A `docker ps` status string is a *lead*, not evidence — a transcribed or misread
+status string can describe a container that was healthy the whole time. Before
+filing ANY container-health finding:
 
 1. **Capture machine evidence in the same diagnostic pass** — embed the
    verbatim output of:
@@ -87,27 +86,25 @@ Alerts:
 - Overall empty rate >25% → performance finding
 - Unclassified-anchor **fixable** rate >10% → architectural finding (a genuine
   classifier/attribution gap the pipeline could close; drill into the offending
-  cycleIds below). Issue #3602: key the trigger on `fixableRate`, NOT the total
+  cycleIds below). Key the trigger on `fixableRate`, NOT the total
   `rate` — the total conflates fixable gaps with structurally-undecodable harness
   noise (`no-attribution`) that no classifier change can attribute.
 
-### Class-liveness evidence rule (issue #4392 — MANDATORY before filing any "class X is dark / 0 dispatches" finding)
+### Class-liveness evidence rule (MANDATORY before filing any "class X is dark / 0 dispatches" finding)
 
 Cycle-derived distributions structurally CANNOT show producer classes. Only
-skills with `cycleRecord: true` in classes.json (hydra-dev, hydra-target-build,
-hydra-grill) write cycle-records, so `GET /api/metrics`
-(`stats.anchorDistribution`, `trend`) and the retro bundle's
-`crossRunTrend.byClass` are blind to discover/architecture/cleanup/scout/retro
-(and the qa/research pipeline classes) *by design* — no matter how often they
-dispatch. This blind spot filed three false "producers dark" alarms (#3752,
-#4302, #4388 — in the #4388 window the "dark" classes had dispatched 21 times
-in 12h).
+classes with `cycleRecord: true` in `scripts/autopilot/classes.json` write
+cycle-records, so `GET /api/metrics` (`stats.anchorDistribution`, `trend`) and
+the retro bundle's `crossRunTrend.byClass` are blind to every other class
+(discover, architecture, cleanup, scout, retro, research, …) *by design* — no
+matter how often they dispatch.
 
-1. **Class liveness comes from `GET /api/autopilot/runs` (`turns[].actions[]`),
+1. **Class liveness comes from `GET /api/autopilot/runs/<run_id>`
+   (`turns[].actions[]`; take `run_id` from the `GET /api/autopilot/runs` list),
    never from cycle-derived distributions.** A class absent from
    `anchorDistribution` / `crossRunTrend.byClass` is *not in that ledger*, not
    idle.
-2. **Both views now label the blind spot themselves**: read
+2. **Both views label the blind spot themselves**: read
    `coverage.classesNotRecorded` on `/api/metrics` and on
    `crossRunTrend.coverage` — the classes it lists are the ones the view can
    never carry. A liveness finding about a listed class MUST cite run-state
@@ -116,8 +113,7 @@ in 12h).
    see producer tokens — use it for spend questions, never for dispatch-count
    liveness.
 
-**Unclassified-residue drill-down (issue #3403 instrumentation, exposed #3443;
-#3602 sub-bucket split).** When the anchor-type breakdown shows an `unclassified`
+**Unclassified-residue drill-down.** When the anchor-type breakdown shows an `unclassified`
 bucket, root-cause it by pulling the offending cycles' attribution metadata —
 each carries the `cycleId` and, where the writer forwarded one, the `prNumber`
 you can trace back to a specific PR:
@@ -134,13 +130,12 @@ percentage that is `fixable` — **the number the >10% architectural trigger key
 on.** Each `unclassified` entry carries a `classification`:
 
 - `fixable` — the cycle's `worktreeBranch` head ref DOES decode to a real lane via
-  the never-guess parser, but the stored anchorType is still the sentinel (the
-  #3602 Shape-B first-write timing gap the #3604 write-path heal closes). A
+  the never-guess parser, but the stored anchorType is still the sentinel. A
   persistent `fixable` residue is a real gap worth a finding.
 - `no-attribution` — neither the cycleId nor the branch carries a decodable class
-  token (#3602 Shapes A/C: bare UUID + descriptive/longhash branch,
-  `autopilot-<hash>-t{N}`, bare `worktree-agent-<longhash>`). Structurally
-  undecodable BY DESIGN under the #2822 never-guess invariant — inherent harness
+  token (bare UUID + descriptive/longhash branch, `autopilot-<hash>-t{N}`, bare
+  `worktree-agent-<longhash>`). Structurally undecodable BY DESIGN under the
+  never-guess invariant — inherent harness
   noise. Do NOT file an architectural finding on `no-attribution` residue; the
   only honest fix is producer-side (emit an explicit anchorType at reap), a
   separate larger change.
@@ -148,16 +143,15 @@ on.** Each `unclassified` entry carries a `classification`:
 File an architectural finding only when `fixableRate` crosses 10% or the residue
 reflects a NEW undecodable id shape.
 
-### 2a-impact. Outcome-impact ranking — the reverse loop (issue #3283)
+### 2a-impact. Outcome-impact ranking — the reverse loop
 
 The 2a breakdown above is **notice-based**: it ranks anchor types by what agents
 *observe* (empty rate, merge rate, duration). This step adds the missing
 **impact-based** signal — what actually *moved outcomes* — so discovery steers
-toward high-impact areas, not merely high-notice ones (epic #2628 finding #6:
-"discovery is self-referential").
+toward high-impact areas, not merely high-notice ones.
 
 Read the outcome-attribution spine's impact ranking — the ridge estimator's
-per-metric marginal effects (#2630) folded across every leading metric, oriented
+per-metric marginal effects folded across every leading metric, oriented
 by each metric's direction into a *favorable* effect and divided by a tier cost
 proxy:
 
@@ -183,8 +177,8 @@ How to use it:
 - **A high-`impactPerCost`, non-suspect producer class** is a *high-leverage
   area*: when you file a finding that touches that class's code path, cite the
   impact delta as justification ("high outcome delta per cost", not just "noticed
-  a pattern"). This is the primary success criterion of #3283 — at least one
-  discovery candidate per 3 iterations should be impact-justified.
+  a pattern"). At least one discovery candidate per 3 iterations should be
+  impact-justified.
 - **A low/negative-`impactPerCost` producer class that is ALSO high-notice** (high
   cycle count / cost) is a *waste candidate*: work is flowing there but not
   moving outcomes — a stronger finding than notice alone.
@@ -199,14 +193,10 @@ Alerts:
 - Cost/merge >$5 → efficiency finding
 - Empty-cycle cost >30% of total → waste finding
 
-### 2c. Backlog & queue health
-```bash
-docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:processing
-docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:prior-failures
-docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:reframe-queue
-```
+### 2c. Backlog health
+From the Tier 1 board-state counts, compared across iterations.
 
-Alerts: processing >0 when no cycle running (crash recovery), prior_failures >5, reframe >3, work_queue growing across iterations.
+Alerts: `blocked` or `needs_triage` growing across iterations with `ready_for_agent` at 0.
 
 ## Tier 3: Codebase deep dive (every 3rd iteration)
 
@@ -217,7 +207,7 @@ Only investigate areas Tier 1+2 flagged. Skip if nothing flagged.
 ### 3a. Targeted source analysis
 
 Map findings to files:
-- High empty cycles → `scripts/autopilot/decide.py` (anchor selection; the old `src/` selection and planner-prompt modules were deleted, ADR-0036)
+- High empty cycles → `scripts/autopilot/decide.py` (what gets dispatched each turn)
 - Recurring scope creep → `scripts/ci/scope-check.ts`
 - Verification failures cluster → `scripts/ci/qa-verdict.ts`
 - High cost → `scripts/autopilot/classes.json` (per-class model routing)
@@ -226,8 +216,7 @@ Look for: files >500 lines, functions >100 lines, stale TODOs, stale `// intenti
 
 ### 3b. Cross-module coupling
 ```bash
-grep -r "redis\.\(hset\|hget\|lrange\|zadd\|del\|get\|set\)" ~/hydra/src/ --include="*.ts" -l | wc -l
-grep -r "from.*task-tracker" ~/hydra/src/ --include="*.ts" -l | wc -l
+npx tsx -e "import('/home/gabe/hydra/src/aggregators/repo-graph.ts').then(m => m.getCouplingReport().then(r => { process.stdout.write(r); process.exit(0); })).catch(e => { console.error(e); process.exit(1); });"
 wc -l ~/hydra/src/*.ts | sort -rn | head -10
 ```
 
@@ -253,7 +242,7 @@ Gather the **shared backfill dedup baseline** — open issues across EVERY
 backfill label set + issues closed in the last 7 days — then run each candidate
 through the SAME deterministic helper `hydra-architecture-scan` uses, so the two
 classes that co-fire on `orch_backfill_idle` can't disagree at the margin and
-double-file the same finding (issue #2554):
+double-file the same finding:
 
 ```bash
 # Open issues across the WHOLE backfill set — NOT just discover's own
@@ -261,11 +250,9 @@ double-file the same finding (issue #2554):
 # `architecture-scan`); cleanup_orch (label `cleanup-scan`) co-fires too. All
 # three plus generic `enhancement` belong in the baseline so discover sees what
 # architecture-scan / cleanup just filed THIS idle window.
-# Guard-compatible form (issue #3896): the worktree-isolation Bash guard refuses
-# the original process-substitution form `mapfile -t X < <(...)`. Write each
-# `gh issue list` call to the temp file (sequential `>` then `>>`), then
-# `mapfile` from the file path — identical BASELINE_TITLES contents. See
-# "Guard-compatible shell forms" in _fragments/hydra-dev-parent-flow.md.
+# Temp-file form, not process substitution: the worktree-isolation Bash guard
+# refuses `mapfile -t X < <(...)`. See "Guard-compatible shell forms" in
+# _fragments/hydra-dev-parent-flow.md.
 BASELINE_TMP=$(mktemp)
 gh issue list --state open --json number,title \
   --jq '.[] | .title' > "$BASELINE_TMP"
@@ -282,19 +269,17 @@ node --experimental-strip-types scripts/ci/issue-dedup.ts \
 ```
 
 `isDuplicateIssue` (`scripts/ci/issue-dedup.ts`) keys on normalised word-set
-Jaccard overlap >50% — the historical "word overlap >50% → SKIP" rule, now a
-shared, testable function instead of an eyeball. `duplicate: true` → SKIP or
+Jaccard overlap >50%. `duplicate: true` → SKIP or
 COMMENT on the matched existing issue. After you decide to FILE a candidate,
 append its title to `$BASELINE_TITLES` before checking the next so two findings
 within THIS run also dedup against each other. The
 **`hydra-discover` ↔ `hydra-architecture-scan` co-fire on `orch_backfill_idle`
-is the primary motivating collision** this baseline closes — see the
-**Backfill dedup baseline** note in `hydra-autopilot.md`.
+is the primary collision** this baseline closes.
 
 ### Issue formats
 
 All three formats stamp the `Source: …` provenance footer from the shared
-helper (`scripts/hydra/footer.sh`, issue #2556). It is composed OUTSIDE the
+helper (`scripts/hydra/footer.sh`). It is composed OUTSIDE the
 single-quoted heredoc so the `<<'EOF'` injection-safety quoting is preserved
 (the helper expands the live timestamp; the heredoc body stays literal). Source
 the lib once at the top of the dispatch, then call `hydra_issue_footer
@@ -373,7 +358,7 @@ Tier 3:
 - `~/hydra/docs/adr/` — don't contradict existing ADRs
 - `~/hydra/config/direction/architecture-review.md` — baselines, known issues
 
-## Slot lifecycle events — PostToolUse hook (issue #671)
+## Slot lifecycle events — PostToolUse hook
 
 Every tool call inside this skill emits a `subagent_tool_call` event onto the
 Redis stream `hydra:autopilot:slot-events`. The classification is done at
