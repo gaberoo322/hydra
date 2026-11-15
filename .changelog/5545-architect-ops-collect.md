@@ -1,0 +1,1 @@
+- refactor: hydra-architect evidence collection moves from inline python/redis-cli into a tested ops-collect CLI (#5545)
