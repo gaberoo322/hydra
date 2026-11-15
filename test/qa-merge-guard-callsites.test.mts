@@ -611,8 +611,8 @@ describe("retired playbooks (issue #5493)", () => {
       join(ROOT, "docs", "adr", "0025-target-operate-layer-single-realm-incident-skill.md"),
       "utf8",
     );
-    const amendment = adr.slice(adr.indexOf("## Amendment (2026-11, #5493)"));
-    assert.ok(amendment.includes("#5493"), "amendment cites #5493");
+    const amendment = adr.split("## Amendment (2026-11, #5493)")[1] ?? "";
+    assert.ok(amendment.length > 0, "amendment heading cites #5493");
   });
 });
 
