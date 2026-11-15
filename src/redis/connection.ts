@@ -65,6 +65,7 @@ interface RedisCommands {
     ...args: (string | number | Buffer)[]
   ): Promise<unknown>;
   info(...sections: (string | Buffer)[]): Promise<string>;
+  dbsize(): Promise<number>;
   incrby(key: RedisKey, increment: number | string): Promise<number>;
   hlen(key: RedisKey): Promise<number>;
   hkeys(key: RedisKey): Promise<string[]>;
