@@ -355,4 +355,44 @@ describe("issue #4608 — operator tooling resolves the Target through the seam,
       assert.ok(Object.hasOwn(COLLECTORS, name), `"${name}" is a collector the CLI ships`);
     }
   });
+
+  const digest = readRepoFile("docs/operator-playbooks/hydra-digest.md");
+  const digestRequested = [...digest.matchAll(/ops-collect\.ts --collectors ([a-z,-]+)/g)].flatMap((m) => m[1].split(","));
+  const digestShellBlocks = [...digest.matchAll(/^```bash\n([\s\S]*?)^```$/gm)].map((m) => m[1]);
+
+  test("hydra-digest.md reads every signal through one ops-collect invocation, each collector requested once", () => {
+    const calls = [...digestShellBlocks.join("\n").matchAll(/ops-collect\.ts/g)].length;
+    assert.equal(calls, 1, `one ops-collect call across the command blocks, found ${calls}`);
+    const invocations = [...digest.matchAll(/ops-collect\.ts --collectors /g)].length;
+    assert.equal(invocations, 1, `one ops-collect invocation, found ${invocations}`);
+    assert.equal(new Set(digestRequested).size, digestRequested.length, `no collector is requested twice: ${digestRequested.join(",")}`);
+    for (const name of digestRequested) {
+      assert.ok(Object.hasOwn(COLLECTORS, name), `"${name}" is a collector the CLI ships`);
+    }
+    for (const name of ["cycles", "cost-by-class", "board", "alerts", "today", "target-git", "kill-chain", "reframe-saves"]) {
+      assert.ok(digestRequested.includes(name), `"${name}" comes from the collector CLI`);
+    }
+  });
+
+  test("hydra-digest.md holds no inline parsing, no container shell-out and no Target shell state", () => {
+    assert.doesNotMatch(digest, /\bjq\b/, "no jq field extraction");
+    assert.doesNotMatch(digest, /python3/, "no inline python");
+    assert.doesNotMatch(digest, /docker exec|redis-cli/, "no container shell-out");
+    assert.doesNotMatch(digest, /\$\{?TARGET_[A-Z_]+/, "no Target shell variable");
+    assert.doesNotMatch(digest, /print-target-facts/, "the Target is resolved by the collector CLI, not in the playbook");
+    assert.doesNotMatch(digest, /hydra:anchors:/, "no read of an anchor queue that has no writer");
+
+    assert.ok(digestShellBlocks.length > 0, "the playbook names its commands");
+    for (const block of digestShellBlocks) {
+      assert.doesNotMatch(block, /\$\(|`/, `command substitution in:\n${block}`);
+      assert.doesNotMatch(block, /\b(for|while|until|if|case|do|done)\b/, `control flow in:\n${block}`);
+      assert.doesNotMatch(block, /(?<!\|)\|(?!\|)/, `pipeline in:\n${block}`);
+      assert.doesNotMatch(block, /\bcurl\b|\bgh /, `a read that bypasses the collector CLI in:\n${block}`);
+      for (const line of block.split("\n").filter((l) => l.trim() !== "")) {
+        assert.match(line, /^(cd ~\/hydra && npx tsx scripts\/ops-collect\.ts |git -C ~\/hydra log )/, `only the collector call and the orchestrator git log are allowed, found: ${line}`);
+      }
+      assert.doesNotMatch(block, /^\s*[A-Za-z_]+=/m, `variable assignment in:\n${block}`);
+      assert.doesNotMatch(block, /<<|\b(awk|sed|cut|xargs|date)\b/, `heredoc or text reshaping in:\n${block}`);
+    }
+  });
 });
