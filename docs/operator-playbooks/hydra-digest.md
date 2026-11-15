@@ -16,191 +16,36 @@ Concise summary of recent Hydra system activity. Aggregates cycle metrics, test 
 
 ## Process
 
-### 1. Collect (parallel)
+### 1. Collect
 
 ```bash
-CYCLE_COUNT=50  # tune to period
-
-hydra metrics --count $CYCLE_COUNT
-# Per-class token attribution (24h) — transcript-sourced rollup. Re-sourced in
-# #3752 off the ~13%-coverage dispatch surrogate onto the transcript-scan 24h
-# cross-tab, so per-class fractions are a true share of REAL burn across ALL
-# sessions (interactive operator sessions + the autopilot parent loop + reaped
-# subagents) — NOT the reaped-subagent-only slice the prior read used. The
-# `source` field discriminates the arms; the default (no-date) read returns
-# `transcript-24h`. Never rank classes on a `dispatch-surrogate` (historical
-# ?date=) result — its coverage is ~13%.
-hydra raw GET '/metrics/cost-by-class' 2>/dev/null
-hydra scheduler status
-# `hydra backlog ls` (Redis kanban) was retired by ADR-0031 (#3439, PR
-# #3455) — `hydra backlog` is now a retired stub (issue #3745). Board flow
-# is GitHub Issues on gaberoo322/hydra:
-gh issue list --repo gaberoo322/hydra --state open --limit 200 \
-  --json labels --jq '[.[] | .labels[].name] | group_by(.) | map({(.[0]): length}) | add'
-docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:work-queue
-
-# Target commits -- resolved via the Target seam, never a literal checkout path.
-unset TARGET_WS TARGET_APP_DIR
-eval "$(cd ~/hydra && npx tsx scripts/target/print-target-facts.ts --sh)"
-if [ -n "${TARGET_WS:-}" ]; then git -C "${TARGET_WS:?}" log --oneline --since="24 hours ago"; else echo "Target unresolved -- skipping Target commits"; fi
-cd ~/hydra && git log --oneline --since="24 hours ago"
-
-hydra alerts ls --limit 20
-
-docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:prior-failures
-docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:reframe-queue
-
-gh issue list --repo gaberoo322/hydra --state all --json number,title,state,closedAt,createdAt \
-  --jq '[.[] | select(.createdAt > "'$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)'" or .closedAt > "'$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)'")] | length'
+cd ~/hydra && npx tsx scripts/ops-collect.ts --collectors cycles,cost-by-class,scheduler,board,alerts,today,target-git,kill-chain,reframe-saves --window-hours 24 --count 50 2>/dev/null
+git -C ~/hydra log --oneline --since="24 hours ago"
 ```
 
-#### Kill-chain observability (dead-code kill-chain epic #2720)
+Set `--window-hours` and `--since` to `$period` (`7d` is 168 hours) and raise `--count` for a longer period. The first command prints one JSON document with a result per collector; field meanings: `npx tsx scripts/ops-collect.ts --help`. It always exits 0.
 
-Three read-only signals surface the direct value of the dead-code kill-chain: the
-wiring-ledger trend, the deadcode-baseline totals, and the **reframe-save count** —
-each reframe-save is a grounding-preflight STOP that prevented a doomed build cycle,
-so the count is the token-savings receipt this epic exists for. No new attribution
-machinery: cross-class value attribution belongs to the Outcome Attribution Spine
-(#2628). Every signal degrades to an explicit `n/a` line on missing input — a
-stale/absent ledger must never blank the rest of the digest.
-
-```bash
-# (1) Wiring-ledger trend + soft SLO (Target's committed ledger + deadcode baseline).
-# Read-only: parse the committed markdown/JSON, NEVER regenerate (regeneration is a
-# Target-side `npm run deadcode:ledger` concern, not the digest's).
-# The Target is resolved through the target-config seam (print-target-facts.ts JSON
-# mode, issue #4553) — never a literal. JSON mode exits 1 on a manifest failure but
-# still prints .workspace, so capture stdout regardless of the exit code (`|| true`).
-# An unresolvable workspace leaves LEDGER/BASELINE empty → the explicit n/a lines
-# below; this block never aborts the digest (no fail-closed --sh preamble here).
-TARGET_FACTS_JSON=$(cd "$HOME/hydra" && npx tsx scripts/target/print-target-facts.ts 2>/dev/null || true)
-WS=$(printf '%s' "$TARGET_FACTS_JSON" | jq -r '.workspace // empty' 2>/dev/null || true)
-APP_SUBDIR=$(printf '%s' "$TARGET_FACTS_JSON" | jq -r '.manifest.appSubdir // ""' 2>/dev/null || true)
-LEDGER=""; BASELINE=""
-if [ -n "$WS" ]; then
-  LEDGER="$WS/docs/agents/wiring-status.md"
-  BASELINE="$WS/${APP_SUBDIR:+$APP_SUBDIR/}deadcode-baseline.json"
-fi
-python3 - "$LEDGER" "$BASELINE" <<'PY'
-import sys, os, re, json, datetime
-ledger_path, baseline_path = sys.argv[1], sys.argv[2]
-GRACE_DAYS = 45          # wire-or-retire grace window (matches the Target ledger renderer)
-SLO_DAYS   = 30          # soft SLO: days a module may sit wire-or-retire past grace w/o a verdict
-today = datetime.date.today()
-
-# Deadcode baseline totals (JSON produced by the Target's deadcode ratchet).
-if os.path.exists(baseline_path):
-    b = json.load(open(baseline_path))
-    print("deadcode-baseline:",
-          f"unusedExports={b.get('unusedExports','?')}",
-          f"unreachableProductionFiles={b.get('unreachableProductionFiles','?')}",
-          f"testOnlyModules={b.get('testOnlyModules','?')}",
-          f"orphanModules={b.get('orphanModules','?')}")
-else:
-    print("deadcode-baseline: n/a (deadcode-baseline.json absent)")
-
-# Wiring-ledger: count by status + oldest past-grace wire-or-retire age + soft-SLO breaches.
-if not os.path.exists(ledger_path):
-    print("wiring-ledger: n/a (wiring-status.md absent)")
-    print(f"soft-SLO(>{SLO_DAYS}d wire-or-retire past grace, no verdict): n/a")
-    sys.exit(0)
-
-# Same strict row parse as scripts/ci/hydra-target-wire-or-retire-emit.ts::parseLedger.
-rows = []
-for line in open(ledger_path):
-    m = re.match(r'^\|\s*`([^`]+)`\s*\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|\s*$', line)
-    if m:
-        rows.append({"path": m.group(1).strip(), "status": m.group(2).strip(),
-                     "lastTouched": m.group(4).strip()})
-wor = [r for r in rows if r["status"] == "wire-or-retire"]
-aw  = [r for r in rows if r["status"] == "awaiting-wiring"]
-pp  = [r for r in rows if r["status"] == "protected-provider"]
-print(f"wiring-ledger: {len(rows)} modules | "
-      f"wire-or-retire={len(wor)} awaiting-wiring={len(aw)} protected-provider={len(pp)}")
-
-def past_grace_days(last_touched):
-    """Days a module has sat wire-or-retire = age-since-last-touch minus the 45-day grace.
-    A blank/unparseable date yields None (age unknown — never flagged)."""
-    try:
-        d = datetime.date.fromisoformat(last_touched)
-    except ValueError:
-        return None
-    return (today - d).days - GRACE_DAYS
-
-ages = [(past_grace_days(r["lastTouched"]), r["path"]) for r in wor]
-ages = [(a, p) for a, p in ages if a is not None]
-if ages:
-    oldest = max(ages)
-    print(f"oldest wire-or-retire past-grace age: {oldest[0]}d ({oldest[1]})")
-else:
-    print("oldest wire-or-retire past-grace age: n/a")
-
-# (2) Soft SLO — surfaced-only, NEVER CI-blocking (staleness must not punish an
-# unrelated PR). A wire-or-retire module >30 days past grace still on the ledger is a
-# stale-decision flag: the wire-or-retire triage verdict is overdue.
-breaches = sorted(((a, p) for a, p in ages if a > SLO_DAYS), reverse=True)
-if breaches:
-    print(f"soft-SLO BREACH: {len(breaches)} wire-or-retire module(s) >{SLO_DAYS}d past grace without a verdict:")
-    for a, p in breaches[:5]:
-        print(f"  {a}d past grace — {p}")
-else:
-    print(f"soft-SLO: clean (no wire-or-retire module >{SLO_DAYS}d past grace without a verdict)")
-PY
-
-# (3) Reframe-save count over the period — each is a prevented doomed build cycle.
-# target:reframe-save events land on the hydra:notifications stream (POST /events/publish,
-# src/api/events.ts). readRecent's `id` field is NOT a Redis stream ms-seq id — it is a
-# randomUUID() (see #3937), so it can never be used to window by age. Window on the
-# envelope's ISO `timestamp` field instead; an event with a missing/unparseable timestamp
-# is EXCLUDED from the period count (fail closed), never counted by default (#3940).
-SINCE_MS=$(( $(date -u -d '24 hours ago' +%s) * 1000 ))   # tune to $period
-hydra raw GET '/events/notifications?count=500' 2>/dev/null | python3 -c "
-import json, sys
-from datetime import datetime
-since_ms = int('$SINCE_MS')
-try:
-    events = json.load(sys.stdin)
-except Exception:
-    print('reframe-saves: n/a (notifications stream unreadable)'); sys.exit(0)
-if not isinstance(events, list):
-    print('reframe-saves: n/a (notifications stream unreadable)'); sys.exit(0)
-saves = []
-undateable = 0
-for e in events:
-    if e.get('type') != 'target:reframe-save':
-        continue
-    ts = e.get('timestamp')
-    if not ts:
-        undateable += 1
-        continue  # missing timestamp — fail closed, excluded from the period count
-    try:
-        dt = datetime.fromisoformat(str(ts).replace('Z', '+00:00'))
-    except ValueError:
-        undateable += 1
-        continue  # unparseable timestamp — fail closed, excluded from the period count
-    ms = int(dt.timestamp() * 1000)
-    if ms >= since_ms:
-        saves.append(e)
-print(f'reframe-saves (period): {len(saves)} prevented doomed build cycle(s)')
-if undateable:
-    print(f'reframe-saves undateable (excluded): {undateable}')
-for e in saves[:5]:
-    p = e.get('payload', {})
-    print(f\"  {p.get('anchorRef','?')} — {str(p.get('reason','?'))[:80]}\")
-"
-```
+- A result with `ok: false` has no data: print `n/a (<code>: <reason>)` for the rows it feeds and keep going. One missing collector never blanks the rest of the digest.
+- `target.resolved: false` is worth a line under Operator Actions Needed; the Target collectors are then `skipped`.
+- The collector reads committed Target files and never regenerates the wiring ledger.
 
 ### 2. Compute
 
-For each cycle in period:
-- merged = `tasksMerged > 0`
-- failed = `tasksFailed > 0`
-- empty = title starts with "Planner produced no task" or "Skipped:"
-- cost = `costUsd`
-- test_delta = `testsAfter - testsBefore`
-- anchor_type
+Every number comes from a collector field; the only arithmetic left is cost per merge (`cycles.totalCostUsd` over `cycles.merged`, `n/a` when the cost is null).
 
-Aggregate: total_cycles, merged_count, failed_count, empty_count, merge_rate, total_cost, cost_per_merge, test_growth, top_anchor_types. Collect merged_titles for highlight reel.
+| Section | Read |
+|---------|------|
+| Headline, Cycle Performance | `cycles`: `cycles`, `merged`, `mergeRatePct`, `failed`, `totalCostUsd`, `anchors` |
+| Per-class cost | `cost-by-class`: `source`, `classes` |
+| Test Suite | `cycles`: `testsFirst`, `testsLast`, `testsDelta` |
+| What Was Built | `today.merges`, `target-git.commitSample`, the `git log` lines |
+| What Failed | `cycles`: `failed`, `abandoned`, the non-merged entries of `recent`, `repeatedTasks` |
+| Backlog Flow | `board.byLabel` (`board.truncated` makes every count a floor) |
+| Kill-chain | `reframe-saves`: `count`, `undateable`; `kill-chain`: `verdict`, `ledger`, `baseline` |
+| Alerts & Issues | `alerts.active`, `today.issuesOpened`, `today.issuesClosed` |
+| Operator Actions Needed | `board.samples` for the blocked and ready-for-human lanes; `scheduler` when `running` is false or `consecutiveErrors` is above 0 |
+
+`cycles.coverage.classesNotRecorded` lists classes that write no cycle record: their absence from the counts is not a zero. Give a failure reason only when the output carries one.
 
 ### 3. Format
 
@@ -216,7 +61,6 @@ Aggregate: total_cycles, merged_count, failed_count, empty_count, merge_rate, to
 | Total cycles | N |
 | Merged | N (X%) |
 | Failed | N |
-| Empty (no task) | N (X%) |
 | Total cost | $X.XX |
 | Cost per merge | $X.XX |
 
@@ -228,16 +72,11 @@ Aggregate: total_cycles, merged_count, failed_count, empty_count, merge_rate, to
 | interactive | N | X% | N |
 | research | N | X% | N |
 | cleanup | N | X% | N |
-<Render from /api/metrics/cost-by-class `byClass`, sorted by tokens desc. Include
-the `interactive` row only when non-zero (operator sessions the autopilot never
-reaped). **Coverage caveat:** the 24h transcript cross-tab sums to the snapshot's
-`tokensLast24h`, so `Share` is a TRUE fraction of real burn across all sessions —
-interactive operator sessions + the autopilot parent loop + reaped subagents.
-This replaced the prior ~13%-coverage dispatch-surrogate read (#3752). If
-`source` reads `dispatch-surrogate` (a historical `?date=` read), coverage drops
-to ~13% — do NOT rank classes on it; re-fetch the default (no-date)
-`transcript-24h` arm. `Quota weight` is 0 when the per-family weight env is
-uncalibrated — read it as a raw-token ranking then, not a quota ranking.>
+<Render from `classes`, which arrives sorted by tokens. Include the `interactive`
+row only when non-zero. With `source` reading `transcript-24h`, `Share` is a true
+fraction of real burn across every session. If `source` reads `dispatch-surrogate`,
+coverage is partial: do NOT rank classes on it. `Quota weight` is 0 when the
+per-family weight is uncalibrated; read the table as a raw-token ranking then.>
 
 ### Test Suite
 | Metric | Value |
@@ -260,19 +99,16 @@ uncalibrated — read it as a raw-token ranking then, not a quota ranking.>
 | `in-progress` | N |
 | `blocked` | N |
 | `needs-qa` | N |
-| Work queue (`hydra:anchors:work-queue`) | N |
-| Prior failures (`hydra:anchors:prior-failures`) | N |
-| Reframe (`hydra:anchors:reframe-queue`) | N |
 
-### Kill-chain (dead-code kill-chain #2720)
+### Kill-chain
 | Signal | Value |
 |--------|-------|
 | Reframe-saves (period) | N prevented build cycle(s) |
 | Wire-or-retire ledger rows | N (oldest Xd past grace) |
 | Deadcode baseline | unusedExports=N · unreachable=N · testOnly=N |
 | Soft SLO (>30d wire-or-retire, no verdict) | clean / N breach(es) |
-<Soft-SLO breaches are surfaced-only — never CI-blocking. Omit this section
-entirely if the ledger and baseline are both absent (n/a on all rows).>
+<Soft-SLO breaches (`kill-chain.verdict` reading `FLAG`) are surfaced-only — never
+CI-blocking. Omit this section entirely when `kill-chain` is skipped.>
 
 ### Priority Progress
 <Compare priorities.md tasks against merged work — which got closer to done?>
@@ -283,7 +119,7 @@ entirely if the ledger and baseline are both absent (n/a on all rows).>
 - GitHub issues closed: N
 
 ### Operator Actions Needed
-<accumulated items needing input — blocked, reframe, ready-for-human>
+<accumulated items needing input — blocked, ready-for-human>
 ```
 
 ### 4. Output
