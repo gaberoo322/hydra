@@ -1,6 +1,6 @@
 ---
 name: hydra-architect
-description: Strategic architecture review of Hydra as an autonomous software building system. Evaluates the dispatch loop, research pipeline, agent quality, autonomy level, and knowledge systems against the operator's vision, then produces ranked recommendations.
+description: Strategic architecture review of Hydra as an autonomous software building system. Evaluates the decision loop, research pipeline, agent quality, autonomy level, and knowledge systems against the operator's vision, then produces ranked recommendations.
 when_to_use: "When the user wants to assess Hydra's architecture, think about system improvements, evaluate the autonomous builder design, or asks 'how can we improve Hydra'."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Agent(*) WebSearch(*) WebFetch(*)
 arguments: [focus]
@@ -103,7 +103,7 @@ Surface specific techniques, not vague advice.
 
 ## Phase 3: Evaluate (8 dimensions, 1-10 each, with evidence)
 
-1. **Dispatch Loop Quality** — merge rate, ceremony overhead, efficiency
+1. **Decision Loop Quality** — merge rate, ceremony overhead, efficiency
 2. **Research → Action Pipeline** — conversion rate, repeated topics, idea death
 3. **Grounding & Verification** — bug categories slipping through, rollback frequency
 4. **Agent Quality** — planner novelty, preflight gate effectiveness (high-risk review catches for risk:high tasks), executor minimalism
