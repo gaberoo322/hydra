@@ -6,44 +6,35 @@ allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) WebFetch(
 arguments: [category]
 ---
 
-# Hydra Tool Scout (Phase A — manual)
+# Hydra Tool Scout
 
 Hydra is an AI-built system. Its long-term throughput is bounded by how legible the world is to its agents: typed schemas beat docstrings, deterministic builds beat heisenbugs, machine-readable spans beat raw stdout. **`hydra-tool-scout` is the skill that goes looking for tools that make Hydra's agents more leveraged**, files structured proposal issues, and remembers what it has already considered so it doesn't re-propose the same tool twice.
 
-Phase A (issue #484) ships the scaffolding only:
-
-1. This playbook (taxonomy of where to look, rubric for what's worth filing, output schema).
-2. The taxonomy doc (`docs/ai-leverage-categories.md`) — the closed list of categories the scout walks.
-3. The rubric doc (`docs/ai-leverage-rubric.md`) — the 1–5 AI-leverage scale, with worked examples.
-4. The Redis seen-list (`src/scout/seen-list.ts`) — so re-runs don't re-propose `react-query` every time.
-5. Manual invocation only — `/hydra-tool-scout <category>`. **No autopilot wiring, no cron.** Phase B adds those, after the operator has confirmed the issue quality on at least one category.
-
-Phase D (gap-driven triggers) is deferred — see the parent epic #483 and the "Out of scope" section below.
+It runs in two modes: by hand (`/hydra-tool-scout <category>`) and from the autopilot's `scout_orch` signal class (calendar mode, cooldown in `scripts/autopilot/classes.json`). The taxonomy (`docs/ai-leverage-categories.md`), the rubric (`docs/ai-leverage-rubric.md`) and the Redis seen-list (`src/scout/seen-list.ts`) are shared by both.
 
 ## When NOT to run this
 
 - Without a category argument. The scout is a depth-first walker, not a breadth-first one — it expects to be pointed at one taxonomy entry per invocation.
 - When the orchestrator board is already saturated with proposal-grade issues (>20 open `enhancement` issues). The operator should drain the queue before adding more.
-- (Phase A only — see Phase B below.) ~~From an autopilot loop.~~ Phase B (issue #485) wires this into the autopilot as the `scout_orch` signal class. The autopilot dispatch passes `trigger: "calendar"` in `prompt_args`; manual invocations still use `trigger: "manual"`.
 
 ## Inputs
 
 | Input | Source | Notes |
 |---|---|---|
 | `category` (positional arg) | Operator | Must be one of the slugs in `docs/ai-leverage-categories.md`. Reject anything else — the rubric is calibrated per category and freeform input would dilute it. |
-| Trigger source | Implicit | Phase A: `"manual"`. Phase B adds `"calendar"`. Phase D will add `"gap"` (the Phase C `"alert"` trigger was retired in #5054). Recorded on every seen-list entry. |
+| Trigger source | Implicit | `"manual"` by hand; `"calendar"` when the `scout_orch` dispatch passes `trigger: "calendar"` in `prompt_args`. The `ScoutTrigger` type also reserves `"gap"`, which nothing emits. Recorded on every seen-list entry. |
 | Seen-list | `hydra:scout:tools-considered:*` | Read before discovery to skip anything in cooldown. |
 
 ## Process
 
-### 0. Resolve category from trigger (Phase B/C)
+### 0. Resolve category from trigger
 
 The skill is invoked in two modes:
 
 1. **Manual** (operator typed `/hydra-tool-scout typed-schemas`) — `category` arg is required.
-2. **Calendar** (`prompt_args: {"trigger": "calendar"}`) — no category arg; call `planWalk()` from `src/scout/calendar-walk.ts` and iterate the eligible list. The walk surface is **categories only** — `planWalk()` no longer emits `dep:<name>` targets (issue #4556: no dependency-walk procedure existed, so they sat un-walked in the eligible set forever; dependency freshness/CVEs are covered by `npm run deps:check` + the OSV scan). After each per-category dispatch, record the outcome via `recordCalendarDispatch(category, outcome, counts, detail)` (in `src/scout/dispatch-audit.ts`) — that one call XADDs the `triggeredBy: "calendar"` audit entry, stamps the per-category cooldown (same key `stampCategoryWalk` writes), and increments the per-day stat counters from the per-candidate counts map (e.g. `{"candidates": 5, "filtered": 2, "filed": 1, "rejected": 3}`) so `/api/scout/stats` sees the activity. The outcome alone never moves a counter — pass the real per-candidate counts. Call `stampClassWalk()` once after the full sweep.
+2. **Calendar** (`prompt_args: {"trigger": "calendar"}`) — no category arg; call `planWalk()` from `src/scout/calendar-walk.ts` and iterate the eligible list. The walk surface is **categories only** — dependency freshness/CVEs are covered by `npm run deps:check` + the OSV scan, not by this walk. After each per-category dispatch, record the outcome via `recordCalendarDispatch(category, outcome, counts, detail)` (in `src/scout/dispatch-audit.ts`) — that one call XADDs the `triggeredBy: "calendar"` audit entry, stamps the per-category cooldown (same key `stampCategoryWalk` writes), and increments the per-day stat counters from the per-candidate counts map (e.g. `{"candidates": 5, "filtered": 2, "filed": 1, "rejected": 3}`) so `/api/scout/stats` sees the activity. The outcome alone never moves a counter — pass the real per-candidate counts. Call `stampClassWalk()` once after the full sweep.
 
-When invoked in calendar mode, the skill MUST record every dispatched target's outcome (filed/dropped/error) with its per-candidate counts. Skipping the bookkeeping leaves the dedup keys stale, the audit trail undercounts, and `/api/scout/stats` shows nothing (issue #4556 — calendar walks were invisible on that endpoint precisely because no path recorded them).
+When invoked in calendar mode, the skill MUST record every dispatched target's outcome (filed/dropped/error) with its per-candidate counts. Skipping the bookkeeping leaves the dedup keys stale, the audit trail undercounts, and `/api/scout/stats` shows nothing.
 
 ### 1. Validate category
 
@@ -64,11 +55,11 @@ Each candidate is a `{ name, slug, homepage, repo, npmName?, oneLineDescription 
 
 ### 3. Filter pipeline (AND-gated criteria)
 
-Each surviving candidate is the *intersection* of the gates below. Fail any → drop from the working set AND record the rejection in the seen-list with `decision: "rejected"` and the failing-gate reason. Gates 1–3 are the original leverage/maintenance/dedup screen; Gate 4 is the **lane-reconciliation screen** added after the 2026-06-13 scout wave filed issues that the implementer had to re-architect or decline downstream (see #1882). The leverage/maintenance/dedup screen is still strictly AND — Gate 4 does not relax it; it shapes HOW a surviving candidate is filed so the implementer doesn't burn a research+correction cycle.
+Each surviving candidate is the *intersection* of the gates below. Fail any → drop from the working set AND record the rejection in the seen-list with `decision: "rejected"` and the failing-gate reason. Gates 1–3 are the original leverage/maintenance/dedup screen; Gate 4 is the **lane-reconciliation screen**. The leverage/maintenance/dedup screen is still strictly AND — Gate 4 does not relax it; it shapes HOW a surviving candidate is filed so the implementer doesn't burn a research+correction cycle.
 
 #### Gate 1: AI-leverage score ≥ 4
 
-Apply the rubric in `docs/ai-leverage-rubric.md`. Score the tool 1–5 against the criteria for **its category** (the rubric is category-aware). Tools scoring 1–3 are rejected. A 4 means "this would noticeably improve agent throughput or safety in a measurable way." A 5 means "agents are currently working around the absence of this tool."
+Apply the rubric in `docs/ai-leverage-rubric.md`. Score the tool 1–5 against the criteria for **its category** (the rubric is category-aware). Tools scoring 1–3 are rejected. A 4 means "this would noticeably improve agent throughput or safety in a measurable way." A 5 means "agents work around the absence of this tool today."
 
 Capture the score, the per-criterion reasoning, and the rubric version (the rubric doc has a `version:` line in its frontmatter — record it so we can re-score historical entries when the rubric changes).
 
@@ -81,9 +72,7 @@ The tool must clear ALL of:
 - No unaddressed CVE in the last release.
 - License compatible with our stack (MIT, Apache-2.0, BSD, MPL, ISC — reject GPL/AGPL/SSPL/BSL).
 
-**Verify the license from the registry, not the README/landing page.** For an npm-distributed tool run `npm view <npmName> license` and stamp the *verified* SPDX value into the issue; for a non-npm tool read the `LICENSE` file in the repo's default branch. The README or marketing site is not authoritative — a 2026-06-13 scout filed Apache-2.0 for `@probelabs/probe` when `npm view` reported ISC, and the implementing dev burned a cycle reconciling it. Record HOW you checked (e.g. `npm view @probelabs/probe license` → `ISC`) in the Maintenance signals block so the dev can trust it without re-checking.
-
-The thresholds are tuned for Phase A — we expect the operator to revise them after the first smoke test in research question #2 (issue body).
+**Verify the license from the registry, not the README/landing page.** For an npm-distributed tool run `npm view <npmName> license` and stamp the *verified* SPDX value into the issue; for a non-npm tool read the `LICENSE` file in the repo's default branch. The README or marketing site is not authoritative (`@probelabs/probe` advertised Apache-2.0 while `npm view` reported ISC). Record HOW you checked (e.g. `npm view @probelabs/probe license` → `ISC`) in the Maintenance signals block so the dev can trust it without re-checking.
 
 #### Gate 3: Dedup seen-list
 
@@ -99,15 +88,15 @@ Re-eval is eligible when ANY of:
 
 A candidate that clears Gates 1–3 is worth filing, but the issue MUST land already reconciled against this repo's constraints so the implementing `hydra-dev` doesn't have to detect and fix the same three defect classes downstream. Before filing, reconcile each of:
 
-1. **No-dependency lane (ADR-0005 / allow-scripts).** Runtime deps are a closed operator-approved allowlist (CLAUDE.md STD-DEPS-APPROVED / `package.json` `dependencies`); dev deps that run install scripts trip the lavamoat allow-scripts gate. If the tool would require adding a runtime or dev dependency, **do not file an issue that proposes `npm install`** — instead propose the pinned-`npx` (or pinned pre-built binary) wrapper path up front, exactly as `ast-grep` / `comby` / `probe` / `promptfoo` are integrated (see CLAUDE.md "Structural code search"). If the tool *cannot* run via `npx`/standalone binary and *must* be a dependency, either (a) the issue is for the operator to approve the dep — say so explicitly and label accordingly — or (b) reject the candidate with reason `no-dep-lane-incompatible`. A 2026-06-13 scout proposed a plain dependency against this lane and the dev had to re-architect it as a pinned-`npx` wrapper; another (`evalite`) was rejected outright because it hard-requires a vitest devDep that trips allow-scripts. Never leave this to the implementer.
+1. **No-dependency lane (ADR-0005 / allow-scripts).** Runtime deps are a closed allowlist only the operator extends (CLAUDE.md STD-DEPS-APPROVED / `package.json` `dependencies`); dev deps that run install scripts trip the lavamoat allow-scripts gate. If the tool would require adding a runtime or dev dependency, **do not file an issue that proposes `npm install`** — instead propose the pinned-`npx` (or pinned pre-built binary) wrapper path up front, exactly as `ast-grep` / `comby` / `probe` / `promptfoo` are integrated (see CLAUDE.md "Structural code search"). If the tool *cannot* run via `npx`/standalone binary and *must* be a dependency, either (a) the issue is for the operator to approve the dep — say so explicitly and label accordingly — or (b) reject the candidate with reason `no-dep-lane-incompatible`. (`evalite` was rejected this way: it hard-requires a vitest devDep that trips allow-scripts.) Never leave this to the implementer.
 
-2. **Superseded-premise check.** Reconcile the candidate against recently-merged tooling, not just the seen-list cooldown. Skim the last ~30 days of merged tool-scout PRs and the seen-list `decision: "filed"` entries: if a recently-merged tool already delivers this candidate's niche, the candidate is **superseded** — reject it with reason `premise-superseded-by-<slug>` (cite the merged PR/issue) rather than filing a duplicate the dev will decline. (`evalite` was superseded by `promptfoo` #1806, merged one day prior; the dev declined it and delivered the niche on the existing lane — a cycle the scout could have saved.) The seen-list dedup (Gate 3) only catches the *same* tool; this gate catches a *different* tool covering an *already-covered* niche.
+2. **Superseded-premise check.** Reconcile the candidate against recently-merged tooling, not just the seen-list cooldown. Skim the last ~30 days of merged tool-scout PRs and the seen-list `decision: "filed"` entries: if a recently-merged tool already delivers this candidate's niche, the candidate is **superseded** — reject it with reason `premise-superseded-by-<slug>` (cite the merged PR/issue) rather than filing a duplicate the dev will decline. The seen-list dedup (Gate 3) only catches the *same* tool; this gate catches a *different* tool covering an *already-covered* niche.
 
-3. **Real CLI / API contract.** Run the tool once (or read its `--help` / API reference) and record the actual invocation contract — the real `--format`/`--json` flags, the scorer/callback signature, the output schema — in the issue's "Proposed integration" block. Do NOT leave the dev to reverse-engineer it empirically (the 2026-06-13 wave shipped issues that omitted probe's JSON schema and promptfoo's two-arg file-scorer signature, so the dev discovered them by trial). One verified command line in the issue saves a discovery loop.
+3. **Real CLI / API contract.** Run the tool once (or read its `--help` / API reference) and record the actual invocation contract — the real `--format`/`--json` flags, the scorer/callback signature, the output schema — in the issue's "Proposed integration" block. Do NOT leave the dev to reverse-engineer it empirically. One verified command line in the issue saves a discovery loop.
 
 ### 4. File an issue per survivor
 
-For each candidate that clears all three gates, file a GitHub issue with the schema below and record `decision: "filed"`, `issueNum`, `filedAt` to the seen-list.
+For each candidate that clears every gate, file a GitHub issue with the schema below and record `decision: "filed"`, `issueNum`, `filedAt` to the seen-list.
 
 ```markdown
 # tool-scout: <Tool Name> — <category>
@@ -121,7 +110,7 @@ For each candidate that clears all three gates, file a GitHub issue with the sch
 ## Why this would help Hydra
 
 <3–5 bullet points, each tying back to a real agent pain we've observed.
-e.g.: "hydra-dev agents currently have to chase down type errors by reading
+e.g.: "hydra-dev agents have to chase down type errors by reading
 runtime stack traces in journalctl — a typed schema gateway would surface
 contract violations at PR time.">
 
@@ -173,7 +162,7 @@ Do not leave this to the implementer — if you can't state a lane-compatible pa
 <everything the dev_orch follow-up should not touch>
 
 ---
-*Generated by hydra-tool-scout (Phase A). Slug: `<canonical-slug>`. Seen-list key: `hydra:scout:tools-considered:<canonical-slug>`.*
+*Generated by hydra-tool-scout. Slug: `<canonical-slug>`. Seen-list key: `hydra:scout:tools-considered:<canonical-slug>`.*
 ```
 
 Labels: `enhancement`, `needs-triage`, `tool-scout`. The triage label is intentional — the operator should review and decide before this gets picked up.
@@ -188,7 +177,7 @@ await seenList.recordDecision(slug, decision, reason, {
   category: "typed-schemas",
   issueNum: 567,            // present if decision === "filed"
   reEvalAt: null,           // optional override
-  trigger: "manual",        // Phase A; "calendar" (Phase B); "gap" later
+  trigger: "manual",        // or "calendar" in calendar mode
 });
 ```
 
@@ -212,20 +201,19 @@ This is the operator's accept/reject point. If the issue bodies look wrong, the 
 
 ## Rules
 
-- **No autopilot dispatch in Phase A.** Manual invocation only.
 - **No category invention.** The taxonomy is closed; new categories require a PR to `docs/ai-leverage-categories.md`.
 - **Slug canonicalization happens in `src/scout/aliases.ts`** — never use the raw npm name or repo path as the seen-list key.
 - **Three-gate AND** — a tool must clear all three (leverage, maintenance, dedup). No 2-of-3 fallbacks. Gate 4 (lane reconciliation) is additive — it never relaxes the AND.
-- **Verify the license from the registry, never the README.** Stamp the `npm view <pkg> license` (or repo `LICENSE` file) value into the issue and record how you checked. A README/landing-page license claim is not authoritative (#1882: Apache-2.0 claim vs ISC reality).
+- **Verify the license from the registry, never the README.** Stamp the `npm view <pkg> license` (or repo `LICENSE` file) value into the issue and record how you checked. A README/landing-page license claim is not authoritative (Gate 2).
 - **Screen against the no-dependency lane (ADR-0005) before filing.** A surviving candidate's issue must propose the pinned-`npx`/standalone-binary path, OR be explicitly flagged as an operator dep-approval decision, OR be rejected `no-dep-lane-incompatible`. Never file an issue that silently assumes `npm install`.
 - **Reconcile the premise against recent merges.** If a tool merged in the last ~30 days already covers the candidate's niche, reject `premise-superseded-by-<slug>` — don't file a duplicate the dev will decline. Gate 3 dedups the same tool; this guards against a different tool covering an already-covered niche.
 - **Record the real CLI/API contract.** Run the tool once and stamp the verified invocation (flags, scorer signature, output schema) into "Proposed integration" — never leave the dev to reverse-engineer it.
-- **Issues land in `needs-triage`** — never auto-route to `ready-for-agent`. The operator is the accept point in Phase A.
+- **Issues land in `needs-triage`** — never auto-route to `ready-for-agent`. The operator is the accept point.
 - **Seen-list is append-only conceptually.** Every consideration leaves a fingerprint, even cooldown-skipped ones (via `lastChecked` heartbeat).
 
 ## Manual smoke test
 
-This is the Phase A acceptance flow — the operator runs this before we wire Phase B autopilot dispatch.
+Manual acceptance flow:
 
 ```bash
 /hydra-tool-scout typed-schemas
@@ -239,26 +227,18 @@ Expected:
 - Re-running `/hydra-tool-scout typed-schemas` immediately produces zero new issues — the dedup cooldown holds.
 - The operator either moves a filed issue to `ready-for-agent` (acceptance) or closes it with `wontfix` (which re-feeds the seen-list).
 
-## Out of scope (Phase A/B)
+## Out of scope
 
-| Item | Lands in |
-|---|---|
-| Autopilot `scout_orch` class + `decide.py` wiring | **Phase B (issue #485) — shipped** |
-| Calendar walk (one walk/week over categories + deps) | **Phase B (issue #485) — shipped** |
-| Alert-driven trigger | Retired in #5054 — the pattern:* alerts it consumed never had a producer (#5053) |
-| Gap-driven triggers (e.g. "the same lesson fired 3x → scout the related category") | Phase D |
-| Vibe-driven triggers (operator hunches surfaced via Redis hint) | Phase D |
-| Auto-PRs that actually integrate a tool | Never — that is dev_orch's job; the scout files an issue and stops. |
+- Auto-PRs that integrate a tool — that is `dev_orch`'s job; the scout files an issue and stops.
+- Gap-driven triggers (e.g. "the same lesson fired 3x → scout the related category") — no producer exists.
 
-### Phase B wiring summary (issue #485)
+## Autopilot wiring
 
-- `scout_orch` signal class (7d per-class cooldown in `decide.py:SIGNAL_COOLDOWNS`).
-- Walk planner: `src/scout/calendar-walk.ts:planWalk()` — builds the category target list with per-category cooldown (30d default). `dep:<name>` targets were removed from the surface in issue #4556 (no dependency-walk procedure; `npm run deps:check` + the OSV scan cover dependency freshness/CVEs).
-- Per-tool cooldown (90d) is honored inside the scout via the Phase A seen-list.
-- Stats: `/api/scout/stats?window=7` returns last-week activity per category. The per-day counters are written by the dispatch-audit boundary (`recordCalendarDispatch` in `src/scout/dispatch-audit.ts`) on every recorded dispatch outcome (issue #4556).
-- Cost slice: `SCOUT_DAILY_COST_SHARE = 0.04` (~\$2/day on a \$50 cap); operators override via `state.limits.scout_cost_share`.
-
-See parent epic #483 for the full roadmap.
+- `scout_orch` signal class; its cooldown is `cooldownSeconds` in `scripts/autopilot/classes.json`.
+- Walk planner: `planWalk()` in `src/scout/calendar-walk.ts` — builds the category target list with the per-category cooldown (`CATEGORY_COOLDOWN_DAYS`).
+- Per-tool cooldown (90d) is honored inside the scout via the seen-list.
+- Stats: `/api/scout/stats?window=7` returns last-week activity per category. The per-day counters are written by `recordCalendarDispatch` in `src/scout/dispatch-audit.ts` on every recorded dispatch outcome.
+- Cost slice: `SCOUT_DAILY_COST_SHARE` in `src/scout/calendar-walk.ts`; operators override via `state.limits.scout_cost_share`.
 
 ## Files
 
@@ -267,14 +247,14 @@ See parent epic #483 for the full roadmap.
 - `docs/ai-leverage-rubric.md` — 1–5 AI-leverage scale with worked examples.
 - `src/scout/seen-list.ts` — Redis-backed seen-list (`getSeen`, `recordDecision`, `eligibleForReEval`).
 - `src/scout/aliases.ts` — `canonicalizeSlug` + alias map for npm/repo-name collisions.
-- `src/scout/calendar-walk.ts` — Phase B weekly walk planner (categories + per-category cooldown; `dep:*` surface removed in #4556).
+- `src/scout/calendar-walk.ts` — weekly walk planner (categories + per-category cooldown).
 - `src/scout/calendar-walk-surface.ts` — walk-surface enumeration (category slugs from `docs/ai-leverage-categories.md`).
-- `src/scout/dispatch-audit.ts` — the `hydra:scout:dispatches` audit-stream boundary: `recordCalendarDispatch` (calendar, #4556), `listDispatchAudits`, and the per-day stats-counter wiring.
+- `src/scout/dispatch-audit.ts` — the `hydra:scout:dispatches` audit-stream boundary: `recordCalendarDispatch`, `listDispatchAudits`, and the per-day stats-counter wiring.
 - `src/scout/stats.ts` — per-day per-category counters + the rollup behind `/api/scout/stats`.
-- `src/redis/keys.ts` — adds `scoutToolsConsidered(slug)` + Phase B keys (`scoutLastCalendarWalk`, `scoutCategoryLastWalked`, `scoutStatsDaily`, `scoutDispatches`).
+- `src/redis/keys.ts` — `scoutToolsConsidered(slug)` and the calendar-walk keys (`scoutLastCalendarWalk`, `scoutCategoryLastWalked`, `scoutStatsDaily`, `scoutDispatches`).
 - `src/api/scout.ts` — `/api/scout/stats`, `/api/scout/dispatches`.
 - `test/scout-seen-list.test.mts` — regression tests for record + re-eval eligibility.
 
 ## Tier
 
-Tier 2 (new module + new tests; no Verifier Core touched). The PR body carries the live tier classifier's verdict; this footer is informational.
+The PR body carries the live tier classifier's verdict for any change to this playbook.
