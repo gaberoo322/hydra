@@ -86,7 +86,7 @@ and STOP for this item — do not attempt a wire-vs-retire verdict, do not queue
 There is no hardcoded fallback list: an absent/empty `risk_carveout` is itself carve-out
 evidence (over-routing to a human is safe, under-routing is not), never a signal to fall through
 to intent-recovery. The carve-out this skill matches against IS the manifest's
-`riskCritical.surface` (the same surface `classifyRisk` in `src/target/risk-critical.ts` reads), not a copy of it.
+`riskCritical.surface` (the same surface `classifyRisk` reads), not a copy of it.
 
 Rationale: retiring or rewiring a money-critical module is an operator-escalation-class
 decision (ADR-0005). Ambiguity here is not a judgment call — it is a fail-closed route to a
