@@ -752,16 +752,39 @@ describe("ops-collect CLI, spawned", () => {
   });
 });
 
-describe("hydra-architect playbook", () => {
-  const body = readFileSync(new URL("../docs/operator-playbooks/hydra-architect.md", import.meta.url), "utf8");
+/** Bodies of every fenced block of a markdown document. */
+function fencedBlocks(markdown: string): string[] {
+  return [...markdown.matchAll(/^```[a-z]*\n([\s\S]*?)^```$/gm)].map((m) => m[1]);
+}
 
-  test("holds no inline parsing and no redis-cli", () => {
-    assert.doesNotMatch(body, /python3\s+-/);
-    assert.doesNotMatch(body, /\bjq\b/);
-    assert.doesNotMatch(body, /redis-cli/);
-  });
+describe("operator playbooks that read through ops-collect", () => {
+  const playbooks = ["hydra-architect.md", "hydra-doctor.md"];
 
-  test("calls the ops-collect CLI", () => {
-    assert.match(body, /scripts\/ops-collect\.ts --collectors/);
+  for (const name of playbooks) {
+    const body = readFileSync(new URL(`../docs/operator-playbooks/${name}`, import.meta.url), "utf8");
+
+    test(`${name} holds no inline parsing and no direct Redis shell-out`, () => {
+      assert.doesNotMatch(body, /python3\s+-/);
+      assert.doesNotMatch(body, /\bjq\b/);
+      assert.doesNotMatch(body, /redis-cli/);
+    });
+
+    test(`${name} requests only collectors the CLI ships`, () => {
+      const requested = [...body.matchAll(/ops-collect\.ts[^\n]*--collectors ([a-z,-]+)/g)].flatMap((m) => m[1].split(","));
+      assert.ok(requested.length > 0, "calls the ops-collect CLI");
+      for (const collector of requested) assert.ok(Object.hasOwn(COLLECTORS, collector), collector);
+    });
+  }
+
+  test("hydra-doctor.md fenced blocks hold raw-output commands only: no variables, loops, branches or text reshaping", () => {
+    const doctor = readFileSync(new URL("../docs/operator-playbooks/hydra-doctor.md", import.meta.url), "utf8");
+    const blocks = fencedBlocks(doctor);
+    assert.ok(blocks.length > 0);
+    for (const block of blocks) {
+      assert.doesNotMatch(block, /\$\(|`/, `command substitution in:\n${block}`);
+      assert.doesNotMatch(block, /^\s*(for|while|if|case)\b/m, `control flow in:\n${block}`);
+      assert.doesNotMatch(block, /^\s*[A-Za-z_]+=/m, `variable assignment in:\n${block}`);
+      assert.doesNotMatch(block, /\b(awk|sed|cut|xargs)\b/, `text reshaping in:\n${block}`);
+    }
   });
 });
