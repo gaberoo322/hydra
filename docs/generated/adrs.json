@@ -82,7 +82,6 @@
         "docs/historical/hydra-betting/direction/goals.md",
         "docs/historical/hydra-betting/direction/roadmap.md",
         "docs/operator-playbooks/hydra-architect.md",
-        "docs/operator-playbooks/hydra-doctor.md",
         "docs/operator-playbooks/hydra-target-cleanup.md",
         "docs/reference.md",
         "docs/target-swap-runbook.md"
@@ -464,7 +463,6 @@
         "docs/adr/0034-orchestrator-dashboard-page-inventory.md",
         "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md",
         "docs/operator-playbooks/hydra-architect.md",
-        "docs/operator-playbooks/hydra-doctor.md",
         "docs/operator-playbooks/hydra-grill.md",
         "docs/operator-playbooks/hydra-review.md",
         "docs/operator-playbooks/hydra-target-build.md"
@@ -916,7 +914,6 @@
         "docs/adr/0047-work-item-lifecycle-is-data.md",
         "docs/operator-playbooks/hydra-autopilot.md",
         "docs/operator-playbooks/hydra-digest.md",
-        "docs/operator-playbooks/hydra-doctor.md",
         "docs/operator-playbooks/hydra-review.md",
         "docs/operator-playbooks/hydra-target-build.md",
         "docs/operator-playbooks/hydra-target-cleanup.md",
