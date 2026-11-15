@@ -11,7 +11,10 @@ import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 
-import { countTestCases, decideReviewerCommit, type ReviewerCommitInput } from "../src/qa/round-action.ts";
+import { countTestCases, decideReviewerCommit, QA_ESCALATION_LABELS, type ReviewerCommitInput } from "../src/qa/round-action.ts";
+import type { CmdResult, PlumbingPorts } from "../scripts/qa/_lib.ts";
+import { runRoute } from "../scripts/qa/route.ts";
+import type { PreflightResult } from "../src/schemas/qa-plumbing-cli.ts";
 import { parseTapAssertionProof } from "../src/qa/fix-proof.ts";
 import {
   assessCommitGraduation,
@@ -381,10 +384,111 @@ describe("playbook step 9.4 class-B pins (INV-5, INV-6, INV-13)", () => {
     assert.ok(!/\+refs|\+HEAD/.test(step94));
   });
 
-  test("route (not a sidecar step 9.5) hands every verified reviewer commit to the trailer phase as the qaFixes array (#5415)", () => {
+  test("the sidecar step 9.5 is gone: route owns the trailer inputs (#5415)", () => {
     assert.ok(!PLAYBOOK.includes("### 9.5 "), "route owns the trailer inputs; the sidecar section is gone");
-    const route = readFileSync(join(ROOT, "scripts", "qa", "route.ts"), "utf8");
-    assert.ok(route.includes("qaFixes: shas12"));
+  });
+});
+
+describe("route pass 2a: verified reviewer commits reach the trailer phase (#5415)", () => {
+  const REVIEWED = "0123456789abcdef0123456789abcdef01234567";
+  const A_SHA = "a1".repeat(20);
+  const B_SHA = "b2".repeat(20);
+  const REPO = "gaberoo322/hydra";
+  const ok = (stdout: string): CmdResult => ({ ok: true, stdout });
+
+  const pre: PreflightResult = {
+    ok: true,
+    stage: "ready",
+    issue: 5268,
+    pr: { number: 77, headSha: REVIEWED, headRefName: "worktree-agent-abc", baseRefName: "master", mergeStateStatus: "CLEAN", glmAuthored: false },
+    fixedSha: "c".repeat(40),
+    changedPaths: ["docs/guide.md", "test/widget.test.mts"],
+    checks: { list: [{ name: "test", status: "completed", conclusion: "success", required: true }], degraded: false, source: "branch-protection" },
+    spec: { found: true, input: { anchorRef: "issue-5268", invariants: ["INV-1 x"], gate: {} }, skippedReason: null, mode: "warn" },
+    tier: { num: 3, adversarial: true },
+    gate: { action: "admit", reason: "admit", redRequired: [], skipVerdict: null, skipCiSummary: null },
+    fanout: { mode: "adversarial", reviewers: ["reviewer-A-standards", "reviewer-A-spec"], reason: "Review fan-out: adversarial" },
+    stop: null,
+    degraded: [],
+  };
+
+  /** One pass-2a route run over fake ports; returns what the trailer phase was handed. */
+  async function routeFixed(action: "commit-b" | "commit-ab", commits: Record<string, { parent: string; message: string }>) {
+    const trailerInputs: Array<Record<string, unknown>> = [];
+    const ports: PlumbingPorts = {
+      async advance() {
+        return { rc: 0, code: "", wouldPark: "" };
+      },
+      async gh(argv) {
+        if (argv[0] === "api" && String(argv[1]).startsWith(`repos/${REPO}/commits/`)) {
+          const c = commits[String(argv[1]).split("/").pop() as string];
+          return c ? ok(JSON.stringify({ parents: [{ sha: c.parent }], commit: { message: c.message } })) : { ok: false, stderr: "404" };
+        }
+        if (argv.includes("headRefOid")) return ok(`${B_SHA}\n`);
+        return ok("");
+      },
+      async git() {
+        return ok("");
+      },
+      http: async () => null,
+      fetchers: {} as PlumbingPorts["fetchers"],
+      async phase(phase, input) {
+        if (phase === "fold") {
+          return {
+            fold: { reviewVerdict: "FAIL", worstFinding: "w", blocking: [{ location: "test/widget.test.mts:12", finding: "vacuous assertion", severity: "medium", reviewers: ["reviewer-A-standards"] }], followUps: [] },
+            counts: { blockers: 1, maxSeverity: "medium" },
+            report: "REPORT",
+            verdict: { verdict: "FAIL", reason: "REASON" },
+            ciSummary: "CHECKS",
+            degraded: [],
+          };
+        }
+        if (phase === "reviewer-commit") {
+          return { action, reason: "fixable", blockingPaths: [], followUpPaths: [], blockingTestPaths: ["test/widget.test.mts"], followUpTestPaths: [], bodyFix: false, degraded: [] };
+        }
+        if (phase === "trailer") {
+          trailerInputs.push(input as Record<string, unknown>);
+          return { trailer: "QA-Verdict: PASS-pending-CI pr=77 round=1 sha=b2b2b2b2b2b2 blockers=0 max_severity=none", round: 1, degraded: [] };
+        }
+        return { round: { action: "none", round: 1, failRound: 0, reason: "r" }, deepQa: null, passMarker: null, escalationSummary: null, labels: QA_ESCALATION_LABELS, failMarker: null, degraded: [] };
+      },
+    };
+    const files: Record<string, string> = {
+      findings: JSON.stringify({ standards: [], spec: [] }),
+      summaries: JSON.stringify({ standardsSummary: "S", specSummary: "P" }),
+    };
+    const result = await runRoute(
+      { repo: REPO, defer: false, dryRun: false, findingsPath: "findings", summariesPath: "summaries", reviewerFixed: B_SHA },
+      pre,
+      ports,
+      { readText: (p) => files[p] ?? null, appendRows: async () => undefined, now: () => new Date("2026-11-05T00:00:00Z"), sleep: async () => undefined },
+    );
+    return { result, trailerInputs };
+  }
+
+  test("an A+B round hands BOTH verified commits to the trailer phase, A first, at the pushed head", async () => {
+    const { result, trailerInputs } = await routeFixed("commit-ab", {
+      [B_SHA]: { parent: A_SHA, message: "test: tighten\n\nQA-Fix: B" },
+      [A_SHA]: { parent: REVIEWED, message: "docs: fix\n\nQA-Fix: A" },
+    });
+    assert.equal(result.verdict, "PASS-pending-CI");
+    assert.equal(trailerInputs.length, 1);
+    assert.deepEqual(trailerInputs[0]?.qaFixes, [A_SHA.slice(0, 12), B_SHA.slice(0, 12)]);
+    assert.equal(trailerInputs[0]?.headSha, B_SHA);
+  });
+
+  test("sibling shape: a class-B-only round hands its one commit", async () => {
+    const { trailerInputs } = await routeFixed("commit-b", {
+      [B_SHA]: { parent: REVIEWED, message: "test: tighten\n\nQA-Fix: B" },
+    });
+    assert.deepEqual(trailerInputs[0]?.qaFixes, [B_SHA.slice(0, 12)]);
+  });
+
+  test("an unverified chain (wrong trailer class) never reaches the trailer phase", async () => {
+    await assert.rejects(
+      routeFixed("commit-b", { [B_SHA]: { parent: REVIEWED, message: "test: tighten\n\nQA-Fix: A" } }),
+      /not verified/,
+    );
   });
 });
 
