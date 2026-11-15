@@ -193,11 +193,6 @@ Alerts:
 - Cost/merge >$5 → efficiency finding
 - Empty-cycle cost >30% of total → waste finding
 
-### 2c. Backlog health
-From the Tier 1 board-state counts, compared across iterations.
-
-Alerts: `blocked` or `needs_triage` growing across iterations with `ready_for_agent` at 0.
-
 ## Tier 3: Codebase deep dive (every 3rd iteration)
 
 Only investigate areas Tier 1+2 flagged. Skip if nothing flagged.

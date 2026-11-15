@@ -238,7 +238,6 @@ Expected:
 - Walk planner: `planWalk()` in `src/scout/calendar-walk.ts` — builds the category target list with the per-category cooldown (`CATEGORY_COOLDOWN_DAYS`).
 - Per-tool cooldown (90d) is honored inside the scout via the seen-list.
 - Stats: `/api/scout/stats?window=7` returns last-week activity per category. The per-day counters are written by `recordCalendarDispatch` in `src/scout/dispatch-audit.ts` on every recorded dispatch outcome.
-- Cost slice: `SCOUT_DAILY_COST_SHARE` in `src/scout/calendar-walk.ts`; operators override via `state.limits.scout_cost_share`.
 
 ## Files
 
