@@ -38,9 +38,8 @@ backstop (AOF plus the docker volume):
 
 - **Keys** (bare `redis-cli`, the docker-exec seam the autopilot scripts use):
   `hydra:autopilot:signal-last-fired` is a Hash (field = signal class, value =
-  last-fired epoch); `hydra:autopilot:research-force-counter` (`REDIS_RESEARCH_FORCE_KEY` in
-  `scripts/autopilot/run_ledger.py`) is a String holding the canonical-JSON
-  counter object.
+  last-fired epoch); `REDIS_RESEARCH_FORCE_KEY` (`scripts/autopilot/run_ledger.py`) is a String
+  holding the canonical-JSON counter object.
 - **Seed order** (`bootstrap.sh`): prior state file, then Redis, then 0. The
   prior file stays first (fast local path); 0 is the first-install default.
 - **Write seam**: `reap.py run_completion` mirrors the whole subset on every

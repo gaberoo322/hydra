@@ -13,8 +13,8 @@ read from there:
 ## Scout
 
 `scout_orch` is a calendar-driven signal class. Its walk surface is the category
-list in `docs/ai-leverage-categories.md`, built by
-`src/scout/calendar-walk.ts:planWalk()`. Dependency freshness and CVEs belong to
+list in `docs/ai-leverage-categories.md`, built by `planWalk()` in
+`src/scout/calendar-walk.ts`. Dependency freshness and CVEs belong to
 `npm run deps:check` and the OSV scan, not to the walk. Three cooldowns stack:
 the per-class cooldown, a per-category cooldown and a per-tool cooldown through
 the seen-list (the last two live in `src/scout/calendar-walk.ts`), and all three
