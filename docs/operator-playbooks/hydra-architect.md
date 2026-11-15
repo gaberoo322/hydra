@@ -1,6 +1,6 @@
 ---
 name: hydra-architect
-description: Strategic architecture review of Hydra as an autonomous software building system. Evaluates the control loop, research pipeline, agent quality, autonomy level, and knowledge systems against the operator's vision, then produces ranked recommendations.
+description: Strategic architecture review of Hydra as an autonomous software building system. Evaluates the decision loop, research pipeline, agent quality, autonomy level, and knowledge systems against the operator's vision, then produces ranked recommendations.
 when_to_use: "When the user wants to assess Hydra's architecture, think about system improvements, evaluate the autonomous builder design, or asks 'how can we improve Hydra'."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Agent(*) WebSearch(*) WebFetch(*)
 arguments: [focus]
@@ -17,7 +17,7 @@ If `$focus` provided, weight analysis toward that dimension.
 This skill is operator-invoked, so you start with cwd at `~/hydra` — the
 **live deploy checkout** that `scripts/deploy.sh` refuses to deploy from when
 it carries any uncommitted tracked change. Every read in Phases 1–4 below
-(`vision.md`, `goals.md`, `priorities.md`, `CLAUDE.md`, the metrics/research/
+(`vision.md`, `priorities.md`, `CLAUDE.md`, the metrics/research/
 backlog queries) is safe to run against `~/hydra` as-is — reads never dirty
 the tree. Two things are NOT safe to run against `~/hydra` directly: the
 `npm test` invocation in **Architecture Shape** below, and the report write in
@@ -86,7 +86,6 @@ fi
 
 ### Context files (parallel)
 - `~/hydra/config/direction/vision.md`
-- `~/hydra/config/direction/goals.md`
 - `~/hydra/config/direction/priorities.md`
 - `~/hydra/CLAUDE.md`
 - `$TARGET_WS/CLAUDE.md` (resolve `$TARGET_WS` via the Target seam above; skip when unresolved)
@@ -104,7 +103,7 @@ Surface specific techniques, not vague advice.
 
 ## Phase 3: Evaluate (8 dimensions, 1-10 each, with evidence)
 
-1. **Control Loop Quality** — merge rate, ceremony overhead, efficiency
+1. **Decision Loop Quality** — merge rate, ceremony overhead, efficiency
 2. **Research → Action Pipeline** — conversion rate, repeated topics, idea death
 3. **Grounding & Verification** — bug categories slipping through, rollback frequency
 4. **Agent Quality** — planner novelty, preflight gate effectiveness (high-risk review catches for risk:high tasks), executor minimalism

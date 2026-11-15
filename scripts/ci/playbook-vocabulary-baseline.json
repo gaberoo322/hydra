@@ -23,9 +23,6 @@
     "docs/operator-playbooks/_fragments/hydra-qa-reference.md": {
       "status": 6
     },
-    "docs/operator-playbooks/hydra-architect.md": {
-      "avoid-term": 2
-    },
     "docs/operator-playbooks/hydra-architecture-scan.md": {
       "status": 2
     },
