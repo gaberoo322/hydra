@@ -709,7 +709,7 @@
       "path": "docs/operator-playbooks/hydra-tool-scout.md",
       "tier": "playbook",
       "route": "/docs/skill/hydra-tool-scout",
-      "title": "Hydra Tool Scout (Phase A — manual)"
+      "title": "Hydra Tool Scout"
     },
     {
       "path": "docs/operator-playbooks/hydra-wayfinder.md",

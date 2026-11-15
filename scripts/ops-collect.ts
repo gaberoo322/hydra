@@ -118,6 +118,31 @@ async function liveGetJson(path: string): Promise<CollectorResult<unknown>> {
 }
 
 /** The live adapters: the only place this CLI touches the host. */
+/**
+ * Names and mtimes directly under `dir`. A missing directory is an empty list
+ * (the caller reports "none found"); a file that vanishes between the listing
+ * and its stat is left out. Any other read error throws.
+ */
+export function listDirFiles(dir: string): Array<{ name: string; mtimeMs: number }> {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch (err) {
+    /* intentional: a missing directory is an empty listing; other errors rethrow */
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw err;
+  }
+  const out: Array<{ name: string; mtimeMs: number }> = [];
+  for (const name of names) {
+    try {
+      out.push({ name, mtimeMs: statSync(join(dir, name)).mtimeMs });
+    } catch {
+      /* intentional: the file vanished or is unreadable; skip it, keep the rest */
+    }
+  }
+  return out;
+}
+
 export const liveAdapters: Adapters = {
   getJson: liveGetJson,
   classesDoc: () => JSON.parse(readFileSync(join(HERE, "autopilot", "classes.json"), "utf8")),
@@ -146,7 +171,7 @@ export const liveAdapters: Adapters = {
     const r = await readUnitEnabledState(unit, { timeout: ADAPTER_TIMEOUT_MS });
     return isProbeFailure(r) ? null : r.data;
   },
-  dirFiles: (dir) => readdirSync(dir).map((name) => ({ name, mtimeMs: statSync(join(dir, name)).mtimeMs })),
+  dirFiles: listDirFiles,
   journal: async (unit, sinceIso) => {
     const r = await readJournalSlice(
       { row: { started: sinceIso } },
@@ -301,7 +326,7 @@ export const COLLECTORS: Record<string, Collector> = {
     },
   },
   "redis-backup": {
-    help: `Newest hydra-redis-*.rdb.gz under ${REDIS_BACKUP_DIR}. Fields: dir, newest, ageHours, staleAfterHours (${REDIS_BACKUP_STALE_HOURS}), stale (true when older than that or when none exists).`,
+    help: `Newest hydra-redis-*.rdb.gz under ${REDIS_BACKUP_DIR}. Fields: dir, newest, ageHours, staleAfterHours (${REDIS_BACKUP_STALE_HOURS}), stale (true at or past that age, the watchdog's rule, or when none exists; a missing directory reads as none).`,
     run: async (ctx) => {
       try {
         return collectRedisBackup(ctx.a.dirFiles(REDIS_BACKUP_DIR), ctx.a.now());

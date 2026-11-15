@@ -10,6 +10,7 @@
 import {
   DEFAULT_REDIS_BACKUP_DIR,
   DEFAULT_REDIS_BACKUP_STALE_HOURS,
+  decideRedisBackup,
 } from "../src/watchdog/redis-backup.ts";
 
 /** A failed or skipped collector. `skipped` marks "not applicable here", not an error. */
@@ -456,7 +457,8 @@ export interface TimersInput {
  * Join the repo-owned timer set (the `scripts/systemd/*.timer` glob) and the
  * resolved Target's timers against the live systemd state. Every entry of
  * `findings` is a defect: a repo timer that is not enabled, or enabled and
- * never fired, or enabled with no next run.
+ * never fired, and/or enabled with no next run (both are reported). A timer
+ * whose is-enabled probe was lost has `enabled: null` and yields no finding.
  */
 export function collectTimers(input: TimersInput): CollectorResult<TimersSummary> {
   const units = repoTimerUnits(input.systemdFiles);
@@ -474,9 +476,15 @@ export function collectTimers(input: TimersInput): CollectorResult<TimersSummary
   const repo = units.map((u) => row(u, input.enabledStates[u] ?? null));
   const findings: string[] = [];
   for (const r of repo) {
-    if (r.enabled !== "enabled") findings.push(`TIMER NOT ENABLED: ${r.unit} (${r.enabled ?? "unknown"})`);
-    else if (liveError === null && r.last === null) findings.push(`TIMER NEVER FIRED: ${r.unit}`);
-    else if (liveError === null && r.next === null) findings.push(`TIMER NOT SCHEDULED: ${r.unit}`);
+    // A lost is-enabled probe (null) is unknown state, never a finding.
+    if (r.enabled === null) continue;
+    if (r.enabled !== "enabled") {
+      findings.push(`TIMER NOT ENABLED: ${r.unit} (${r.enabled})`);
+      continue;
+    }
+    if (liveError !== null) continue;
+    if (r.last === null) findings.push(`TIMER NEVER FIRED: ${r.unit}`);
+    if (r.next === null) findings.push(`TIMER NOT SCHEDULED: ${r.unit}`);
   }
   let target: TimersSummary["target"];
   if (!input.targetName) {
@@ -514,10 +522,15 @@ export function collectRedisBackup(
   const dumps = files.filter((f) => BACKUP_NAME.test(f.name)).sort((a, b) => b.mtimeMs - a.mtimeMs);
   const base = { dir: REDIS_BACKUP_DIR, staleAfterHours: REDIS_BACKUP_STALE_HOURS };
   if (dumps.length === 0) return { ok: true, data: { ...base, newest: null, ageHours: null, stale: true } };
-  const ageHours = Math.max(0, Math.floor((nowMs - dumps[0].mtimeMs) / HOUR_MS));
+  // Same verdict as the freshness watchdog: stale at or past the threshold.
+  const verdict = decideRedisBackup(
+    { name: dumps[0].name, mtimeS: Math.floor(dumps[0].mtimeMs / 1000) },
+    Math.floor(nowMs / 1000),
+    REDIS_BACKUP_STALE_HOURS,
+  );
   return {
     ok: true,
-    data: { ...base, newest: dumps[0].name, ageHours, stale: ageHours > REDIS_BACKUP_STALE_HOURS },
+    data: { ...base, newest: dumps[0].name, ageHours: Math.floor(verdict.ageS / 3600), stale: verdict.stale },
   };
 }
 
@@ -918,7 +931,7 @@ const TEXT: Record<string, (data: any) => string> = {
           ? `target timers: none installed matching ${t.pattern}`
           : `target timers: ${t.timers.length} matching ${t.pattern}`;
     const rows = [...d.repo, ...(t.status === "ok" ? t.timers : [])].map(
-      (r) => `  ${r.unit}: enabled=${r.enabled ?? "-"} last=${r.last ?? "never"} next=${r.next ?? "none"}`,
+      (r) => `  ${r.unit}: enabled=${r.enabled ?? "unknown"} last=${r.last ?? "never"} next=${r.next ?? "none"}`,
     );
     return [`${head}${live} | ${target}`, ...rows].join("\n");
   },

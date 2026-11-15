@@ -16,7 +16,7 @@ candidate with the **deletion test made deterministic** (the promptfoo eval
 suite), and opens **at most one T1/T2 PR** editing only that one playbook (plus
 its regenerated skill and its tightened ratchet baseline). It is the durable,
 recurring counterpart to a one-time skill-quality cleanup: it turns pruning into
-autonomous behavior rather than a manual sweep (epic #2944).
+autonomous behavior rather than a manual sweep.
 
 It deliberately **mirrors `hydra-cleanup`** (the `cleanup_orch` precedent): a
 depth-first pass over one surface, a deterministic acceptance check, and a
@@ -37,8 +37,8 @@ worth re-running). Runnable by hand: `/hydra-skill-prune [apply]`.
   without operator input, exactly like `hydra-cleanup` / `hydra-architecture-scan`.
 - **Dry-run by default.** With no `apply` argument the run prints the pruning
   report (candidates + eval verdict) and files/opens NOTHING. `--apply` (the
-  autopilot maps `apply=true` → `--apply`, the #1078 anti-dry-run-no-op lesson)
-  is what opens the PR or files the fallback issue.
+  autopilot maps `apply=true` → `--apply`, so a dispatched run is never a
+  dry-run no-op) is what opens the PR or files the fallback issue.
 - **One skill per run.** Pick exactly one generated skill and prune only it.
 - **One PR per run.** At most one T1/T2 PR, editing only that skill's playbook,
   its regenerated `SKILL.md`, and its baseline entry.
@@ -47,7 +47,7 @@ worth re-running). Runnable by hand: `/hydra-skill-prune [apply]`.
 
 Selection is **largest-over-baseline first, else round-robin**:
 
-1. Read `scripts/ci/skill-size-baseline.json` (the #2946 shrink-only ratchet
+1. Read `scripts/ci/skill-size-baseline.json` (the shrink-only ratchet
    baseline: per-playbook body word counts).
 2. For each `docs/operator-playbooks/hydra-*.md`, compute the current body word
    count and the delta over its baseline entry.
@@ -93,15 +93,13 @@ contract tokens** the eval suite asserts. This is the *deletion test made
 deterministic*: run the promptfoo eval for the affected skill against the
 **real** before/after pair — the pre-prune playbook on `origin/master` versus
 the candidate pruned body assembled in Step 2 — and require **contract-token
-parity** before opening a PR. (Issue #4268: the eval used to assert a
-hardcoded fixture against itself and could not fail on a real over-prune; it
-now reads the actual diff.)
+parity** before opening a PR.
 
 ```bash
 # SKILL is the chosen playbook slug from Step 1, e.g. "cleanup" for
 # docs/operator-playbooks/hydra-cleanup.md. PRUNED_BODY is the candidate
-# pruned playbook body assembled at the end of Step 2 — staged here, NOT yet
-# written to the real playbook path (Step 4 is what writes it to disk).
+# pruned playbook body assembled at the end of Step 2 — staged here; Step 4,
+# not this step, writes it to the real playbook path.
 mkdir -p evals/skill-prune/.staged
 git show "origin/master:docs/operator-playbooks/hydra-${SKILL}.md" \
   > evals/skill-prune/.staged/before.md  # ref-check: example
@@ -131,21 +129,18 @@ EVAL_RC=$?
   the cleanup-scan precedent) — listing the candidate deletions (bucketed
   by Pocock taxonomy) so a human/triage pass can decide. The `skill-prune`
   label is the COUNT SEAM for the autopilot's `skill_prune_board_saturated`
-  anti-flood cap (issue #4607: the Turn Snapshot counts open
-  `skill-prune`-labelled issues against the cap of 3 and suppresses the
-  class above it) — omitting it disarms the cap and lets a failing eval
+  anti-flood cap (the Turn Snapshot counts open `skill-prune`-labelled
+  issues against the cap of 3 and suppresses the class above it) — omitting it disarms the cap and lets a failing eval
   re-file candidate lists every 7d cooldown. Under dry-run, just print
   that list.
 
-> **Scope of the offline eval (design concept, Phase A):** the echo-provider
+> **Scope of the offline eval:** the echo-provider
 > eval verifies load-bearing contract-token **PRESERVATION** across the prune —
 > it is NOT a live behavioral golden-task replay. Behavioral parity against real
 > Anthropic calls is the operator-gated live-provider follow-up (see the
-> `evals/golden.yaml` header and docs/evals.md § "Live-provider follow-up"),
-> explicitly out of Phase A scope. The offline gate is the deterministic, free,
-> reproducible arbiter that ships today. The advisory eval-gate step now lives
-> in `.github/workflows/advisory-checks.yml` (folded from the retired standalone
-> `eval-gate.yml`, issue #3545) — it loops over top-level `evals/*.yaml` only,
+> `evals/golden.yaml` header and docs/evals.md § "Live-provider follow-up").
+> The offline gate is the deterministic, free, reproducible arbiter. The
+> advisory eval-gate step in `.github/workflows/advisory-checks.yml` loops over top-level `evals/*.yaml` only,
 > which is exactly why the real gate above lives in the `evals/skill-prune/`
 > subdirectory rather than at the top level.
 
@@ -155,11 +150,10 @@ When Step 3 passed AND `--apply` is set, in a fresh worktree:
 
 1. Apply the pruned playbook diff to `docs/operator-playbooks/hydra-<skill>.md`.
 2. Regenerate the skill **into a scratch dir to verify it, never the default
-   path** (issue #3828: `~/.claude/skills` is the live, host-shared mirror
-   every agent dispatch loads its prompts from, and this step runs from an
-   unmerged, PR-authoring worktree — writing the default path here is exactly
-   the class of gate-bypass issue #3828 closed off; `sync-skills.sh`'s
-   default-mirror content guard now refuses it anyway):
+   path** (`~/.claude/skills` is the live, host-shared mirror every agent
+   dispatch loads its prompts from, and this step runs from an unmerged,
+   PR-authoring worktree; `sync-skills.sh`'s default-mirror content guard
+   refuses that write):
    ```bash
    CLAUDE_SKILLS_DIR=$(mktemp -d) bash scripts/sync-skills.sh
    ```
@@ -170,7 +164,7 @@ When Step 3 passed AND `--apply` is set, in a fresh worktree:
    `body` count in `scripts/ci/skill-size-baseline.json` to its new (smaller)
    value: `npx tsx scripts/ci/skill-size-ratchet.ts --write-baseline` regenerates
    the baseline from current sizes, but you MUST verify the diff **only lowers**
-   the pruned file's entry and raises nothing (the #2946 shrink-only invariant).
+   the pruned file's entry and raises nothing (the shrink-only invariant).
    If `--write-baseline` would raise any other file's entry, hand-edit only the
    pruned file's entry instead — never let a prune PR raise a baseline.
 4. Run `npm test` + `npm run typecheck` + `npm run build`.
@@ -180,20 +174,19 @@ When Step 3 passed AND `--apply` is set, in a fresh worktree:
    the one playbook, its regenerated skill, and its baseline entry.
 
 Never push to master. Always a feature branch. CI (including the advisory
-`skill-size-ratchet` and `eval-gate` steps inside `.github/workflows/advisory-checks.yml`
-— folded from their former standalone-workflow selves, issue #3545 — a
-Tier-3 sibling, NOT `ci.yml`) is the merge gate.
+`skill-size-ratchet` and `eval-gate` steps inside `.github/workflows/advisory-checks.yml`,
+a Tier-3 sibling, NOT `ci.yml`) is the merge gate.
 
 ## When NOT to run this
 
 - The board has real `ready-for-agent` work — pruning is spare-capacity work,
   dispatched only on idle backfill (the signal class handles this).
-- 3 or more open `skill-prune`-labelled candidate lists already sit on the
+- More than 3 open `skill-prune`-labelled candidate lists already sit on the
   board — the `skill_prune_board_saturated` cap suppresses the dispatch
-  (issue #4607) until triage drains them; re-pruning past them manufactures
+  until triage drains them; re-pruning past them manufactures
   churn, exactly the feedback loop cleanup's cap exists to break.
 - Fired within the last 7 days (the `skill_prune` class cooldown enforces this;
   the cooldown MUST be seeded in `bootstrap.sh` `signal_last_fired` so it
-  survives the pace-gate relaunch — the #2575 cooldown-bootstrap bug class).
+  survives the pace-gate relaunch).
 - No eval config can exercise ANY skill (the harness is broken) — a
   `needs-triage` issue is the only honest output; never open an unverified PR.
