@@ -254,7 +254,6 @@
         "docs/operator-playbooks/hydra-dev.md",
         "docs/operator-playbooks/hydra-epic-close.md",
         "docs/operator-playbooks/hydra-qa.md",
-        "docs/operator-playbooks/hydra-research.md",
         "docs/operator-playbooks/hydra-target-research.md",
         "docs/quality-gates.md",
         "docs/reference.md",
@@ -1062,8 +1061,7 @@
         "CONTEXT-MAP.md",
         "CONTEXT.md",
         "docs/historical/README.md",
-        "docs/historical/candidate-feed.md",
-        "docs/operator-playbooks/hydra-discover.md"
+        "docs/historical/candidate-feed.md"
       ],
       "source": {
         "path": "docs/adr/0036-anchor-selection-retired-candidate-feed.md"

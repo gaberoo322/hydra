@@ -21,7 +21,7 @@
       "name": "hydra-architecture-scan",
       "path": "docs/operator-playbooks/hydra-architecture-scan.md",
       "stage": "pre-plan-producer",
-      "description": "Non-interactive architecture-scan wrapper. Composes the upstream improve-codebase-architecture Explore phase against the Orchestrator and emits the surfaced deepening candidates as GitHub issues via hydra-prd / to-tickets — Strong ones as needs-triage agent work, Worth-exploring and Untouchable-Core-primary ones parked as hitl-grill for the operator (#4027) — never entering the interactive operator grilling loop.",
+      "description": "Non-interactive architecture scan. Composes the upstream improve-codebase-architecture Explore phase against the Orchestrator and files the deepening candidates as GitHub issues — Strong ones as needs-triage, Worth-exploring and Verifier-Core-primary ones parked as hitl-grill — never entering the interactive grilling loop.",
       "dispatchedBy": [
         {
           "class": "architecture_orch",
@@ -325,7 +325,7 @@
       "name": "hydra-research",
       "path": "docs/operator-playbooks/hydra-research.md",
       "stage": "operator-interactive",
-      "description": "Research improvement opportunities for the Hydra orchestrator itself. Analyzes codebase architecture, control loop efficiency, learning system, agent quality, and infrastructure to produce actionable GitHub issues.",
+      "description": "Research improvement opportunities for the Hydra orchestrator itself. Analyzes codebase architecture, dispatch efficiency, learning system, agent quality, and infrastructure to produce actionable GitHub issues.",
       "dispatchedBy": [],
       "composedFrom": [],
       "route": "/docs/skill/hydra-research",
