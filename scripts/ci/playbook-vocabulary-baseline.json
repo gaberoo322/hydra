@@ -23,10 +23,6 @@
     "docs/operator-playbooks/_fragments/hydra-qa-reference.md": {
       "status": 6
     },
-    "docs/operator-playbooks/_fragments/thermo-nuclear-proposal-format.md": {
-      "status": 1,
-      "line-cite": 1
-    },
     "docs/operator-playbooks/hydra-architect.md": {
       "avoid-term": 2
     },
@@ -75,21 +71,12 @@
     "docs/operator-playbooks/hydra-skill-prune.md": {
       "status": 2
     },
-    "docs/operator-playbooks/hydra-sweep.md": {
-      "status": 1
-    },
     "docs/operator-playbooks/hydra-tool-scout.md": {
       "status": 3,
       "avoid-term": 1
     },
     "docs/operator-playbooks/hydra-wayfinder.md": {
       "status": 4
-    },
-    "docs/operator-playbooks/hydra-wire-or-retire.md": {
-      "status": 2
-    },
-    "docs/operator-playbooks/thermo-nuclear-code-quality-review.md": {
-      "status": 5
     }
   }
 }
