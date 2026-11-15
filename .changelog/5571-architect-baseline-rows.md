@@ -1,0 +1,1 @@
+- docs: hydra-architect drops its pointer to a missing goals file and a retired term (two occurrences); its vocabulary and reference baseline rows are removed (#5571)

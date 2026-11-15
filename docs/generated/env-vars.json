@@ -251,6 +251,18 @@
       }
     },
     {
+      "name": "HYDRA_API_URL",
+      "readSites": [
+        {
+          "path": "scripts/ops-collect.ts"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/ops-collect.ts"
+      }
+    },
+    {
       "name": "HYDRA_APP_METRICS_URL",
       "readSites": [],
       "inEnvExample": true,

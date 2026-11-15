@@ -9,7 +9,7 @@
       "name": "hydra-architect",
       "path": "docs/operator-playbooks/hydra-architect.md",
       "stage": "operator-interactive",
-      "description": "Strategic architecture review of Hydra as an autonomous software building system. Evaluates the control loop, research pipeline, agent quality, autonomy level, and knowledge systems against the operator's vision, then produces ranked recommendations.",
+      "description": "Strategic architecture review of Hydra as an autonomous software building system. Evaluates the decision loop, research pipeline, agent quality, autonomy level, and knowledge systems against the operator's vision, then produces ranked recommendations.",
       "dispatchedBy": [],
       "composedFrom": [],
       "route": "/docs/skill/hydra-architect",
@@ -21,7 +21,7 @@
       "name": "hydra-architecture-scan",
       "path": "docs/operator-playbooks/hydra-architecture-scan.md",
       "stage": "pre-plan-producer",
-      "description": "Non-interactive architecture-scan wrapper. Composes the upstream improve-codebase-architecture Explore phase against the Orchestrator and emits the surfaced deepening candidates as GitHub issues via hydra-prd / to-tickets — Strong ones as needs-triage agent work, Worth-exploring and Untouchable-Core-primary ones parked as hitl-grill for the operator (#4027) — never entering the interactive operator grilling loop.",
+      "description": "Non-interactive architecture scan. Composes the upstream improve-codebase-architecture Explore phase against the Orchestrator and files the deepening candidates as GitHub issues — Strong ones as needs-triage, Worth-exploring and Verifier-Core-primary ones parked as hitl-grill — never entering the interactive grilling loop.",
       "dispatchedBy": [
         {
           "class": "architecture_orch",
@@ -325,7 +325,7 @@
       "name": "hydra-research",
       "path": "docs/operator-playbooks/hydra-research.md",
       "stage": "operator-interactive",
-      "description": "Research improvement opportunities for the Hydra orchestrator itself. Analyzes codebase architecture, control loop efficiency, learning system, agent quality, and infrastructure to produce actionable GitHub issues.",
+      "description": "Research improvement opportunities for the Hydra orchestrator itself. Analyzes codebase architecture, dispatch efficiency, learning system, agent quality, and infrastructure to produce actionable GitHub issues.",
       "dispatchedBy": [],
       "composedFrom": [],
       "route": "/docs/skill/hydra-research",
@@ -617,7 +617,7 @@
       "name": "thermo-nuclear-code-quality-review",
       "path": "docs/operator-playbooks/thermo-nuclear-code-quality-review.md",
       "stage": "operator-interactive",
-      "description": "Operator-invoked, full-repo architectural review for infrastructure-scale ideation. Walks the entire codebase plus its operational surface (devops, CI, services, hosting, hardware), produces a free-form system map with ranked pressure points, then fires parallel deep-dives that propose code-judo restructurings — restructurings that delete whole subsystems, not polish them. Use when the operator wants a thermo-nuclear review, deep architectural audit, infrastructure ideation, or harsh full-repo quality sweep. Sibling to `improve-codebase-architecture` (module-scoped, opportunity-framed) — this skill is repo-scoped and blocker-framed.",
+      "description": "Operator-invoked full-repo architectural review at infrastructure scale. Maps the codebase and its operational surface, ranks pressure points, then runs parallel deep-dives proposing restructurings that delete whole subsystems. Use for a thermo-nuclear review, deep architectural audit, or harsh full-repo quality sweep. Repo-scoped sibling of the module-scoped `improve-codebase-architecture`.",
       "dispatchedBy": [],
       "composedFrom": [
         "docs/operator-playbooks/_fragments/thermo-nuclear-proposal-format.md"

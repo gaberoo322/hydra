@@ -20,7 +20,7 @@
       "body": 803
     },
     "docs/operator-playbooks/_fragments/hydra-dev-child-flow.md": {
-      "body": 2191
+      "body": 2215
     },
     "docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md": {
       "body": 2393
@@ -39,6 +39,9 @@
     },
     "docs/operator-playbooks/_fragments/reflection-telemetry-deposit.md": {
       "body": 138
+    },
+    "docs/operator-playbooks/_fragments/thermo-nuclear-proposal-format.md": {
+      "body": 795
     },
     "docs/operator-playbooks/hydra-architect.md": {
       "body": 898,
@@ -73,7 +76,7 @@
       "description": 24
     },
     "docs/operator-playbooks/hydra-digest.md": {
-      "body": 1236,
+      "body": 807,
       "description": 21
     },
     "docs/operator-playbooks/hydra-discover.md": {
@@ -81,7 +84,7 @@
       "description": 26
     },
     "docs/operator-playbooks/hydra-doctor.md": {
-      "body": 3256,
+      "body": 1002,
       "description": 15
     },
     "docs/operator-playbooks/hydra-epic-close.md": {
@@ -117,7 +120,7 @@
       "description": 27
     },
     "docs/operator-playbooks/hydra-research.md": {
-      "body": 2620,
+      "body": 2591,
       "description": 25
     },
     "docs/operator-playbooks/hydra-retro.md": {
@@ -133,7 +136,7 @@
       "description": 49
     },
     "docs/operator-playbooks/hydra-sweep.md": {
-      "body": 1853,
+      "body": 1849,
       "description": 30
     },
     "docs/operator-playbooks/hydra-target-build.md": {
@@ -173,7 +176,7 @@
       "description": 32
     },
     "docs/operator-playbooks/hydra-tool-scout.md": {
-      "body": 3324,
+      "body": 2697,
       "description": 36
     },
     "docs/operator-playbooks/hydra-wayfinder.md": {
@@ -181,8 +184,12 @@
       "description": 48
     },
     "docs/operator-playbooks/hydra-wire-or-retire.md": {
-      "body": 2741,
+      "body": 2291,
       "description": 37
+    },
+    "docs/operator-playbooks/thermo-nuclear-code-quality-review.md": {
+      "body": 2572,
+      "description": 46
     }
   }
 }

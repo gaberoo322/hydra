@@ -1,6 +1,6 @@
 ---
 name: hydra-research
-description: Research improvement opportunities for the Hydra orchestrator itself. Analyzes codebase architecture, control loop efficiency, learning system, agent quality, and infrastructure to produce actionable GitHub issues.
+description: Research improvement opportunities for the Hydra orchestrator itself. Analyzes codebase architecture, dispatch efficiency, learning system, agent quality, and infrastructure to produce actionable GitHub issues.
 when_to_use: "When the user says 'research hydra', 'improve the orchestrator', 'find orchestrator work', or when hydra-autopilot detects the orchestrator issue board is empty and the system has capacity."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*) WebSearch(*) WebFetch(*)
 arguments: [focus]
@@ -24,21 +24,11 @@ Then live state (parallel):
 cd ~/hydra && npm test 2>&1 | tail -5
 wc -l ~/hydra/src/*.ts | sort -rn | head -15
 
-hydra metrics --count 50 | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-trend=d.get('trend',d.get('metrics',[]))
-merged=sum(1 for m in trend if int(m.get('tasksMerged',0))>0)
-failed=sum(1 for m in trend if int(m.get('tasksFailed',0))>0)
-empty=sum(1 for m in trend if 'no task' in m.get('taskTitle','').lower() or 'skipped' in m.get('taskTitle','').lower())
-costs=[float(m.get('costUsd',0)) for m in trend]
-print(f'Cycles: {len(trend)} | Merged: {merged} | Failed: {failed} | Empty: {empty}')
-print(f'Merge rate: {100*merged//max(len(trend),1)}% | Empty rate: {100*empty//max(len(trend),1)}%')
-print(f'Total cost: \${sum(costs):.2f} | Cost/merge: \${sum(costs)/max(merged,1):.2f}')
-"
+# Cycle stats: cycles, mergedRate, failedRate, abandonedRate, tokensPerMergedPR.
+hydra metrics --count 50 | jq '.stats'
 
-# Outcome-impact ranking (issue #3283, epic #2628 reverse loop) — WHAT MOVED
-# OUTCOMES, not just what was noticed. Ridge marginal effects (#2630) folded
+# Outcome-impact ranking — WHAT MOVED OUTCOMES, not just what was noticed.
+# Ridge marginal effects folded
 # across leading metrics, favorability-oriented, per tier cost proxy. Trust only
 # rows where identifiabilitySuspect AND belowNoiseFloor are both false;
 # metricCount:0 means the ledger is dark (no impact signal yet).
@@ -57,26 +47,26 @@ If `$focus` provided, weight analysis toward that area.
 
 ## Phase 2: Parallel Research (3 agents)
 
-Spawn three researchers — Control Loop, Learning, Infrastructure. Each gets the full context and produces a JSON array of opportunities.
+Spawn three researchers — Efficiency, Learning, Infrastructure. Each gets the full context and produces a JSON array of opportunities.
 
 - **Claude:** `Task(...)` ×3 in one message.
 
-### Agent 1: Control Loop & Efficiency
+### Agent 1: Dispatch & Efficiency
 Investigate: empty cycle reduction, scope creep patterns, verification pipeline (mutation/JIT kill rates), model routing accuracy, cycle-time bottleneck, cost optimization (caching, context compression).
 
-Files: the autopilot decision and verification modules under `scripts/autopilot/` and `scripts/ci/` (the in-process control-loop modules were deleted, ADR-0006).
+Files: the autopilot decision and verification modules under `scripts/autopilot/` and `scripts/ci/`.
 
 Output: ≥5 opportunities as `[{"title","category":"efficiency","priority","description","acceptance_criteria":[...],"files":[...]}]`. When a finding naturally decomposes into multiple vertical slices, surface them as a `slices: [...]` array on the opportunity object (see **Epic vs. flat decision rule** below) so Phase 4 can route the finding through `hydra-prd`.
 
 ### Agent 2: Learning & Knowledge
 Investigate: agent memory recording / promotion / consolidation, episodic reflection injection, promoted-lesson staleness, pattern detection accuracy, knowledge gaps.
 
-Files: `learning.ts`, `redis-adapter.ts`, `context-builder.ts`, `pattern-detector.ts`, `prompt-evolution.ts`.
+Files: `src/pattern-memory/`, `src/reflections/`, `src/learning/`, `src/learning-lifecycle.ts`, `src/api/learning.ts`.
 
 Output: ≥5 opportunities (`category: "learning"`).
 
 ### Agent 3: Infrastructure & Reliability
-Investigate: test coverage gaps, silent catch blocks, redis-adapter migration progress, route validation, dashboard health, scheduler interval tuning, watchdog coverage, code quality (large files, dead code).
+Investigate: test coverage gaps, silent catch blocks, route validation, dashboard health, scheduler interval tuning, watchdog coverage, code quality (large files, dead code).
 
 Output: ≥5 opportunities (`category: "infrastructure"`).
 
@@ -86,18 +76,16 @@ Output: ≥5 opportunities (`category: "infrastructure"`).
 
 Use the **shared backfill dedup baseline** so a research run reaches the SAME
 duplicate verdict as the autonomous backfill classes (`hydra-discover` /
-`hydra-architecture-scan`) against the SAME inputs (issue #2554). The baseline
+`hydra-architecture-scan`) against the SAME inputs. The baseline
 is *open issues across every backfill label set + issues closed within the last
 14 days* — gathered with the same `gh issue list` calls used elsewhere. Build
 the title list once, then call the deterministic helper per candidate instead
 of eyeballing ">50% overlap":
 
 ```bash
-# Guard-compatible form (issue #3896): the worktree-isolation Bash guard refuses
-# the original process-substitution form `mapfile -t X < <(...)`. Write each
-# `gh issue list` call to the temp file (sequential `>` then `>>`), then
-# `mapfile` from the file path — identical BASELINE_TITLES contents. See
-# "Guard-compatible shell forms" in _fragments/hydra-dev-parent-flow.md.
+# Temp-file form, not process substitution: the worktree-isolation Bash guard
+# refuses `mapfile -t X < <(...)`. See "Guard-compatible shell forms" in
+# _fragments/hydra-dev-parent-flow.md.
 BASELINE_TMP=$(mktemp)
 gh issue list --state open --json number,title --jq '.[] | .title' > "$BASELINE_TMP"
 gh issue list --state closed --json number,title,closedAt \
@@ -114,13 +102,13 @@ node --experimental-strip-types scripts/ci/issue-dedup.ts \
 
 The helper (`isDuplicateIssue` / `partitionCandidates` in
 `scripts/ci/issue-dedup.ts`) keys on normalised word-set Jaccard overlap >50%
-— the historical prose rule, now deterministic so the board-filling skills
+— deterministic, so the board-filling skills
 can't disagree at the margin and double-file. After classifying a finding,
 append its **kept** title to `$BASELINE_TITLES` before classifying the next so
 two findings within THIS run also dedup against each other.
 
-> **Note (issue #2554):** `hydra-research` is the board-filler and is
-> **operator/manual-only** — it has no autopilot dispatch path (post-#458 the
+> **Note:** `hydra-research` is the board-filler and is
+> **operator/manual-only** — it has no autopilot dispatch path (the
 > `research_orch` class dispatches `hydra-issue-research`, which enriches ONE
 > named issue, not this skill). So the live same-idle-window double-file
 > collision the shared baseline guards against is `hydra-discover` ↔
@@ -135,8 +123,8 @@ two findings within THIS run also dedup against each other.
 1. **Measured outcome-impact** (heaviest weight) — when the `/attribution/impact`
    ranking (Phase 1) shows a non-suspect, above-noise-floor producer class with
    high `impactPerCost`, findings that touch that area rank ABOVE equally-noticed
-   findings elsewhere. This is the empirical merge→outcome-delta signal (#2628
-   reverse loop), preferred over the notice-based proxies below. Cite the
+   findings elsewhere. This is the empirical merge→outcome-delta signal,
+   preferred over the notice-based proxies below. Cite the
    `impactPerCost` + flags in the finding's evidence. If `metricCount:0` (dark
    ledger), fall back to the proxies below and do not fabricate impact claims.
 2. Merge-rate impact
@@ -198,7 +186,7 @@ Then append the map's title to `$BASELINE_TITLES` so later findings in THIS run 
 
 **Invariants (ADR-0029 Decision 1 + 3 + 5):**
 - The map carries BOTH labels `wayfinder:map` AND `wayfinder:destination-pending`, and its body is `## Destination` + `## Not yet specified` **ONLY** — **zero tickets**, no `## Sub-issues` block, no `## Decisions so far` content. Draft scope is destination-only: the gate sits between wayfinder's name-destination and map-the-frontier steps, so ticket-charting is the first working action AFTER the operator approves the destination (an amendment strands no tickets).
-- The `wayfinder:map` + `wayfinder:destination-pending` label pair is the exact contract the already-merged frontier collector (the Turn Snapshot collectors (`src/autopilot/turn-snapshot/`)) reads: it counts a map's AFK tickets as dispatchable ONLY when the map LACKS `wayfinder:destination-pending`. *Approve* = the operator removes the label; the producer emits exactly what the collector recognizes.
+- The `wayfinder:map` + `wayfinder:destination-pending` label pair is the exact contract the frontier collector (`src/autopilot/turn-snapshot/afk-frontier.ts`) reads: it counts a map's AFK tickets as dispatchable ONLY when the map LACKS `wayfinder:destination-pending`. *Approve* = the operator removes the label; the producer emits exactly what the collector recognizes.
 - **Off-radar rule (ADR-0029 Decision 3):** the map carries NO lifecycle label (no `ready-for-agent` / `needs-triage` / `enhancement`) — `wayfinder:*` tickets stay invisible to `hydra-sweep` and the orphan-backstop. Dispatchability comes from the dedicated map-frontier signal, not from relabeling. The operator drains destination-pending maps via the `hydra-review` bucket.
 
 ### Epic vs. flat decision rule
@@ -287,7 +275,7 @@ If `hydra-prd` exits non-zero on `--apply` (e.g. `gh issue create` 422 mid-batch
 For findings the classifier routes flat, file each slice as its own GitHub issue with the canonical agent-ready body:
 
 The `Source: …` provenance footer comes from the shared helper
-(`scripts/hydra/footer.sh`, issue #2556) — composed OUTSIDE the single-quoted
+(`scripts/hydra/footer.sh`) — composed OUTSIDE the single-quoted
 heredoc so the `<<'EOF'` injection-safety quoting is preserved:
 
 ```bash
@@ -373,7 +361,7 @@ fi
 date -u +%Y-%m-%dT%H:%M:%SZ > /tmp/hydra-last-orchestrator-research.txt
 ```
 
-## Slot lifecycle events — PostToolUse hook (issue #671)
+## Slot lifecycle events — PostToolUse hook
 
 Every tool call inside this skill emits a `subagent_tool_call` event onto the
 Redis stream `hydra:autopilot:slot-events`. The classification is done at

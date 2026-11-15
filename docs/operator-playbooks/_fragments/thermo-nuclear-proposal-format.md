@@ -31,7 +31,7 @@ Explicit list of files / services / abstractions / concepts the proposal removes
 - scripts/hydra-orchestrator-watchdog.sh (94 lines)
 - systemd unit: hydra-orchestrator-watchdog.timer + .service
 - The concept of "watchdog cadence" separate from "autopilot cadence"
-- The watchdog's deliberate-stop reconciliation flag (src/scheduler.ts:142-178)
+- The watchdog's deliberate-stop reconciliation flag (src/<module>.ts, lines <a>-<b>)
 ```
 <!-- ref-check: example-end -->
 
@@ -46,7 +46,7 @@ Do not reject the proposal — the operator may still find it useful. Just flag 
 Two sub-lists:
 
 - **Supporting** — ADRs whose decisions this proposal builds on. Cite by number + slug.
-- **Contradicting** — ADRs this proposal asks to revisit. For each, state explicitly what the ADR currently says and why this proposal asks for a revision.
+- **Contradicting** — ADRs this proposal asks to revisit. For each, state explicitly what the ADR says and why this proposal asks for a revision.
 
 If no ADRs are relevant, say so explicitly: `No ADRs touch this proposal — consider whether the resulting decision merits a new ADR.`
 

@@ -125,6 +125,7 @@
     "test/operator-actions-parity.test.mts": "drift-guard",
     "test/operator-actions-registry.test.mts": "grandfathered",
     "test/operator-channel.test.mts": "grandfathered",
+    "test/ops-collect.test.mts": "behaviour",
     "test/operator-notify-cli.test.mts": "behaviour",
     "test/otel-ingest.test.mts": "grandfathered",
     "test/pace-gate-allow.test.mts": "behaviour",
@@ -403,11 +404,11 @@
     },
     "test/qa-reviewer-commit-a.test.mts": {
       "code": 2,
-      "prompt": 7
+      "prompt": 5
     },
     "test/qa-reviewer-commit-b.test.mts": {
       "code": 2,
-      "prompt": 4
+      "prompt": 2
     },
     "test/redis-db-helper.test.mts": {
       "code": 8,

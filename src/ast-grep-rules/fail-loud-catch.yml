@@ -36,6 +36,11 @@ message: >-
 note: >-
   Advisory fail-loud lint (issue #4732). hydra-dev runs it on the PR's changed
   files pre-PR; existing hits on master are not a blocker.
+# Path partition (issue #5435): `src/**/*.ts` is linted by the sibling rule
+# `fail-loud-catch-src` (console.* is NOT a logs branch there, STD-LOG-PINO-SEAM).
+# This generic rule ignores `src/**/*.ts` (`.mts` stays here); its semantics are unchanged elsewhere.
+ignores:
+  - "src/**/*.ts"
 rule:
   kind: catch_clause
   not:
