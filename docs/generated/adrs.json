@@ -82,7 +82,6 @@
         "docs/historical/hydra-betting/direction/goals.md",
         "docs/historical/hydra-betting/direction/roadmap.md",
         "docs/operator-playbooks/hydra-architect.md",
-        "docs/operator-playbooks/hydra-doctor.md",
         "docs/operator-playbooks/hydra-target-cleanup.md",
         "docs/reference.md",
         "docs/target-swap-runbook.md"
@@ -202,7 +201,6 @@
         "docs/historical/hydra-betting/direction/roadmap.md",
         "docs/operations/glm-lane.md",
         "docs/operator-playbooks/hydra-architecture-scan.md",
-        "docs/operator-playbooks/hydra-branch-prune.md",
         "docs/operator-playbooks/hydra-cleanup.md",
         "docs/operator-playbooks/hydra-grill.md",
         "docs/operator-playbooks/hydra-sweep.md",
@@ -251,11 +249,9 @@
         "docs/historical/merge-gate.md",
         "docs/observability/README.md",
         "docs/operations/process-cleanup.md",
-        "docs/operator-playbooks/hydra-branch-prune.md",
         "docs/operator-playbooks/hydra-dev.md",
         "docs/operator-playbooks/hydra-epic-close.md",
         "docs/operator-playbooks/hydra-qa.md",
-        "docs/operator-playbooks/hydra-research.md",
         "docs/operator-playbooks/hydra-target-research.md",
         "docs/quality-gates.md",
         "docs/reference.md",
@@ -465,7 +461,6 @@
         "docs/adr/0034-orchestrator-dashboard-page-inventory.md",
         "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md",
         "docs/operator-playbooks/hydra-architect.md",
-        "docs/operator-playbooks/hydra-doctor.md",
         "docs/operator-playbooks/hydra-grill.md",
         "docs/operator-playbooks/hydra-review.md",
         "docs/operator-playbooks/hydra-target-build.md"
@@ -537,6 +532,7 @@
         "docs/evals.md",
         "docs/operations/watchdog.md",
         "docs/operator-playbooks/hydra-architecture-scan.md",
+        "docs/operator-playbooks/hydra-autopilot.md",
         "docs/operator-playbooks/hydra-epic-sprint.md",
         "docs/operator-playbooks/hydra-qa.md",
         "docs/quality-gates.md",
@@ -914,10 +910,7 @@
         "docs/adr/0033-openviking-knowledge-plane-retired.md",
         "docs/adr/0037-hydra-adrs-are-agent-facing-normative-specs.md",
         "docs/adr/0047-work-item-lifecycle-is-data.md",
-        "docs/operator-playbooks/hydra-architect.md",
         "docs/operator-playbooks/hydra-autopilot.md",
-        "docs/operator-playbooks/hydra-digest.md",
-        "docs/operator-playbooks/hydra-doctor.md",
         "docs/operator-playbooks/hydra-review.md",
         "docs/operator-playbooks/hydra-target-build.md",
         "docs/operator-playbooks/hydra-target-cleanup.md",
@@ -1062,8 +1055,7 @@
         "CONTEXT-MAP.md",
         "CONTEXT.md",
         "docs/historical/README.md",
-        "docs/historical/candidate-feed.md",
-        "docs/operator-playbooks/hydra-discover.md"
+        "docs/historical/candidate-feed.md"
       ],
       "source": {
         "path": "docs/adr/0036-anchor-selection-retired-candidate-feed.md"

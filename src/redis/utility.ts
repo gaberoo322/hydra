@@ -12,6 +12,11 @@ export async function redisInfo(section: string): Promise<string> {
   return r.info(section);
 }
 
+/** Number of keys in the selected Redis database (DBSIZE). Diagnostic helper. */
+export async function redisDbSize(): Promise<number> {
+  return getRedisConnection().dbsize();
+}
+
 /**
  * Liveness probe: PING the shared connection and report whether Redis answered
  * PONG. Owns the raw `getRedisConnection().ping()` call inside the seam so

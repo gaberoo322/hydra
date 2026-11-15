@@ -5,21 +5,12 @@
       "route /api/autopilot/inflight"
     ],
     "docs/operator-playbooks/_fragments/hydra-autopilot-phase6-ops.md": [
-      "path src/api/autopilot.ts",
       "superseded-adr 0004"
     ],
     "docs/operator-playbooks/_fragments/hydra-qa-reference.md": [
       "path .github/workflows/deploy.yml",
       "superseded-adr 0004",
       "symbol src/redis/holdback.ts#windowCyclesForTier"
-    ],
-    "docs/operator-playbooks/hydra-architect.md": [
-      "path config/direction/goals.md",
-      "route /api/backlog"
-    ],
-    "docs/operator-playbooks/hydra-doctor.md": [
-      "path docs/agents/wiring-status.md",
-      "route /api/backlog"
     ],
     "docs/operator-playbooks/hydra-qa.md": [
       "path config/feedback/to-planner.md"

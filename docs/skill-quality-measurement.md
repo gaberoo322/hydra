@@ -40,7 +40,7 @@
 | `hydra-architect` | 1,074 | 936 | −138 | −12.8% |
 | `hydra-wire-or-retire` | 2,619 | 2,552 | −67 | −2.6% |
 | `hydra-design-qa` | 1,136 | 1,074 | −62 | −5.5% |
-| `hydra-auto-merge-window` (retired, #5493) | 2,045 | 1,990 | −55 | −2.7% |
+| `hydra-auto-merge-window` | 2,045 | 1,990 | −55 | −2.7% |
 | `hydra-target-cleanup` | 1,943 | 1,895 | −48 | −2.5% |
 | `hydra-architecture-scan` | 3,888 | 3,858 | −30 | −0.8% |
 | `hydra-prd` | 1,942 | 1,913 | −29 | −1.5% |
