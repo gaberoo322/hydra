@@ -1,7 +1,9 @@
 import { spawnSync } from "node:child_process";
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   REDIS_BACKUP_STALE_HOURS,
   WIRING_GRACE_DAYS,
@@ -32,7 +34,8 @@ import {
   targetTimerPattern,
   type CollectorResult,
 } from "../scripts/ops-collect-logic.ts";
-import { COLLECTORS, helpText, run, type Adapters } from "../scripts/ops-collect.ts";
+import { COLLECTORS, helpText, listDirFiles, run, type Adapters } from "../scripts/ops-collect.ts";
+import { decideRedisBackup } from "../src/watchdog/redis-backup.ts";
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -261,9 +264,16 @@ describe("timers collector", () => {
         targetName: "acme",
       }),
     );
-    assert.deepEqual(d.findings, ["TIMER NEVER FIRED: hydra-b.timer", "TIMER NOT ENABLED: hydra-c.timer (disabled)"]);
+    assert.deepEqual(d.findings, [
+      "TIMER NEVER FIRED: hydra-b.timer",
+      "TIMER NOT SCHEDULED: hydra-b.timer",
+      "TIMER NOT ENABLED: hydra-c.timer (disabled)",
+    ]);
     assert.equal(d.repo[0].last, "2026-06-15T11:00:00.000Z");
-    assert.match(renderText("timers", { ok: true, data: d }), /^timers: TIMER NEVER FIRED: hydra-b\.timer; TIMER NOT ENABLED: hydra-c\.timer \(disabled\)/);
+    assert.match(
+      renderText("timers", { ok: true, data: d }),
+      /^timers: TIMER NEVER FIRED: hydra-b\.timer; TIMER NOT SCHEDULED: hydra-b\.timer; TIMER NOT ENABLED: hydra-c\.timer \(disabled\)/,
+    );
   });
 
   test("the Target's timers are the live units matching the resolved name's glob", () => {
@@ -298,25 +308,85 @@ describe("timers collector", () => {
     assert.equal(failure(lost).code, "host-probe-failed");
     assert.equal(failure(collectTimers({ systemdFiles: ["x.service"], enabledStates: {}, live: [], targetName: null })).code, "no-timers");
   });
+
+  test("a lost is-enabled probe is unknown state, not a NOT ENABLED finding", () => {
+    const d = data(
+      collectTimers({ systemdFiles: files, enabledStates: { "hydra-a.timer": "enabled", "hydra-b.timer": null }, live, targetName: null }),
+    );
+    assert.deepEqual(d.findings, []);
+    assert.equal(d.repo[1].enabled, null);
+    const text = renderText("timers", { ok: true, data: d });
+    assert.match(text, /hydra-b\.timer: enabled=unknown/);
+    assert.doesNotMatch(text, /NOT ENABLED/);
+  });
+
+  test("an enabled timer that never fired and has no next run reports both findings", () => {
+    const d = data(
+      collectTimers({ systemdFiles: files, enabledStates: { "hydra-a.timer": "enabled", "hydra-b.timer": "enabled" }, live, targetName: null }),
+    );
+    assert.deepEqual(d.findings, ["TIMER NEVER FIRED: hydra-b.timer", "TIMER NOT SCHEDULED: hydra-b.timer"]);
+    const scheduledOnly = data(
+      collectTimers({
+        systemdFiles: files,
+        enabledStates: { "hydra-a.timer": "enabled", "hydra-b.timer": "enabled" },
+        live: [live[0], { unit: "hydra-b.timer", last: us("2026-06-15T09:00:00Z"), next: 0 }],
+        targetName: null,
+      }),
+    );
+    assert.deepEqual(scheduledOnly.findings, ["TIMER NOT SCHEDULED: hydra-b.timer"]);
+  });
 });
 
 describe("redis-backup, journal-errors, target-git", () => {
-  test("redis-backup reports the newest dump and goes stale past the threshold", () => {
+  test("redis-backup reports the newest dump and goes stale AT the threshold, as the watchdog does", () => {
+    const justUnder = NOW - REDIS_BACKUP_STALE_HOURS * HOUR + 1000;
     const fresh = data(
       collectRedisBackup(
         [
           { name: "hydra-redis-old.rdb.gz", mtimeMs: NOW - 50 * HOUR },
-          { name: "hydra-redis-new.rdb.gz", mtimeMs: NOW - REDIS_BACKUP_STALE_HOURS * HOUR },
+          { name: "hydra-redis-new.rdb.gz", mtimeMs: justUnder },
           { name: "notes.txt", mtimeMs: NOW },
         ],
         NOW,
       ),
     );
     assert.equal(fresh.newest, "hydra-redis-new.rdb.gz");
-    assert.equal(fresh.ageHours, REDIS_BACKUP_STALE_HOURS);
+    assert.equal(fresh.ageHours, REDIS_BACKUP_STALE_HOURS - 1);
     assert.equal(fresh.stale, false);
-    const stale = data(collectRedisBackup([{ name: "hydra-redis-x.rdb.gz", mtimeMs: NOW - (REDIS_BACKUP_STALE_HOURS + 1) * HOUR }], NOW));
+    const atThreshold = NOW - REDIS_BACKUP_STALE_HOURS * HOUR;
+    const stale = data(collectRedisBackup([{ name: "hydra-redis-x.rdb.gz", mtimeMs: atThreshold }], NOW));
+    assert.equal(stale.ageHours, REDIS_BACKUP_STALE_HOURS);
     assert.equal(stale.stale, true);
+    for (const mtimeMs of [justUnder, atThreshold]) {
+      const watchdog = decideRedisBackup({ name: "x", mtimeS: Math.floor(mtimeMs / 1000) }, Math.floor(NOW / 1000), REDIS_BACKUP_STALE_HOURS);
+      assert.equal(data(collectRedisBackup([{ name: "hydra-redis-x.rdb.gz", mtimeMs }], NOW)).stale, watchdog.stale);
+    }
+  });
+
+  test("a missing backup directory lists as empty, so the collector reports NONE FOUND instead of failing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ops-collect-backup-"));
+    try {
+      const listed = listDirFiles(join(dir, "absent"));
+      assert.deepEqual(listed, []);
+      const none = collectRedisBackup(listed, NOW);
+      assert.equal(data(none).stale, true);
+      assert.match(renderText("redis-backup", none), /^redis-backup: NONE FOUND/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a file that cannot be stat-ed is left out of the listing; the rest are kept", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ops-collect-backup-"));
+    try {
+      writeFileSync(join(dir, "hydra-redis-kept.rdb.gz"), "x");
+      symlinkSync(join(dir, "gone"), join(dir, "hydra-redis-vanished.rdb.gz"));
+      const listed = listDirFiles(dir);
+      assert.deepEqual(listed.map((f) => f.name), ["hydra-redis-kept.rdb.gz"]);
+      assert.equal(data(collectRedisBackup(listed, Date.now())).newest, "hydra-redis-kept.rdb.gz");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("redis-backup with no dump is a stale finding, not a failure", () => {
