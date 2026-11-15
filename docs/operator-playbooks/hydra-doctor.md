@@ -108,7 +108,7 @@ Report-only, never act:
 
 Quick wins:
 
-- Restart `hydra-tunnel` when the external check is non-200.
+- Restart hydra-tunnel when external check is non-200.
 - Restart a failed service only after fixing its root cause; a blind restart fails again.
 - Start Postgres if missing: `cd ~/hydra && docker compose up -d postgres`.
 - Converge a `drift` verdict only by running `scripts/deploy.sh` from the `~/hydra` master checkout. If the drift check names a dirty-tree cause, report the path instead.
