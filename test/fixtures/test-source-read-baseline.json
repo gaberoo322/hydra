@@ -403,11 +403,11 @@
     },
     "test/qa-reviewer-commit-a.test.mts": {
       "code": 2,
-      "prompt": 7
+      "prompt": 5
     },
     "test/qa-reviewer-commit-b.test.mts": {
       "code": 2,
-      "prompt": 4
+      "prompt": 2
     },
     "test/redis-db-helper.test.mts": {
       "code": 8,
