@@ -514,12 +514,6 @@
       "title": "Hydra Architecture Scan (headless deepening wrapper)"
     },
     {
-      "path": "docs/operator-playbooks/hydra-auto-merge-window.md",
-      "tier": "playbook",
-      "route": "/docs/skill/hydra-auto-merge-window",
-      "title": "Hydra Auto-Merge Window"
-    },
-    {
       "path": "docs/operator-playbooks/hydra-autopilot.md",
       "tier": "playbook",
       "route": "/docs/skill/hydra-autopilot",
@@ -590,12 +584,6 @@
       "tier": "playbook",
       "route": "/docs/skill/hydra-hitl-grill",
       "title": "Hydra HITL Grill — drain the park lane"
-    },
-    {
-      "path": "docs/operator-playbooks/hydra-incident.md",
-      "tier": "playbook",
-      "route": "/docs/skill/hydra-incident",
-      "title": "Hydra Incident"
     },
     {
       "path": "docs/operator-playbooks/hydra-issue-research.md",
