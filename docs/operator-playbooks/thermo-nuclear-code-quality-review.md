@@ -1,6 +1,6 @@
 ---
 name: thermo-nuclear-code-quality-review
-description: Operator-invoked, full-repo architectural review for infrastructure-scale ideation. Walks the entire codebase plus its operational surface (devops, CI, services, hosting, hardware), produces a free-form system map with ranked pressure points, then fires parallel deep-dives that propose code-judo restructurings — restructurings that delete whole subsystems, not polish them. Use when the operator wants a thermo-nuclear review, deep architectural audit, infrastructure ideation, or harsh full-repo quality sweep. Sibling to `improve-codebase-architecture` (module-scoped, opportunity-framed) — this skill is repo-scoped and blocker-framed.
+description: Operator-invoked full-repo architectural review at infrastructure scale. Maps the codebase and its operational surface, ranks pressure points, then runs parallel deep-dives proposing restructurings that delete whole subsystems. Use for a thermo-nuclear review, deep architectural audit, or harsh full-repo quality sweep. Repo-scoped sibling of the module-scoped `improve-codebase-architecture`.
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Write(*) Agent(*)
 disable-model-invocation: true
 reference_files: [_fragments/thermo-nuclear-proposal-format.md]
@@ -8,7 +8,7 @@ reference_files: [_fragments/thermo-nuclear-proposal-format.md]
 
 # Thermo-Nuclear Code Quality Review
 
-A harsh, full-repo, **infrastructure-scale** architectural review. Looks for **code-judo moves** — restructurings that delete whole subsystems, services, conditionals, layers, or operational concepts rather than rearranging them. Anchored against the repo's documented architecture (CONTEXT.md, ADRs) and live source via the repo's two search lanes — probe-search for fuzzy recall and ast-search for exact syntax (see [Search usage](#search-usage)). The former semantic-retrieval backend is retired (ADR-0033); a question that used to route there now routes to probe-search.
+A harsh, full-repo, **infrastructure-scale** architectural review. Looks for **code-judo moves** — restructurings that delete whole subsystems, services, conditionals, layers, or operational concepts rather than rearranging them. Anchored against the repo's documented architecture (CONTEXT.md, ADRs) and live source via the repo's two search lanes — probe-search for fuzzy recall and ast-search for exact syntax (see [Search usage](#search-usage)).
 
 ## Identity
 
@@ -24,8 +24,8 @@ This skill exists to find **dramatic structural simplifications** at the scale o
 Not in scope:
 
 - Module-level deepening — that's `/improve-codebase-architecture`
-- Diff-scoped review — that's `/review` and the source `thermo-nuclear-code-quality-review` it descends from
-- Discovering single bugs — that's `/diagnose`
+- Diff-scoped review — that's `/code-review`
+- Discovering single bugs — that's `/diagnosing-bugs`
 
 **Frequency:** monthly, or on-demand before a major planning meeting. Not daily — the system map doesn't change fast enough to justify the token cost.
 
@@ -35,11 +35,11 @@ Not in scope:
 |---|---|---|---|
 | `thermo-nuclear-code-quality-review` (this) | whole repo + infra | blocker / dramatic-simplification | free-form proposal docs |
 | `improve-codebase-architecture` | one module at a time | deepening opportunities | grilled deepening proposal |
-| `review` | a diff | standards + spec conformance | two-axis report |
-| `diagnose` | one bug | reproduction → root cause | minimal fix + regression test |
+| `code-review` | a diff | standards + spec conformance | two-axis report |
+| `diagnosing-bugs` | one bug | reproduction → root cause | minimal fix + regression test |
 | `grill-with-docs` | one plan | resolve open questions | sharpened plan + CONTEXT/ADR updates |
 
-If the operator says "review this branch" → `/review`. "Improve this module" → `/improve-codebase-architecture`. "Find the biggest reshapes this whole system needs" → this skill.
+If the operator says "review this branch" → `/code-review`. "Improve this module" → `/improve-codebase-architecture`. "Find the biggest reshapes this whole system needs" → this skill.
 
 ## Process
 
@@ -72,7 +72,7 @@ Rank the full pool. Top `N` (default 5, knob: `--pressure-points=N`) go to Phase
 
 1. **Deletion yield** — how much complexity disappears if this lands? *Highest weight.* A pressure point that retires a whole service outranks one that polishes a module even if the second is more obviously broken.
 2. **Operational blast radius** — how many systems / services / CI minutes / on-call surfaces are affected right now? Bigger = higher leverage to fix.
-3. **Active ADR drift** — is the system *currently* decaying away from a documented decision in this area? Drifted ADRs lift the pressure points that touch them, because the rot is ongoing, not theoretical.
+3. **Active ADR drift** — is the system decaying away from a documented decision in this area? Drifted ADRs lift the pressure points that touch them, because the rot is ongoing, not theoretical.
 4. **Evidence strength** — can the operator verify the finding in seconds via grep? Higher = ranks higher (lower trust overhead).
 5. **Reversibility** — easier-to-reverse moves win the tiebreaker. Lower regret cost.
 
@@ -100,7 +100,7 @@ Everything else (subsystem inventory, operational surface, code-shape metrics, m
 
 #### Re-run diffing
 
-On day 2+, before generating Phase 1a, read the most recent `.thermonuclear/map-*.md`. Find what has changed since that map's date with `git log --since=<map-date> --name-only` (or `git diff <map-commit>..HEAD --name-only`); use probe-search to re-derive context for any changed subsystem. Subsystems unchanged → carry their entries forward. Subsystems changed → re-map. Pressure points carry forward with status: open / resolved (no longer detectable) / superseded (replaced by a different pressure point). Surface a `## Diff vs. previous map` section showing newly drifted ADRs and resolved/superseded pressure points.
+On day 2+, before generating Phase 1a, read the most recent `.thermonuclear/map-*.md`. Find what has changed since that map's date with `git log --since=<map-date> --name-only` (or `git diff <map-commit>..HEAD --name-only`); use probe-search to re-derive context for any changed subsystem. Subsystems unchanged → carry their entries forward. Subsystems changed → re-map. Pressure points carry forward with status: open / resolved (undetectable on this run) / superseded (replaced by a different pressure point). Surface a `## Diff vs. previous map` section showing newly drifted ADRs and resolved/superseded pressure points.
 
 ### Phase 2 — Parallel deep-dives, then triage, then grill survivors
 
@@ -143,28 +143,28 @@ After grilling, the sharpened proposal stays at `.thermonuclear/proposals/<slug>
 
 Every proposal the operator marked `accept` (or `grill-me` and kept) reaches this step. Its job is to close the gap that otherwise leaves accepted proposals stranded on disk: turn the proposal into **queued work the autopilot can pick up**, without weakening the never-*auto*-file guardrail. The distinction is deliberate — the skill still never files behind the operator's back; filing is an explicit, operator-confirmed action *after* an `accept`.
 
-This mirrors `hydra-architecture-scan` §4's routing exactly. For each accepted proposal, count the tracer-bullet slices it decomposes into (a slice = one independently-mergeable PR with concrete `filesInScope` paths), then route:
+The thresholds are the ones `hydra-architecture-scan` §4 routes on. For each accepted proposal, count the tracer-bullet slices it decomposes into (a slice = one independently-mergeable PR with concrete `filesInScope` paths), then route:
 
 | Proposal shape | Route | How |
 |---|---|---|
 | **≥3 slices** in dependency order | `hydra-prd` epic | Render the proposal into a `PrdInput` JSON (title/problem/rationale/expectedGlossaryTerms/slices[] — map the code-judo move → `problem`, cited ADRs + deletion yield → `rationale`, the "What gets deleted" file:line list → each slice's `filesInScope`). |
-| **1–2 slices** | `/to-tickets` | Fewer than 3 slices means the work isn't epic-shaped; render a to-tickets input instead. |
-| **Still foggy + big** after grilling (rare — grilling de-fogs) | `hydra-wayfinder` | Chart a destination-pending map; the proposal is an initiative, not yet a decomposition. |
+| **1–2 slices** | `/to-tickets` | Fewer than 3 slices means the work isn't epic-shaped; draft the issue bodies with to-tickets instead. |
+| **Still foggy + big** after grilling (rare — grilling de-fogs) | `hydra-wayfinder` | Chart a destination-pending map; the proposal is an initiative, not a decomposition. |
 
 **Operator gate (this is the load-bearing safety property).** Never `--apply` unprompted. For each proposal:
-1. Render the `PrdInput` / to-tickets JSON and run the target skill in **dry-run** (`hydra-prd` is dry-run by default; pass `--apply` only on confirm). Show the rendered parent epic + child bodies.
-2. **Stop and get explicit operator confirmation before filing.** thermo-nuclear operates at infrastructure scale — a proposal may retire a tier, a service, or a Verifier-Core path (ADR-0005 escalation territory: T4 / Verifier-Core / vision conflict). Those must never be auto-queued. If the proposal's tier (from `GET /api/tier` on its `filesInScope`) is **T4 or touches a Verifier-Core path**, say so loudly and route to the operator as an escalation, *not* into `hydra-prd`.
-3. On confirm, `--apply`, then report the created epic/issue numbers. Leave the proposal doc in place (it's the design-of-record the issues link back to).
+1. Render the `PrdInput` JSON and run `hydra-prd` in **dry-run** (its default; pass `--apply` only on confirm), or draft the to-tickets issue bodies without filing. Show the rendered parent epic + child bodies.
+2. **Stop and get explicit operator confirmation before filing.** thermo-nuclear operates at infrastructure scale — a proposal may retire a tier, a service, or a Verifier-Core path (ADR-0005 escalation territory: T4 / Verifier-Core / vision conflict). Those must never be auto-queued. If the proposal's tier (from `GET /api/tier?files=<comma-separated filesInScope>`) is **T4 or touches a Verifier-Core path**, say so loudly and route to the operator as an escalation, *not* into `hydra-prd`.
+3. On confirm, file (`--apply` for `hydra-prd`), then report the created epic/issue numbers. Leave the proposal doc in place (it's the design-of-record the issues link back to).
 
 The operator may also still decline the handoff entirely and take the proposal manually — copy into `gh issue create`, drop into `docs/adr/`, or just start coding. **The skill never auto-files; it renders-then-confirms.**
 
 ## Search usage
 
-This skill anchors every claim against the repo's documented architecture (CONTEXT.md, the ADRs) and live source via the repo's **two** search lanes. **The former semantic-retrieval backend is retired (ADR-0033)** — there is no semantic-search backend behind this skill, and a question that used to route there now routes to one of the two lanes below. Do not invent a replacement backend.
+This skill anchors every claim against the repo's documented architecture (CONTEXT.md, the ADRs) and live source via the repo's **two** search lanes. There is no semantic-search backend (ADR-0033); do not invent one.
 
 ### When you don't yet know the exact name — probe-search (fuzzy relevance)
 
-For relevance-ranked recall across the whole tree — "where is the watchdog wired", "find the retry logic", "what touches the Redis/Postgres/disk boundary" — use probe-search. It combines ripgrep speed with tree-sitter parsing and BM25 ranking, returns whole code *blocks* (not lines), and needs no index. This is the direct replacement for the retired semantic backend's "find by meaning" recall (ADR-0033):
+For relevance-ranked recall across the whole tree — "where is the watchdog wired", "find the retry logic", "what touches the Redis/Postgres/disk boundary" — use probe-search. It combines ripgrep speed with tree-sitter parsing and BM25 ranking, returns whole code *blocks* (not lines), and needs no index:
 
 ```
 npm run probe-search -- --query 'watchdog health check wiring'
@@ -175,18 +175,18 @@ npm run probe-search -- --query 'watchdog health check wiring'
 For call-site / AST questions — "every caller of `moveItemToLane`", "every `new Redis(...)` outside `src/redis/`", "every `catch` that swallows" — use ast-search. It matches *syntax*, so it never false-matches a comment or string literal:
 
 ```
-npm run ast-search -- --pattern 'new Redis(:[args])'
+npm run ast-search -- --pattern 'new Redis($$$)'
 ```
 
 ### Retrieval routing
 
-- **ADR fragments** (Phase 2 deep-dive context): read `docs/adr/` directly — `ls docs/adr/` for the roster (or open `docs/adr/README.md`), then read the ADRs whose decisions the pressure point touches. There is no index to query and no cross-corpus contamination to filter out (the retired semantic backend's URI-prefix filtering step is moot — ADR-0033).
+- **ADR fragments** (Phase 2 deep-dive context): read `docs/adr/` directly — `ls docs/adr/` for the roster (or open `docs/adr/README.md`), then read the ADRs whose decisions the pressure point touches. There is no index to query.
 - **Source context** (subsystem snippets for a deep-dive): probe-search scoped toward the subsystem's directory, or ast-search when you can name the symbol precisely.
 - **Config / CONTEXT.md**: read the file directly, or probe-search when you don't know which section.
 
 ### No health check, no degraded mode
 
-These are local CLI invocations with no standing service behind them, so there is nothing to ping and nothing to degrade. probe-search and ast-search either return results or fail loud on a missing invocation — treat a zero-result query as "narrow the wording or read the files directly", not as a service outage. The honest-recall discipline (cite `file:path:line` for every claim) is unchanged.
+These are local CLI invocations with no standing service behind them, so there is nothing to ping and nothing to degrade. probe-search and ast-search either return results or fail loud on a missing invocation — treat a zero-result query as "narrow the wording or read the files directly", not as a service outage. Cite `file:path:line` for every claim either way.
 
 ## ADR drift detection
 
@@ -231,7 +231,7 @@ The operator dismisses overconfident-but-wrong proposals less, and sharpens unce
 - **Do not auto-file** issues, PRs, or ADRs. Filing happens only in the Phase 2d handoff, and only after an explicit `accept` + operator confirmation on a dry-run render — never behind the operator's back, and never for a T4 / Verifier-Core proposal (those escalate to the operator instead).
 - **Do not propose changes you can't defend with file:line citations.** Every claim needs evidence.
 - **Do not skip the empty-deleted-set check.** If a proposal's "What gets deleted" comes up empty after grilling, surface it at the top of the proposal: *"This proposal is rearrangement, not deletion. The operator may still want to action it, but it doesn't meet the thermo-nuclear bar."* Don't reject the proposal — let the operator decide.
-- **Do not classify findings by tier.** The operator already knows everything from this skill needs their personal attention.
+- **Do not classify findings by tier** in the map or the proposals. The operator already knows everything from this skill needs their personal attention; the only tier lookup is the Phase 2d escalation check.
 - **Do not narrow scope.** Full sweep always. Cross-cutting findings are the highest-leverage ones.
 
 ## Persistence layout
@@ -246,4 +246,4 @@ The operator dismisses overconfident-but-wrong proposals less, and sharpens unce
     └── ...
 ```
 
-Add `.thermonuclear/` to `.gitignore` on first run if not already present.
+`.thermonuclear/` is listed in the repo's `.gitignore`.
