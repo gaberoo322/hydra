@@ -1,0 +1,1 @@
+- docs: full-read audit of the architecture-scan, discover, research, skill-prune and tool-scout playbooks against master, fixing stale code claims and dropping history narration (#5558)
