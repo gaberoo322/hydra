@@ -52,10 +52,7 @@ One collector call covers all four. It prints one `ok`/`code` result per collect
 ```bash
 cd ~/hydra && npx tsx scripts/ops-collect.ts --collectors cycles,board,memory,scheduler --text
 ```
-- `cycles` — merge/fail/abandon counts, merge rate, durations, test delta, anchors, repeated tasks, and `coverage.classesNotRecorded`: those producer classes write no cycle record, so absent from the counts is not dark.
-- `board` — open GitHub issues on `gaberoo322/hydra` per label.
-- `memory` — pattern count and total hits per learning agent (classes table `learningAgent`).
-- `scheduler` — running flag, cycles run, consecutive errors.
+It leads with a `target:` line. Field meanings for every collector: `npx tsx scripts/ops-collect.ts --help`.
 
 ### Architecture Shape
 ```bash
