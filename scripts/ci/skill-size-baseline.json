@@ -40,6 +40,9 @@
     "docs/operator-playbooks/_fragments/reflection-telemetry-deposit.md": {
       "body": 138
     },
+    "docs/operator-playbooks/_fragments/thermo-nuclear-proposal-format.md": {
+      "body": 795
+    },
     "docs/operator-playbooks/hydra-architect.md": {
       "body": 898,
       "description": 32
@@ -133,7 +136,7 @@
       "description": 49
     },
     "docs/operator-playbooks/hydra-sweep.md": {
-      "body": 1853,
+      "body": 1849,
       "description": 30
     },
     "docs/operator-playbooks/hydra-target-build.md": {
@@ -181,8 +184,12 @@
       "description": 48
     },
     "docs/operator-playbooks/hydra-wire-or-retire.md": {
-      "body": 2741,
+      "body": 2291,
       "description": 37
+    },
+    "docs/operator-playbooks/thermo-nuclear-code-quality-review.md": {
+      "body": 2572,
+      "description": 46
     }
   }
 }

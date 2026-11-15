@@ -617,7 +617,7 @@
       "name": "thermo-nuclear-code-quality-review",
       "path": "docs/operator-playbooks/thermo-nuclear-code-quality-review.md",
       "stage": "operator-interactive",
-      "description": "Operator-invoked, full-repo architectural review for infrastructure-scale ideation. Walks the entire codebase plus its operational surface (devops, CI, services, hosting, hardware), produces a free-form system map with ranked pressure points, then fires parallel deep-dives that propose code-judo restructurings — restructurings that delete whole subsystems, not polish them. Use when the operator wants a thermo-nuclear review, deep architectural audit, infrastructure ideation, or harsh full-repo quality sweep. Sibling to `improve-codebase-architecture` (module-scoped, opportunity-framed) — this skill is repo-scoped and blocker-framed.",
+      "description": "Operator-invoked full-repo architectural review at infrastructure scale. Maps the codebase and its operational surface, ranks pressure points, then runs parallel deep-dives proposing restructurings that delete whole subsystems. Use for a thermo-nuclear review, deep architectural audit, or harsh full-repo quality sweep. Repo-scoped sibling of the module-scoped `improve-codebase-architecture`.",
       "dispatchedBy": [],
       "composedFrom": [
         "docs/operator-playbooks/_fragments/thermo-nuclear-proposal-format.md"
