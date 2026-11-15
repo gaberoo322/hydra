@@ -17,6 +17,7 @@
  */
 import { readFile as fsReadFile } from "node:fs/promises";
 import { join } from "node:path";
+import { logger } from "../logger.ts";
 
 /** The catalog is inlined into every Standards review, so size is a per-PR token cost. */
 export const CODING_STANDARDS_WORD_CEILING = 2000;
@@ -186,7 +187,7 @@ export function checkStandardsIntegrity(
       try {
         exists = deps.pathExists(v);
       } catch (err) {
-        console.error(`[standards-loader] pathExists(${v}) threw:`, err);
+        logger.error({ err, v }, "[standards-loader] pathExists threw");
       }
       if (!exists) add("dangling-enforced-by", `${r.id} cites enforced-by path "${v}" which does not exist`);
     }
@@ -197,7 +198,7 @@ export function checkStandardsIntegrity(
         try {
           wired = deps.requiredWiring(v);
         } catch (err) {
-          console.error(`[standards-loader] requiredWiring(${v}) threw:`, err);
+          logger.error({ err, v }, "[standards-loader] requiredWiring threw");
         }
         if (!wired) {
           add("unwired-enforced-by", `${r.id} cites "${v}" as enforcement but no required job runs it; wire it or mark it "${v} (advisory)"`);
@@ -208,7 +209,7 @@ export function checkStandardsIntegrity(
         try {
           src = deps.readText(v);
         } catch (err) {
-          console.error(`[standards-loader] readText(${v}) threw:`, err);
+          logger.error({ err, v }, "[standards-loader] readText threw");
         }
         if (src !== null && !new RegExp(`\\b${r.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(src)) {
           add("check-does-not-name-rule", `${r.id} cites "${v}", but that file never names ${r.id}`);
@@ -296,7 +297,7 @@ export async function loadCodingStandards(
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return { ok: true, found: false, path };
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`[standards-loader] failed to read ${path}:`, err);
+    logger.error({ err, path }, "[standards-loader] failed to read file");
     return { ok: false, code: "standards-read-failed", path, message };
   }
   return { ok: true, found: true, path, text, parsed: parseCodingStandards(text) };
