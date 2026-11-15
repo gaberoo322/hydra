@@ -31,21 +31,21 @@ Set `--window-hours` and `--since` to `$period` (`7d` is 168 hours) and raise `-
 
 ### 2. Compute
 
-Every number comes from a collector field; the only arithmetic left is cost per merge (`cycles.totalCostUsd` over `cycles.merged`, `n/a` when the cost is null).
+Every number comes from a collector field; the only arithmetic left is cost per merge (`cycles.totalCostUsd` over `cycles.merged`, `n/a` when the cost is null or `merged` is 0).
 
 | Section | Read |
 |---------|------|
 | Headline, Cycle Performance | `cycles`: `cycles`, `merged`, `mergeRatePct`, `failed`, `totalCostUsd`, `anchors` |
 | Per-class cost | `cost-by-class`: `source`, `classes` |
 | Test Suite | `cycles`: `testsFirst`, `testsLast`, `testsDelta` |
-| What Was Built | `today.merges`, `target-git.commitSample`, the `git log` lines |
+| What Was Built | `today.merges`, `target-git.commitSample` (a capped sample; `commits` is the true count), the `git log` lines |
 | What Failed | `cycles`: `failed`, `abandoned`, the non-merged entries of `recent`, `repeatedTasks` |
 | Backlog Flow | `board.byLabel` (`board.truncated` makes every count a floor) |
 | Kill-chain | `reframe-saves`: `count`, `undateable`; `kill-chain`: `verdict`, `ledger`, `baseline` |
-| Alerts & Issues | `alerts.active`, `today.issuesOpened`, `today.issuesClosed` |
+| Alerts & Issues | `alerts.active`, `today.issuesOpened`, `today.issuesClosed` (when null, quote `issuesClosedNote`) |
 | Operator Actions Needed | `board.samples` for the blocked and ready-for-human lanes; `scheduler` when `running` is false or `consecutiveErrors` is above 0 |
 
-`cycles.coverage.classesNotRecorded` lists classes that write no cycle record: their absence from the counts is not a zero. Give a failure reason only when the output carries one.
+`cycles.coverage.classesNotRecorded` lists classes that write no cycle record: their absence from the counts is not a zero. `recent` holds only the newest few cycles: report failures beyond it as a count. `repeatedTasks` is retry context (titles seen more than once, merged or not), not a failure list. Give a failure reason only when the output carries one.
 
 ### 3. Format
 
