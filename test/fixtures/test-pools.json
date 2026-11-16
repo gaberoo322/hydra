@@ -7,6 +7,7 @@
     "test/autopilot-forbidden-ending-preamble.test.mts",
     "test/autopilot-qa-orch-forbidden-ending-preamble.test.mts",
     "test/autopilot-token-cap.test.mts",
+    "test/backfill-dedup-baseline.test.mts",
     "test/biome-check.test.mts",
     "test/changelog-check.test.mts",
     "test/ci-test-job-pipefail-guard.test.mts",
@@ -24,7 +25,6 @@
     "test/hydra-pr-rebase.test.mts",
     "test/hydra-target-build-fence-skip-steps.test.mts",
     "test/hydra-target-playbooks-pr-only.test.mts",
-    "test/issue-dedup.test.mts",
     "test/logger.test.mts",
     "test/now-console-format.test.mts",
     "test/now-console-status-strip-state.test.mts",
@@ -50,7 +50,6 @@
     "test/zizmor-scan.test.mts"
   ],
   "serialPinned": {
-    "test/agent-dispatch-prompt-guard.test.mts": "uses a fixed /tmp path (clobbers under concurrency)",
     "test/build-spritesheet.test.mts": "runs `git worktree` operations against a shared repo (index.lock contention)",
     "test/dashboard-routes.test.mts": "names a script (../dashboard/scripts/parse-control-plane.mjs) the scan cannot resolve - treated as unsafe",
     "test/derive-version-bump.test.mts": "binds or dials a fixed port",
