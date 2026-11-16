@@ -19,11 +19,11 @@ Concise summary of recent Hydra system activity. Aggregates cycle metrics, test 
 ### 1. Collect
 
 ```bash
-cd ~/hydra && npx tsx scripts/ops-collect.ts --collectors cycles,cost-by-class,scheduler,board,alerts,today,target-git,kill-chain,reframe-saves --window-hours 24 --count 50 2>/dev/null || echo "ops-collect unavailable"
+cd ~/hydra && npx tsx scripts/ops-collect.ts --collectors cycles,cost-by-class,scheduler,board,alerts,today,target-git,kill-chain,reframe-saves --window-hours 24 --count 50 || echo "ops-collect unavailable"
 git -C ~/hydra log --oneline --since="24 hours ago"
 ```
 
-Set `--window-hours` and `--since` to `$period` (`7d` is 168 hours) and raise `--count` for a longer period. The first command prints one JSON document with a result per collector; field meanings: `npx tsx scripts/ops-collect.ts --help`. `ops-collect unavailable` means the CLI crashed: report it under Operator Actions Needed.
+Set `--window-hours` and `--since` to `$period` (`7d` is 168 hours); raise `--count` for longer. The first command prints one JSON document with a result per collector; field meanings: `npx tsx scripts/ops-collect.ts --help`. `ops-collect unavailable` is a crash (its cause prints just before): report it under Operator Actions Needed.
 
 - A result with `ok: false` has no data: print `n/a (<code>: <reason>)` for the rows it feeds and keep going. One missing collector never blanks the rest of the digest.
 - `target.resolved: false` is worth a line under Operator Actions Needed; the Target collectors are then `skipped`.
@@ -38,7 +38,7 @@ Every number comes from a collector field; the only arithmetic left is cost per 
 | Headline, Cycle Performance | `cycles`: `cycles`, `merged`, `mergeRatePct`, `failed`, `totalCostUsd`, `anchors` |
 | Per-class cost | `cost-by-class`: `source`, `classes` |
 | Test Suite | `cycles`: `testsFirst`, `testsLast`, `testsDelta` |
-| What Was Built | `today.merges`, `target-git.commitSample` (a capped sample; `commits` is the true count), the `git log` lines |
+| What Was Built | `today.merges` (when `mergesUnavailable`, print `n/a (<mergesNote>)`; when `mergesTruncated`, the list is a floor), `target-git.commitSample` (a capped sample; `commits` is the true count), the `git log` lines |
 | What Failed | `cycles`: `failed`, `abandoned`, the non-merged entries of `recent`, `repeatedTasks` |
 | Backlog Flow | `board.byLabel` (`board.truncated` makes every count a floor) |
 | Kill-chain | `reframe-saves`: `count`, `undateable`; `kill-chain`: `verdict`, `ledger`, `baseline` |
