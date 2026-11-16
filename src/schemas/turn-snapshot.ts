@@ -105,7 +105,6 @@ const SignalsSchema = z
     orch_stale_blocked_items: NumberList, // #5344
     untriaged_orphans_orch: z.boolean(),
     // target lane
-    target_work_available: z.boolean(),
     target_board_work_available: z.boolean(),
     target_board_research_due: z.boolean(),
     target_wip_saturated: z.boolean(),
@@ -199,7 +198,6 @@ export const ALL_DEGRADED_SIGNALS: TurnSnapshotSignals = Object.freeze({
   orch_stale_in_progress_items: [],
   orch_stale_blocked_items: [],
   untriaged_orphans_orch: false,
-  target_work_available: false,
   target_board_work_available: false,
   target_board_research_due: false,
   target_wip_saturated: true,

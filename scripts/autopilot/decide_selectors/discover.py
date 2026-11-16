@@ -21,7 +21,7 @@ from decide_base import (
 # Discover staleness floor (issue #4114). discover_orch's ONLY trigger from
 # its #959 revival until #4114 was the shared `orch_backfill_idle` board-empty
 # signal, which requires ready_for_agent==0 AND needs_research==0 AND
-# needs_triage==0 AND work_queue==0 SIMULTANEOUSLY — a conjunction that
+# needs_triage==0 SIMULTANEOUSLY — a conjunction that
 # essentially never holds on a healthy, continuously-stocked board (live
 # evidence 2026-07-26..2026-08-17: 5-36 ready-for-agent issues at every
 # sample, so the gate stayed false for 3+ weeks and the PRODUCER class went
@@ -112,8 +112,8 @@ def _select_signal_discover_target(
     # producer ever emitted, so the class could NEVER fire (its trigger was
     # dead, silently tolerated on signal-parity-check's PRODUCERLESS list).
     # The selector now rides the PRODUCED Target board-empty signal
-    # `target_backfill_idle` (the Turn Snapshot: triage==0 AND queued==0 AND
-    # work_queue==0, API-down → false) — the exact twin of how cleanup_target
+    # `target_backfill_idle` (the Turn Snapshot: triage==0 AND queued==0,
+    # API-down → false) — the exact twin of how cleanup_target
     # gates, and the Target mirror of how discover_orch rides
     # orch_backfill_idle. One predicate, one emit line: no alias re-emit of
     # the old name (the #959 anti-alias-drift stance). The bare read needs no

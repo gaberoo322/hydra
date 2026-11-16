@@ -233,8 +233,8 @@ A hard finding from **any** consulted axis folds to a `FAIL` verdict whose
 action is `bounce-to-reframe`: under ADR-0031 the reframe queue is now the
 **`reframe` label** on the anchor issue (`$TARGET_GH_REPO`), stamped
 alongside `ready-for-human` so `/hydra-review` (its per-Target drain, §1.5) surfaces it to the operator
-on the next review (the label pair replaces the retired
-`hydra:anchors:reframe-queue`). The QA **verdict itself is posted as a
+on the next review (the label pair replaced the retired Redis
+reframe queue). The QA **verdict itself is posted as a
 `gh issue comment`** on the anchor issue and the `needs-qa` label is stripped —
 mirroring the Orchestrator `hydra-qa` verdict-as-comment + relabel discipline.
 There is **NO** deep-QA remediation loop and **NO** Verifier-Core teeth — those

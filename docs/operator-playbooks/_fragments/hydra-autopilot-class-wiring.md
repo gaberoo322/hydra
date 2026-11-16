@@ -51,7 +51,7 @@ prevent that gate-re-parsing round-trip:
   shared with `discover_orch` (the `BACKFILL_SIGNAL_CLASSES` stagger in
   `decide.py`). The Turn Snapshot's `foldBoardSignals`
   (`src/autopilot/turn-snapshot/board-saturation.ts`) sets it when
-  `readyForAgent`, `needsResearch`, `needsTriage` and `workQueue` are all 0.
+  `readyForAgent`, `needsResearch` and `needsTriage` are all 0.
 
 The per-class cooldown is the back-stop, honoured by the shared
 `signal_is_cooled` guard. The class's `scope` column is `orch` (it scans the

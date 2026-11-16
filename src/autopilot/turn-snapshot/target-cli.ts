@@ -11,9 +11,8 @@
  *   target-board          counts / in-flight exclusion / WIP / needs-qa PR /
  *                         dev-resume pick; its `laneDegraded` feeds the
  *                         scan-board call
- *   target-scan-boards    takes the lane-degraded accumulator and the
- *                         work-queue depth (`--target-lane-degraded 0|1`,
- *                         `--target-work-queue N` when run alone)
+ *   target-scan-boards    takes the lane-degraded accumulator
+ *                         (`--target-lane-degraded 0|1` when run alone)
  *   target-risk-surface   the Target Manifest risk surface
  */
 
@@ -55,7 +54,6 @@ export interface TargetCliDeps {
 export interface TargetCliArgs {
   readonly ghListLimit: number;
   readonly targetLaneDegraded?: boolean;
-  readonly targetWorkQueue?: number;
 }
 
 export interface TargetCliIo {
@@ -147,7 +145,6 @@ export async function runTargetCollectors(
             github: d.github,
             ghListLimit: args.ghListLimit,
             laneDegraded: args.targetLaneDegraded ?? false,
-            workQueue: args.targetWorkQueue ?? 0,
             workspace: d.workspace(),
             adrPresent: d.adrPresent,
           });

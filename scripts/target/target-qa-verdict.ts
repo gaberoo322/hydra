@@ -29,7 +29,7 @@
  *     reviewers must pass; a single hard finding from any of them is a FAIL.
  *
  * A hard finding bounces the item via the **`reframe` label** (ADR-0031 — the
- * label replaced the retired `hydra:anchors:reframe-queue`), surfaced to the
+ * label replaced the retired Redis reframe queue), surfaced to the
  * operator by `/hydra-review`'s per-Target drain (§1.5). There is
  * NO deep-QA remediation loop and NO operator-escalation path — those are the
  * Verifier-Core teeth the epic explicitly declines to mirror for the Target.
@@ -82,7 +82,7 @@ export interface TargetReviewVerdicts {
  * - `merge` — the folded verdict is PASS; the Target's merge-on-green path
  *   proceeds (this module does not itself merge; CI / the playbook does).
  * - `bounce-to-reframe` — a hard finding was surfaced; push the item to the
- *   reframe queue (`hydra:anchors:reframe-queue`). NO operator escalation, NO
+ *   reframe queue. NO operator escalation, NO
  *   deep-QA remediation loop (epic #1052: those Verifier-Core teeth are not
  *   mirrored for the Target).
  */

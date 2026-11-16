@@ -12,15 +12,12 @@ Fully autonomous board processor. Scans all open issues, groups by label, and ta
 ## Critical safety rules
 
 1. **NEVER run `git stash`, `git checkout`, `git reset`, or `git clean` on the main `~/hydra` working tree.** Operator may have uncommitted work. All development happens in isolated worktrees.
-2. **NEVER modify files in `~/hydra` directly** — only read. All code changes go through worktree agents that create PRs.
-3. To check repo state, use `git status` / `git log` — read-only commands only.
-4. **The sweep never merges a PR itself.** A PR lands only through `/hydra-qa`'s PASS path (invoked from the `needs-qa` lane) or the autopilot's guarded `auto-merge` action. If a sweep ever does land or arm a PR, it first runs the QA merge guard from `~/hydra` — `node --experimental-strip-types scripts/ci/qa-merge-guard.ts --pr <N>` (exit 0 allowed, 1 denied, 2 bad args) — and on any non-zero exit skips the PR and reports the guard's `reason`. The sweep **never** posts a `QA-Override:`; overriding a denial is an operator choice made in `/hydra-review`.
+2. **NEVER modify files in `~/hydra` directly**; code changes go through worktree agents that open PRs. Check repo state read-only (`git status` / `git log`).
+3. **The sweep never merges a PR itself.** A PR lands only through `/hydra-qa`'s PASS path (invoked from the `needs-qa` lane) or the autopilot's guarded `auto-merge` action. If a sweep ever does land or arm a PR, it first runs the QA merge guard from `~/hydra` — `node --experimental-strip-types scripts/ci/qa-merge-guard.ts --pr <N>` (exit 0 allowed, 1 denied, 2 bad args) — and on any non-zero exit skips the PR and reports the guard's `reason`. The sweep **never** posts a `QA-Override:`; overriding a denial is an operator choice made in `/hydra-review`.
 
 ## Context management
 
-When running on `/loop`, context accumulates. At the START of each sweep, run `/compact` to shed the previous iteration's tool results.
-
-Sweeps are stateless by design. State lives in GitHub issue labels and comments. Re-scan everything each time.
+On `/loop`, run `/compact` at the START of each sweep. Sweeps are stateless: state lives in GitHub labels and comments, so re-scan everything each time.
 
 ## Report tracking
 
@@ -113,21 +110,20 @@ For each `ready-for-agent` issue N, count how many `blocked` issues reference `#
 
 #### Open-PR pre-promotion gate (mandatory at every edge that writes `ready-for-agent`)
 
-Before applying `ready-for-agent` to ANY issue `#N`, check whether an **OPEN** PR already references it. If one does, do NOT promote: a build is already in flight, and promoting would let the autopilot dispatch a duplicate `dev_orch` build. Run the query once per sweep and reuse it at every promotion edge:
+Before applying `ready-for-agent` to ANY issue `#N`, check whether an **OPEN** PR already references it; if so do NOT promote (the autopilot would dispatch a duplicate `dev_orch` build). Run the query once per sweep:
 
 ```bash
 OPEN_PRS=$(gh pr list --repo gaberoo322/hydra --state open \
   --json number,body,title,mergeable)
 
 # For a candidate issue #N about to be promoted to ready-for-agent:
-#   referencing OPEN PR #M found?  -> DIVERT (do not promote), NO label write:
-#     report `has-open-pr: PR #M` - the PR arms (red-resume, dirty fix-forward,
-#     QA recheck) own the PR; the sweep writes neither needs-qa nor
-#     ready-for-human for it.
-#   no referencing OPEN PR  -> PROMOTE normally to ready-for-agent
+#   referencing OPEN PR #M found?  -> DIVERT: no ready-for-agent write; report
+#     `has-open-pr: PR #M` (the PR arms own the PR; the sweep writes neither
+#     needs-qa nor ready-for-human for it)
+#   no referencing OPEN PR  -> PROMOTE
 ```
 
-Gate strictly on `--state open`. A **closed-unmerged** PR means the prior attempt was abandoned, so the issue SHOULD become `ready-for-agent` again; a **merged** PR means the work is done. The sweep report MUST name every suppression and the referencing PR number.
+Gate strictly on `--state open`: a **closed-unmerged** PR means the attempt was abandoned (promote); a **merged** PR means the work is done. The report MUST name every suppression and its PR number.
 
 ### 2. Group and process
 
@@ -145,9 +141,9 @@ Process all QA before new dev.
 
 Skip tracking parents: apply the stuck-ness gate above instead.
 
-Pick by that score. Invoke `/hydra-dev $number`. One at a time — worktree isolation.
+Pick by that score; invoke `/hydra-dev $number`, one at a time.
 
-After dev completes and issue is `needs-qa`, immediately run QA in the same sweep — do NOT defer.
+Once dev leaves the issue `needs-qa`, run QA in the same sweep.
 
 #### `needs-research`
 Invoke `/hydra-issue-research $number`. Multiple in parallel OK (read-only).
@@ -166,10 +162,10 @@ Human-hold: a reporter/operator reply is **report-only** under "Needs operator a
 
 #### `needs-design-concept` (without `ready-for-agent`) — restore reachability
 
-`needs-design-concept` is a flag that is only valid ALONGSIDE `ready-for-agent`: the grill selector's walk (the Turn Snapshot collectors, `src/autopilot/turn-snapshot/`) sources candidates only from `ready-for-agent`, and within that walk the flag only forces a grill. Without `ready-for-agent` nothing consumes the flag, so the orphan backstop counts the issue (`untriaged_orphans > 0`) and dispatches this sweep to recover it.
+`needs-design-concept` is a flag valid only ALONGSIDE `ready-for-agent`: the grill selector's walk (`src/autopilot/turn-snapshot/`) sources candidates only from `ready-for-agent`. Without it nothing consumes the flag, so the orphan backstop counts the issue (`untriaged_orphans > 0`) and dispatches this sweep.
 
 - Also carrying `ready-for-agent` → already in the grill walk; change nothing.
-- No state label, or `needs-triage` → run the **Open-PR pre-promotion gate** (above). On PROMOTE, a zero-state issue first takes `advance $number needs-triage --actor hydra-sweep` (the only move the seam allows from zero state); then `advance $number ready-for-agent --reason scoped --rationale "<why promotable>" --actor hydra-sweep`. KEEP `needs-design-concept` — the grill it records is still owed, and the paired labels are what `design_concept_orch` consumes. On `has-open-pr`, report it and write nothing.
+- No state label, or `needs-triage` → a zero-state issue ALWAYS first takes `advance $number needs-triage --actor hydra-sweep` (gate-free, the only move the seam allows from zero state), even on `has-open-pr`: `needs-triage` is in `UNTRIAGED_ORPHAN_EXCLUDED_LABELS` (`src/autopilot/turn-snapshot/orch-board.ts`) but `needs-design-concept` is not (#4096), so an issue left in zero state is recounted every Turn and re-fires `sweep_orch`. Then run the **Open-PR pre-promotion gate** (above). On PROMOTE, `advance $number ready-for-agent --reason scoped --rationale "<why promotable>" --actor hydra-sweep` (the `## Files in scope` precondition of the `needs-triage` lane applies). KEEP `needs-design-concept` — the grill it records is still owed, and the paired labels are what `design_concept_orch` consumes. On `has-open-pr`, report it and write no `ready-for-agent`; the issue stays at `needs-triage`.
 - Any other state label → that state's lane owns the issue; write nothing here.
 
 Once paired, the issue leaves the orphan count.
@@ -178,11 +174,12 @@ Once paired, the issue leaves the orphan count.
 
 Skip tracking parents: apply the stuck-ness gate above before routing.
 
-Well-structured = "What to build" or clear problem + acceptance criteria + parent ref or standalone scope.
+Well-structured = "What to build" or clear problem + acceptance criteria + parent ref or standalone scope + a `## Files in scope` section that `npx tsx scripts/ci/scope-check.ts --validate-issue-body` accepts (the parser `issue-label-validation.yml` runs, #4571).
 
 Auto-triage:
 1. Apply category label (`bug`/`enhancement`) if missing.
-2. Blockers check:
+2. Scope + blockers check. If the sweep can name the files, author the `## Files in scope` section on the issue body BEFORE any `ready-for-agent` write; if it cannot, `advance $number needs-research --reason <judgment reason>` and never write `ready-for-agent`. A seam refusal `scope-section-missing` is reported, never worked around with `gh issue edit --add-label`.
+   Blockers:
    - Open blockers → `advance $number blocked --reason blocked-by-issue --rationale "<open blockers>"`.
    - All closed (or none) → run the **Open-PR pre-promotion gate** (above); on PROMOTE `advance $number ready-for-agent --reason scoped --rationale "<why promotable>"` (or `--reason unblocked --rationale "<blockers closed>"` for an issue the `blocked` lane rerouted), otherwise report `has-open-pr` and leave it at `needs-triage`.
    - A verdict of "needs a design concept" applies BOTH `needs-design-concept` AND `ready-for-agent`, never the flag alone (see the `needs-design-concept` lane above).

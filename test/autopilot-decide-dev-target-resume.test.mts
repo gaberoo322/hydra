@@ -155,7 +155,6 @@ describe("decide.py — Target dev resume pick (issue #4739)", () => {
     const plan = runDecide(
       baseState({
         signals: {
-          target_work_available: true,
           target_board_work_available: true,
           target_dev_resume_pick: RESUME_PICK,
         },

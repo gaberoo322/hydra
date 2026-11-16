@@ -205,7 +205,7 @@ describe("Turn Snapshot target-scan-boards — wire-or-retire co-presence predic
    * `wire_or_retire_target_available` = count > 0 (json-snapshot.ts).
    */
   function runLaneEmitter(rows: readonly { labels: string[] }[]): Record<string, string> {
-    const signals = classifyTargetScan(rows, { limit: 100, workQueue: 0 });
+    const signals = classifyTargetScan(rows, { limit: 100 });
     return {
       wire_or_retire_target_triage: String(signals.wireOrRetireTriage),
       wire_or_retire_target_available: String(signals.wireOrRetireTriage > 0),

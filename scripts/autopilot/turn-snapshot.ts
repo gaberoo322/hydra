@@ -32,14 +32,13 @@
  *                          usage-eligibility, emergency-brake, class-stats,
  *                          capacity, scheduler, recommendations, slot-events;
  *                          a consecutive run of them reads concurrently
- *     <5B>                 redis-queues, scout, arch-cleanup-boards, hitl-grill,
+ *     <5B>                 scout, arch-cleanup-boards, hitl-grill,
  *                          retro, wayfinder-frontier, tickets; a consecutive
  *                          run of them reads concurrently
  *     target-board | target-scan-boards | target-risk-surface
  *                          the Target board family, against the Target
  *                          repo/workspace/manifest from src/target-config.ts
  *   --target-lane-degraded 0|1   target-scan-boards run alone: the lane accumulator
- *   --target-work-queue N  target-scan-boards run alone: the work-queue length
  *   --orch-board-degraded V  arch-cleanup-boards run alone: `1` = an earlier orch
  *                          board read failed; default 0
  *   --board-state-file PATH  picks run alone: the HEALTHY orch board-state body
@@ -54,8 +53,7 @@
  *                          TS-produced document (issue #5083)
  *
  * In `--format json` the cross-collector accumulators (the orch-board degraded
- * flag, the healthy board-state body, the Target lane flag, the work-queue
- * depth) are handed over in-process.
+ * flag, the healthy board-state body, the Target lane flag) are handed over in-process.
  *
  * FAIL-OPEN: the CLI never crashes the turn. A collector that throws is
  * reported as a stderr note and stands in as its fully-degraded fallback
@@ -119,8 +117,6 @@ export interface CliArgs {
   orchBoardDegraded: string;
   /** target-scan-boards run alone: the lane-degraded accumulator from target-board. */
   targetLaneDegraded?: boolean;
-  /** target-scan-boards: the orchestrator work-queue length (`backfill_idle`). */
-  targetWorkQueue?: number;
   /** `--format json` only: the healthy board-state body handed from orch-board to picks in-process (null = degraded). */
   boardStateText?: string | null;
   /** `--all-degraded`: print the all-degraded document instead of running any collector (#5083). */
@@ -163,9 +159,6 @@ export function parseArgs(argv: readonly string[]): CliArgs | { error: string } 
     else if (flag === "--target-lane-degraded") {
       if (value !== "0" && value !== "1") return { error: `--target-lane-degraded must be 0 or 1, got '${value}'` };
       args.targetLaneDegraded = value === "1";
-    } else if (flag === "--target-work-queue") {
-      if (!/^\d+$/.test(value)) return { error: `--target-work-queue must be a non-negative integer, got '${value}'` };
-      args.targetWorkQueue = Number(value);
     } else if (flag === "--reason") args.reason = value;
     else return { error: `unknown flag ${flag}` };
   }
@@ -403,8 +396,7 @@ export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): P
 /**
  * `--format json` (ADR-0043 Decision 5, #4934): run EVERY collector, handing
  * the cross-collector accumulators over in-process (the orch-board degraded
- * flag, the healthy board-state body, the Target lane flag, the work-queue
- * depth), build the JSON Turn Snapshot from the typed values, validate it on
+ * flag, the healthy board-state body, the Target lane flag), build the JSON Turn Snapshot from the typed values, validate it on
  * emit and print it. Never throws; an invalid field is repaired with a marker
  * plus a stderr note, exit 0.
  */
@@ -451,7 +443,7 @@ async function runJsonSnapshot(args: CliArgs, deps: CliDeps, io: CliIo): Promise
   // 6. Redis queues, scout, arch/cleanup/skill-prune boards, hitl-grill, retro, wayfinder, tickets
   const remaining = deps.remaining;
   const rest = await runRemainingCollectors(
-    ["redis-queues", "scout", "arch-cleanup-boards", "hitl-grill", "retro", "wayfinder-frontier", "tickets"],
+    ["scout", "arch-cleanup-boards", "hitl-grill", "retro", "wayfinder-frontier", "tickets"],
     {
       github: deps.github,
       hydra,
@@ -464,11 +456,11 @@ async function runJsonSnapshot(args: CliArgs, deps: CliDeps, io: CliIo): Promise
   note(rest.notes);
   degraded.push(...rest.degraded);
   const rv = rest.values as Required<typeof rest.values>;
-  // 7. Target scan boards + risk surface, fed the lane accumulator and the work-queue depth
+  // 7. Target scan boards + risk surface, fed the lane accumulator
   const targetBoard = tb.values.targetBoard as NonNullable<typeof tb.values.targetBoard>;
   const ts = await runTargetCollectors(
     [TARGET_SCAN_BOARDS_COLLECTOR, TARGET_RISK_SURFACE_COLLECTOR],
-    { ...args, targetLaneDegraded: targetBoard.laneDegraded, targetWorkQueue: rv["arch-cleanup-boards"].workQueue },
+    { ...args, targetLaneDegraded: targetBoard.laneDegraded },
     targetDeps,
     io,
   );
@@ -491,7 +483,6 @@ async function runJsonSnapshot(args: CliArgs, deps: CliDeps, io: CliIo): Promise
     needsQaNumbers: needsQa.value as Classified<readonly number[]>,
     prGate: gate.prGate,
     picks,
-    redisQueues: rv["redis-queues"],
     scout: rv.scout,
     archBoards: rv["arch-cleanup-boards"],
     hitlGrill: rv["hitl-grill"],

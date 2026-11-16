@@ -77,8 +77,8 @@ def _select_signal_cleanup_target(
     """`cleanup_target` signal-class selector (no issue provenance cited)."""
     # The Target mirror of cleanup_orch (operator-approved 2026-06-10).
     # When the Target backlog has no actionable work (the Turn Snapshot
-    # emits `target_backfill_idle` — triage, queued, and the Redis
-    # work-queue are all empty), reclaim spare capacity by dispatching the
+    # emits `target_backfill_idle` — triage and queued are both
+    # empty), reclaim spare capacity by dispatching the
     # headless /hydra-target-cleanup skill: a DETERMINISTIC demote-only
     # dead-export sweep over the Target repo web app. It emits ONLY findings
     # the Target's CLAUDE.md rule-3 carve-out authorises (demote-class,

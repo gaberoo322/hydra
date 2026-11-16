@@ -1,6 +1,6 @@
 /**
  * turn-snapshot/remaining.ts — registry + runner for the slice-5B Turn
- * Snapshot collectors (ADR-0043, #4933): `redis-queues`, `scout`,
+ * Snapshot collectors (ADR-0043, #4933): `scout`,
  * `arch-cleanup-boards`, `hitl-grill` (board-saturation.ts) and `retro`,
  * `wayfinder-frontier`, `tickets` (afk-frontier.ts).
  *
@@ -17,12 +17,10 @@ import type { TurnSnapshotRedis } from "./redis-port.ts";
 import {
   collectArchCleanupBoards,
   collectHitlGrill,
-  collectRedisQueues,
   collectScout,
   type ArchBoardsValue,
   type BoardSaturationDeps,
   type HitlGrillValue,
-  type RedisQueuesValue,
   type ScoutValue,
 } from "./board-saturation.ts";
 import {
@@ -43,7 +41,6 @@ export interface RemainingDeps extends BoardSaturationDeps, AfkFrontierDeps {
 
 /** Each slice-5B collector's typed value (the JSON Turn Snapshot is built from these, ADR-0043 slice 6). */
 interface RemainingValueMap {
-  "redis-queues": RedisQueuesValue;
   scout: ScoutValue;
   "arch-cleanup-boards": ArchBoardsValue;
   "hitl-grill": Classified<HitlGrillValue>;
@@ -70,14 +67,12 @@ function entry<K extends RemainingName>(
 const FAILED: Classified<never> = { ok: false, reason: DEGRADE.ALL_READS_FAILED };
 /**
  * A crashed arch collector returns the #4130 suppressing defaults and flags the
- * lane degraded; its work-queue depth fails CLOSED at 1 so the
- * downstream target_backfill_idle cannot fire on a read that never happened.
+ * lane degraded.
  */
-const ARCH_FALLBACK: ArchBoardsValue = { lastRunIso: FAILED, workQueue: 1, board: FAILED, orchBoardDegraded: "1" };
+const ARCH_FALLBACK: ArchBoardsValue = { lastRunIso: FAILED, board: FAILED, orchBoardDegraded: "1" };
 
 /** Collector name → collect + fallback value. */
 export const REMAINING_COLLECTORS: { readonly [K in RemainingName]: RemainingEntry<K> } = {
-  "redis-queues": entry<"redis-queues">(collectRedisQueues, { "work-queue": FAILED, "reframe-queue": FAILED, "prior-failures": FAILED }),
   scout: entry<"scout">(collectScout, {
     lastWalkIso: FAILED,
     openEnhancements: FAILED,

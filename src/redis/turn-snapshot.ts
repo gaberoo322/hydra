@@ -3,8 +3,7 @@
  *
  * The typed accessors for the Redis reads the per-turn Turn Snapshot CLI
  * (scripts/autopilot/turn-snapshot.ts) makes that no other domain module
- * already owns — the three anchor-queue lengths and the architecture-pass
- * stamp — plus the CLI-process lifecycle around the shared connection. The
+ * already owns — the architecture-pass stamp — plus the CLI-process lifecycle around the shared connection. The
  * scout reads/write reuse src/redis/scout.ts and src/redis/cost.ts.
  *
  * Lifecycle: the CLI is a one-shot process, so {@link quietTurnSnapshotRedisErrors}
@@ -17,21 +16,7 @@
 
 import { closeRedisConnections, getRedisConnection } from "./connection.ts";
 import { redisKeys } from "./keys.ts";
-import { getString, listLen } from "./kv.ts";
-
-/** The anchor queues the Turn Snapshot reports a depth for. */
-export type AnchorQueueName = "work-queue" | "reframe-queue" | "prior-failures";
-
-const ANCHOR_QUEUE_KEYS: Record<AnchorQueueName, () => string> = {
-  "work-queue": redisKeys.anchorWorkQueue,
-  "reframe-queue": redisKeys.anchorReframeQueue,
-  "prior-failures": redisKeys.anchorPriorFailures,
-};
-
-/** `LLEN` of one anchor queue (0 when the key is absent). */
-export async function getAnchorQueueLength(queue: AnchorQueueName): Promise<number> {
-  return listLen(ANCHOR_QUEUE_KEYS[queue]());
-}
+import { getString } from "./kv.ts";
 
 /** The last architecture_orch pass stamp, or null when unset. */
 export async function getArchitectureLastRun(): Promise<string | null> {
