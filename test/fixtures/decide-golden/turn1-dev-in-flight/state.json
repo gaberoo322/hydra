@@ -58,7 +58,6 @@
     "generated_at": "decide-golden",
     "signals": {
       "orch_work_available": true,
-      "target_work_available": false,
       "needs_qa_orch": false,
       "needs_research": false,
       "needs_triage_orch": false,

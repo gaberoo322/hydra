@@ -8,7 +8,7 @@ The procedure for pointing a **single** running Orchestrator instance at a **dif
 
 Use this to **smoke-test a swap** before investing in the unbuilt "fleet" (concurrent multi-instance) scaffolding. If you need both targets building at once, this runbook is not enough — see [Concurrent operation](#concurrent-operation-not-this-runbook).
 
-> **The one thing that will bite you:** target work-state in Redis (`hydra:backlog:*`, `hydra:anchors:*`, `hydra:cycle:*`) is **global, not namespaced per target**. A naive "flip env + restart" leaves the *old* target's backlog, work-queue, and cycle locks in place, and the new target's autopilot will try to build **betting** items against the **gaming** repo. Step 3 handles this. Do not skip it.
+> **The one thing that will bite you:** target work-state in Redis (`hydra:backlog:*`, `hydra:cycle:*`) is **global, not namespaced per target**. A naive "flip env + restart" leaves the *old* target's backlog, work-queue, and cycle locks in place, and the new target's autopilot will try to build **betting** items against the **gaming** repo. Step 3 handles this. Do not skip it.
 
 ## Mental model: what swaps vs. what stays
 
@@ -90,7 +90,6 @@ cp -r /path/to/gaming/direction ~/hydra-gaming-config/direction   # vision.md, o
 # backlog items / anchors / PRs, so leaving them behind leaks stale betting
 # state into the gaming board.
 redis-cli --scan --pattern 'hydra:backlog:*'        | xargs -r redis-cli DEL
-redis-cli --scan --pattern 'hydra:anchors:*'        | xargs -r redis-cli DEL
 redis-cli --scan --pattern 'hydra:cycle:*'          | xargs -r redis-cli DEL
 redis-cli --scan --pattern 'hydra:design-concept:*' | xargs -r redis-cli DEL
 redis-cli --scan --pattern 'hydra:blocked*'         | xargs -r redis-cli DEL

@@ -83,7 +83,7 @@ trailer and round action are the qa-verdict engine (`scripts/ci/qa-verdict.ts`,
 
 ### T4 Verifier-Core checklist + Deep-QA Remediation Loop
 
-A T4 PR edits the **Verifier Core**, the 6 self-referential paths whose change alters *how every other change is verified*. The adversarial reviewers (the adversarial reviewers) MUST run this checklist in addition to the standard Standards + Spec axes; any item firing is a **hard blocker** (reviewer FAIL):
+A T4 PR edits the **Verifier Core**, the 6 self-referential paths whose change alters *how every other change is verified*. The adversarial reviewers MUST run this checklist in addition to the standard Standards + Spec axes; any item firing is a **hard blocker** (reviewer FAIL):
 
 1. **Live-Gate Invariant (ADR-0015).** A Verifier-Core change is verified by the **deployed** gate against the diff, **never** by the *proposed* gate. Concretely: the classifier **file LIST** = the PR diff (head-vs-base merge-base), the classifier **LOGIC** = the **BASE ref** (the import-closed `scripts/tier-classify.ts` / `src/tier-classifier.ts` / `src/untouchable.ts` as they exist on the merge base). "Is this a Verifier-Core PR?" is decided with the **BASE-ref** `isVerifierCore` so a PR cannot strip its own path on head to escape classification. A diff that re-routes Verifier-Core PRs back through the **head-tree** classifier is a hard blocker.
 2. **No self-admitting gate.** No path in the diff lets the *proposed* gate verify its own admission: e.g. a `ci.yml` job that always exits 0 / is `continue-on-error` for the verification it claims to perform, a tier-classify edit that downgrades the PR's own files, or an `isVerifierCore` change that removes a path the diff itself touches. If the proposed gate would have admitted this very diff *only because of this diff's own change*, FAIL.
@@ -153,17 +153,17 @@ npx tsx scripts/lifecycle.ts dispatch $issue_number --dispatch <dispatchId> --cl
 
 `claim-held` → log `[hydra-qa] WARN claim held by <existing.dispatchId>` and proceed with the review; `parked:*` → end with a `## Friction Report`, no review (parked is a human-hold state). When the lane head already has a verdict at head SHA and you move on to the next issue, first run `npx tsx scripts/lifecycle.ts release $issue_number --dispatch <dispatchId> --outcome released`, then claim the next — one held claim per dispatchId at any time.
 
-Preflight is **read-only** and fails closed exactly as the old bash did: no tier → `tier.num: null, adversarial: true` (deeper review); a failed admission call → `admit`; a failed fan-out sizing → the tier fan-out; unreadable required contexts → the all-optional mapping tagged in `.degraded`. It prints ONE JSON object. Branch on it:
+Preflight is **read-only** and fails closed exactly as the old bash did: no tier → `tier.num: null, adversarial: true` (deeper review); a failed admission call → `admit`; a failed fan-out sizing → the full fan-out; unreadable required contexts → the all-optional mapping tagged in `.degraded`. It prints ONE JSON object. Branch on it:
 
 - **`.ok == false`** (`no-issue` | `no-pr` | `spec-missing-enforce`) — run `route` (below) with the same `--preflight "$PF"` and nothing else: it posts the one stop comment (`.stop`, if any) and ends. Then **stop**; no review runs. With `DESIGN_CONCEPT_MODE=enforce` a missing artifact is `spec-missing-enforce`; with `warn` (the default) it is a logged skip, not a stop.
-- **`.gate.action == "defer"`** — a non-reviewable blocker makes the verdict moot this pass (`mergeStateStatus == DIRTY`, or a T4 PR with a required check already failed). Run `route --preflight "$PF" --defer`: it posts the deferral comment, bounces the issue (not leaving `needs-qa`, issue #974) and emits **no verdict**. Then **stop**.
-- **`.gate.action == "skip-required-failed"`** (any mode except `adversarial` on a T4 PR; the preflight decides) — a required check already failed, so no reviewer can change the FAIL. Run `route --preflight "$PF"` with **no** `--findings`/`--summaries` and spawn **zero** reviewers; it posts the FAIL and routes the bounce.
+- **`.gate.action == "defer"`** — a non-reviewable blocker makes the verdict moot this pass (`mergeStateStatus == DIRTY`, or a required check already failed where `.gate.action` says to defer). Run `route --preflight "$PF" --defer`: it posts the deferral comment, bounces the issue (not leaving `needs-qa`, issue #974) and emits **no verdict**. Then **stop**.
+- **`.gate.action == "skip-required-failed"`** (`.gate.action` is authoritative; the preflight decides) — a required check already failed, so no reviewer can change the FAIL. Run `route --preflight "$PF"` with **no** `--findings`/`--summaries` and spawn **zero** reviewers; it posts the FAIL and routes the bounce.
 - **`.gate.action == "admit"`** — the common path: continue at the Spawn section with `.fanout`.
 
 What the preflight fields mean for the reviewers:
 
-- `.spec.input` is the flat design-concept artifact for the Spec sub-agent; `.spec.skippedReason` is the audit reason when the Spec axis is skipped (`design-concept-exempt` on the PR, `cleanup-scan`/`design-concept-exempt` on the parent issue, the Tier-1 prompt-only bypass, or the `warn`-mode missing-artifact skip). A skip MUST be recorded as an audit line in `specSummary` (Aggregate section).
-- `.fanout.mode` sizes the review: `single` → the single-reviewer section (one reviewer, both axes; only when the preflight selects it); `standard` → the standard-pass section; `adversarial` → the adversarial fan-out section. A T4 PR or a `code` PR always gets the full fan-out (the preflight decides). `.fanout.reviewers` is the exact list of reviewer names to spawn and to check in the completeness check.
+- `.spec.input` is the flat design-concept artifact for the Spec sub-agent; `.spec.skippedReason` is the audit reason when the Spec axis is skipped (`design-concept-exempt` on the PR, `cleanup-scan`/`design-concept-exempt` on the parent issue, a prompt-only change the preflight exempts, or the `warn`-mode missing-artifact skip). A skip MUST be recorded as an audit line in `specSummary` (Aggregate section).
+- `.fanout.mode` sizes the review: `single` → the single-reviewer section (one reviewer, both axes; only when the preflight selects it); `standard` → the standard-pass section; `adversarial` → the adversarial fan-out section. The preflight decides the mode; `.fanout.reviewers` is authoritative. `.fanout.reviewers` is the exact list of reviewer names to spawn and to check in the completeness check.
 - `.tier.num` is the tier (`null` = classifier unreachable); `.tier.adversarial` is false in `single` mode so the fold reads one reviewer's verdict.
 
 ### 5. Collect current CI state — manual fallback only
@@ -299,7 +299,7 @@ Judgement calls that are not defects do not go in the findings list. The engine'
   - **CONTEXT.md vocabulary** — new identifiers in the diff must either appear in the glossary or be local-scope (test fixtures, private helpers). Flag vocabulary drift.
   - **ADR conformance** — if the diff touches an area governed by an ADR, the change must not contradict it.
   - **Coding standards catalog** — apply every rule in the inlined CODING_STANDARDS.md catalog; a finding's `finding` text begins with the rule ID token (`STD-<AREA>-<NAME>: ...`) or, for a smell, the exact Fowler smell name. Severity follows the rule's own text, defaulting to low when the rule is silent.
-  - **Tier alignment** — the PR body's `Tier: N` line (populated by `hydra-dev` from `/api/tier`) must agree with the artifact's `interfaceImpact` if an artifact is present. `breaking` ⇒ tier ≥ 2.
+  - **Tier alignment** — the PR body's `Tier: N` line (populated by `hydra-dev` from `/api/tier`) must agree with the artifact's `interfaceImpact` if an artifact is present.
 
 **Spec sub-agent prompt** — include:
 
@@ -480,3 +480,5 @@ pipeline still applies (with the per-cue threshold). Don't call this
 on PASS / PASS-pending-CI (positive QA outcomes don't train a memory).
 
 Relay the QA report to the user.
+
+@include _fragments/slot-lifecycle-hook.md

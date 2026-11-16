@@ -82,7 +82,6 @@
         "docs/historical/hydra-betting/direction/goals.md",
         "docs/historical/hydra-betting/direction/roadmap.md",
         "docs/operator-playbooks/hydra-architect.md",
-        "docs/operator-playbooks/hydra-doctor.md",
         "docs/operator-playbooks/hydra-target-cleanup.md",
         "docs/reference.md",
         "docs/target-swap-runbook.md"
@@ -202,7 +201,6 @@
         "docs/historical/hydra-betting/direction/roadmap.md",
         "docs/operations/glm-lane.md",
         "docs/operator-playbooks/hydra-architecture-scan.md",
-        "docs/operator-playbooks/hydra-branch-prune.md",
         "docs/operator-playbooks/hydra-cleanup.md",
         "docs/operator-playbooks/hydra-grill.md",
         "docs/operator-playbooks/hydra-sweep.md",
@@ -251,11 +249,8 @@
         "docs/historical/merge-gate.md",
         "docs/observability/README.md",
         "docs/operations/process-cleanup.md",
-        "docs/operator-playbooks/hydra-auto-merge-window.md",
-        "docs/operator-playbooks/hydra-branch-prune.md",
         "docs/operator-playbooks/hydra-dev.md",
         "docs/operator-playbooks/hydra-epic-close.md",
-        "docs/operator-playbooks/hydra-research.md",
         "docs/operator-playbooks/hydra-target-research.md",
         "docs/quality-gates.md",
         "docs/reference.md",
@@ -465,7 +460,6 @@
         "docs/adr/0034-orchestrator-dashboard-page-inventory.md",
         "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md",
         "docs/operator-playbooks/hydra-architect.md",
-        "docs/operator-playbooks/hydra-doctor.md",
         "docs/operator-playbooks/hydra-grill.md",
         "docs/operator-playbooks/hydra-review.md",
         "docs/operator-playbooks/hydra-target-build.md"
@@ -753,13 +747,13 @@
       "route": "/docs/adr/0025",
       "title": "Target gets its own single-realm incident skill (hydra-target-incident)",
       "status": "accepted",
-      "statusLine": "Accepted",
+      "statusLine": "Accepted (amended 2026-11, #5493)",
       "statusDialect": "inline",
       "date": "2026-06-30",
       "supersedes": [],
       "supersededBy": [],
-      "decision": "Incident skills are single-realm: `hydra-incident` never leaves `~/hydra`, `hydra-target-incident` never leaves `~/hydra-betting`.",
-      "readWhen": "Editing either incident skill.",
+      "decision": "Incident skills are single-realm: `hydra-target-incident` never leaves `~/hydra-betting`.",
+      "readWhen": "Editing `hydra-target-incident`.",
       "citedBy": [
         "CONTEXT-MAP.md",
         "docs/operator-playbooks/hydra-target-incident.md"
@@ -915,10 +909,7 @@
         "docs/adr/0033-openviking-knowledge-plane-retired.md",
         "docs/adr/0037-hydra-adrs-are-agent-facing-normative-specs.md",
         "docs/adr/0047-work-item-lifecycle-is-data.md",
-        "docs/operator-playbooks/hydra-architect.md",
         "docs/operator-playbooks/hydra-autopilot.md",
-        "docs/operator-playbooks/hydra-digest.md",
-        "docs/operator-playbooks/hydra-doctor.md",
         "docs/operator-playbooks/hydra-review.md",
         "docs/operator-playbooks/hydra-target-build.md",
         "docs/operator-playbooks/hydra-target-cleanup.md",
@@ -928,7 +919,8 @@
         "docs/operator-playbooks/hydra-target-research.md",
         "docs/operator-playbooks/hydra-target-retro.md",
         "docs/operator-playbooks/hydra-target-sweep.md",
-        "docs/operator-playbooks/hydra-wire-or-retire.md"
+        "docs/operator-playbooks/hydra-wire-or-retire.md",
+        "docs/reference.md"
       ],
       "source": {
         "path": "docs/adr/0031-target-tracking-migrates-to-github-issues.md"
@@ -1064,7 +1056,7 @@
         "CONTEXT.md",
         "docs/historical/README.md",
         "docs/historical/candidate-feed.md",
-        "docs/operator-playbooks/hydra-discover.md"
+        "docs/reference.md"
       ],
       "source": {
         "path": "docs/adr/0036-anchor-selection-retired-candidate-feed.md"
@@ -1316,7 +1308,6 @@
         "docs/agents/triage-labels.md",
         "docs/operator-playbooks/hydra-autopilot.md",
         "docs/operator-playbooks/hydra-discover.md",
-        "docs/operator-playbooks/hydra-incident.md",
         "docs/operator-playbooks/hydra-issue-research.md",
         "docs/operator-playbooks/hydra-qa.md",
         "docs/operator-playbooks/hydra-research.md",

@@ -41,7 +41,7 @@ import type { OrchBoardSnapshot } from "./orch-board.ts";
 import type { TargetBoardSnapshot } from "./target-board.ts";
 import type { TargetScanSnapshot } from "./target-scan-boards.ts";
 import type { TargetRiskSurfaceSnapshot } from "./target-risk-surface.ts";
-import { BOARD_SIGNALS_SUPPRESSED, type ArchBoardsValue, type HitlGrillValue, type RedisQueuesValue, type ScoutValue } from "./board-saturation.ts";
+import { BOARD_SIGNALS_SUPPRESSED, type ArchBoardsValue, type HitlGrillValue, type ScoutValue } from "./board-saturation.ts";
 import type { RetroValue, WayfinderValue } from "./afk-frontier.ts";
 import {
   ALL_DEGRADED_SIGNALS,
@@ -62,7 +62,6 @@ export interface TurnSnapshotValues {
   readonly needsQaNumbers: Classified<readonly number[]>;
   readonly prGate: PrGateSnapshot;
   readonly picks: PicksSnapshot;
-  readonly redisQueues: RedisQueuesValue;
   readonly scout: ScoutValue;
   readonly archBoards: ArchBoardsValue;
   readonly hitlGrill: Classified<HitlGrillValue>;
@@ -271,7 +270,6 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
     orch_stale_blocked_items: orchStaleList(v.orchBoard, "stale_blocked"), // #5344
     untriaged_orphans_orch: (v.untriagedOrphans.ok ? v.untriagedOrphans.value : 0) > 0,
 
-    target_work_available: (v.redisQueues["work-queue"].ok ? v.redisQueues["work-queue"].value : 0) > 0,
     target_board_work_available: targetCount(v.targetBoard, "target_ready_for_agent") > 0,
     target_board_research_due: targetCount(v.targetBoard, "target_ready_for_agent") === 0,
     target_wip_saturated: wip?.saturated ?? false,
@@ -394,7 +392,6 @@ function observability(v: TurnSnapshotValues): Record<string, unknown> {
       stall: sched.ok ? stallBand(sched.value.nonMerges) : null,
     },
     recommendations: v.recommendations,
-    redis_queues: v.redisQueues,
     // #412's live-PR count — the kv wire printed it for the session to read;
     // no decide.py rule gates on it (dev_orch gates on its slot + pick).
     active_dev_orch: v.picks.activeDevOrch,

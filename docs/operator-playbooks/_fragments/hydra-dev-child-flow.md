@@ -81,6 +81,7 @@ Run these numbered steps.
    changed `.sh` files and `typed-error-throw` over changed `src/`/`scripts/` `.ts`
    files (bare `throw new Error`, STD-ERROR-TYPED-CODE), and fix every hit before `gh pr create` (the shrink-only
    `test/fail-loud-ratchet.test.mts` in `npm test` blocks any new or edited hit). Recipe: "Fail-loud lint — changed files" below.
+   Also run the whole-tree pin-site ratchet (`npx tsx scripts/ci/test-source-read-scan.ts`, under a second) and convert any `pin-count-grew` hit in a test file this PR touches before `gh pr create` (STD-TEST-RUN-THE-CODE / STD-TEST-PIN-PHRASE, #5487).
 7b. **Test-can-fail proof on changed tests** (STD-TEST-CAN-FAIL) —
    run the same advisory judge CI runs over the test files you added or
    extended; for each `passes-at-merge-base` file make a case red-then-green, or
@@ -465,13 +466,15 @@ CLAUDE.md "Fail loud": every `catch` either logs with context or is annotated
 `/* intentional: <reason> */`. The ast-grep rule `src/ast-grep-rules/fail-loud-catch.yml` flags a
 `try … catch` clause that neither logs (`console.error` / `console.warn` /
 `logger.error` / `logger.warn` / `process.stderr.write`), rethrows, nor carries
-a comment containing `intentional`. Run it as the fail-loud item, over ONLY the
+a comment containing `intentional`. Under `src/`, `fail-loud-catch-src` applies
+instead (`console.*` is not a logs branch) and `logger-seam` flags any `console.*`
+call (STD-LOG-PINO-SEAM; `scripts/` and `src/index.ts` exempt). Run it as child-step 7a, over ONLY the
 files this PR touches — existing hits elsewhere on master are advisory and not
 yours to fix:
 
 ```bash
 git fetch origin --quiet
-for spec in "fail-loud-catch:*.ts *.mts" "fail-loud-except-py:*.py" "fail-loud-devnull-sh:*.sh" "test-restates-module-literal:*.test.mts"; do
+for spec in "fail-loud-catch:*.ts *.mts" "fail-loud-catch-src:*.ts" "logger-seam:*.ts" "fail-loud-except-py:*.py" "fail-loud-devnull-sh:*.sh" "test-restates-module-literal:*.test.mts"; do
   rule="${spec%%:*}"
   read -ra pats <<<"${spec#*:}"   # quoted below: the git pathspecs must not glob in the shell
   LINT_ARGS=()
@@ -490,6 +493,8 @@ done < <(git diff --name-only --diff-filter=AM origin/master...HEAD -- '*.ts')
 if [ "${#TE_ARGS[@]}" -gt 0 ]; then
   npx tsx scripts/ast-search.ts --rule typed-error-throw --text "${TE_ARGS[@]}"
 fi
+# Pin-site ratchet (#5487): whole tree, <1 s; `pin-count-grew` names the test file to fix.
+npx tsx scripts/ci/test-source-read-scan.ts
 # STD-TEST-OWN-FEATURE (#5511): QA-history provenance in titles/comments of changed test files.
 TP_FILES=()
 while IFS= read -r f; do

@@ -249,7 +249,7 @@ describe("decide.py — cleanup_target signal class (Target mirror of cleanup_or
     // even with both signals present (a stale-idle race), the dev_target
     // dispatch must still appear; the signal class only rides alongside.
     const state = baseState({
-      signals: { target_work_available: true, target_backfill_idle: true },
+      signals: { target_board_work_available: true, target_backfill_idle: true },
     });
     const plan = runDecide(state, null);
     assert.ok(
@@ -527,7 +527,7 @@ describe("decide.py — design_qa_target signal class (Target visual-QA loop, #2
     // target-work and design-QA-due signals present, the dev_target dispatch
     // must still appear; design_qa_target only rides alongside spare capacity.
     const state = baseState({
-      signals: { target_work_available: true, design_qa_target_due: true },
+      signals: { target_board_work_available: true, design_qa_target_due: true },
     });
     const plan = runDecide(state, null);
     assert.ok(
@@ -1494,9 +1494,8 @@ describe("decide.py — tickets_orch signal class (ADR-0030 delta, #3423)", () =
  * a dependency-blocked Target issue never sets `target_board_work_available` —
  * the exclusion is enforced upstream at the board read, not re-derived here.
  *
- * EXPAND PHASE (ADR-0030): the legacy Redis signals (`target_work_available`,
- * `target_research_due`) still fire in parallel — nothing Redis-side is
- * removed. (The candidate-feed `research_recommended` forced-research path was
+ * EXPAND PHASE (ADR-0030): the legacy Redis `target_research_due` signal still fires in parallel;
+ * the Redis `target_work_available` signal was retired in #5570. (The candidate-feed `research_recommended` forced-research path was
  * retired in #3832 — `/api/anchor/candidates` is gone — so it is no longer a
  * parallel trigger.) These tests pin that the new GitHub-board signals ALSO
  * drive the Target branch.
@@ -1642,13 +1641,10 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
     assert.equal(a.skill, "hydra-target-build");
   });
 
-  test("legacy Redis target_work_available STILL drives dev_target (expand-phase parallelism)", () => {
+  test("the retired Redis target_work_available signal no longer drives dev_target", () => {
     const state = baseState({ signals: { target_work_available: true } });
     const plan = runDecide(state, feedNoResearch);
-    assert.ok(
-      findAction(plan, devTarget),
-      "the legacy Redis signal must keep firing dev_target during the ADR-0031 expand phase",
-    );
+    assert.equal(findAction(plan, devTarget), undefined, "only target_board_work_available arms dev_target (#5570)");
   });
 
   test("neither dev_target signal present → dev_target idles", () => {
@@ -2155,11 +2151,11 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
   });
 
   test("(o) an ordinary (non-resume) dev_target dispatch writes no record", () => {
-    const state = baseState({ signals: { target_work_available: true } });
+    const state = baseState({ signals: { target_board_work_available: true } });
     state.run_id = "781401d5-aaaa-bbbb-cccc-dddddddddddd";
     const { plan, stateFile } = runDecideKeepState(state, feedNoResearch);
     const a = findAction(plan, devTarget);
-    assert.ok(a, "target_work_available must dispatch dev_target");
+    assert.ok(a, "target_board_work_available must dispatch dev_target");
     assert.equal(
       a.intent.kind,
       "TargetFresh",

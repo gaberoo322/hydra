@@ -11,7 +11,6 @@
     "orch_stale_in_progress_items": [],
     "orch_stale_blocked_items": [],
     "untriaged_orphans_orch": true,
-    "target_work_available": true,
     "target_board_work_available": false,
     "target_board_research_due": true,
     "target_wip_saturated": false,
@@ -154,20 +153,6 @@
       "value": {
         "count": 0,
         "firstAction": null
-      }
-    },
-    "redis_queues": {
-      "work-queue": {
-        "ok": true,
-        "value": 2
-      },
-      "reframe-queue": {
-        "ok": true,
-        "value": 0
-      },
-      "prior-failures": {
-        "ok": true,
-        "value": 0
       }
     },
     "active_dev_orch": 1,

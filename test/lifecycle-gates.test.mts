@@ -52,6 +52,13 @@ describe("gate predicates (INV-7, INV-8)", () => {
     assert.equal(gateJudgment(gi({ to: "needs-info", reason: "missing-repro", rationale: "no steps" })).ok, true);
   });
 
+  test("judgment into ready-for-agent refuses an issue body with no Files in scope section", () => {
+    const base = { from: "needs-triage", to: "ready-for-agent", reason: "scoped", rationale: "scoped it" } as const;
+    assert.equal(gateJudgment(gi({ ...base, body: "no scope here" })).code, "scope-section-missing");
+    assert.equal(gateJudgment(gi({ ...base })).code, "scope-section-missing");
+    assert.equal(gateJudgment(gi({ ...base, body: "## Files in scope\n\n- src/a.ts\n" })).ok, true);
+  });
+
   test("adr5 refuses any reason outside the closed enum", () => {
     assert.equal(gateAdr5(gi({ to: "ready-for-human", reason: "tired", rationale: "x" })).code, "reason-not-allowed");
     assert.equal(gateAdr5(gi({ to: "ready-for-human", reason: "credentials", rationale: "x" })).ok, true);

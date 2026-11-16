@@ -1,0 +1,1 @@
+- fix: ops-collect `today` flags failed or truncated merge reads, `--text` covers cycles/board/memory, and doctor/digest keep CLI crash causes visible (#5569)

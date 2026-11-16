@@ -9,7 +9,7 @@
       "name": "hydra-architect",
       "path": "docs/operator-playbooks/hydra-architect.md",
       "stage": "operator-interactive",
-      "description": "Strategic architecture review of Hydra as an autonomous software building system. Evaluates the control loop, research pipeline, agent quality, autonomy level, and knowledge systems against the operator's vision, then produces ranked recommendations.",
+      "description": "Strategic architecture review of Hydra as an autonomous software building system. Evaluates the decision loop, research pipeline, agent quality, autonomy level, and knowledge systems against the operator's vision, then produces ranked recommendations.",
       "dispatchedBy": [],
       "composedFrom": [],
       "route": "/docs/skill/hydra-architect",
@@ -21,7 +21,7 @@
       "name": "hydra-architecture-scan",
       "path": "docs/operator-playbooks/hydra-architecture-scan.md",
       "stage": "pre-plan-producer",
-      "description": "Non-interactive architecture-scan wrapper. Composes the upstream improve-codebase-architecture Explore phase against the Orchestrator and emits the surfaced deepening candidates as GitHub issues via hydra-prd / to-tickets — Strong ones as needs-triage agent work, Worth-exploring and Untouchable-Core-primary ones parked as hitl-grill for the operator (#4027) — never entering the interactive operator grilling loop.",
+      "description": "Non-interactive architecture scan. Composes the upstream improve-codebase-architecture Explore phase against the Orchestrator and files the deepening candidates as GitHub issues — Strong ones as needs-triage, Worth-exploring and Verifier-Core-primary ones parked as hitl-grill — never entering the interactive grilling loop.",
       "dispatchedBy": [
         {
           "class": "architecture_orch",
@@ -34,18 +34,6 @@
       "route": "/docs/skill/hydra-architecture-scan",
       "source": {
         "path": "docs/operator-playbooks/hydra-architecture-scan.md"
-      }
-    },
-    {
-      "name": "hydra-auto-merge-window",
-      "path": "docs/operator-playbooks/hydra-auto-merge-window.md",
-      "stage": "operator-interactive",
-      "description": "Dormant time-bounded auto-merger for a labeled issue batch — when a window is open it classifies the batch's open PRs, applies operator-approved to Tier-0, and enables auto-merge on Tier 1/2/3; audit-only outside the window and idle with no live campaign.",
-      "dispatchedBy": [],
-      "composedFrom": [],
-      "route": "/docs/skill/hydra-auto-merge-window",
-      "source": {
-        "path": "docs/operator-playbooks/hydra-auto-merge-window.md"
       }
     },
     {
@@ -135,7 +123,8 @@
         "docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md",
         "docs/operator-playbooks/_fragments/hydra-dev-child-flow.md",
         "docs/operator-playbooks/_fragments/lifecycle-seam-writes.md",
-        "docs/operator-playbooks/_fragments/blocked-slice-labelling.md"
+        "docs/operator-playbooks/_fragments/blocked-slice-labelling.md",
+        "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
       ],
       "route": "/docs/skill/hydra-dev",
       "source": {
@@ -165,7 +154,9 @@
           "via": "default"
         }
       ],
-      "composedFrom": [],
+      "composedFrom": [
+        "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
+      ],
       "route": "/docs/skill/hydra-discover",
       "source": {
         "path": "docs/operator-playbooks/hydra-discover.md"
@@ -182,7 +173,9 @@
           "via": "default"
         }
       ],
-      "composedFrom": [],
+      "composedFrom": [
+        "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
+      ],
       "route": "/docs/skill/hydra-doctor",
       "source": {
         "path": "docs/operator-playbooks/hydra-doctor.md"
@@ -241,18 +234,6 @@
       "route": "/docs/skill/hydra-hitl-grill",
       "source": {
         "path": "docs/operator-playbooks/hydra-hitl-grill.md"
-      }
-    },
-    {
-      "name": "hydra-incident",
-      "path": "docs/operator-playbooks/hydra-incident.md",
-      "stage": "operator-interactive",
-      "description": "Automated incident response for regressions, service crashes, and deployment failures. Investigates root cause, attempts fix or revert, creates post-mortem.",
-      "dispatchedBy": [],
-      "composedFrom": [],
-      "route": "/docs/skill/hydra-incident",
-      "source": {
-        "path": "docs/operator-playbooks/hydra-incident.md"
       }
     },
     {
@@ -320,7 +301,8 @@
         "docs/operator-playbooks/_fragments/hydra-qa-reference.md",
         "docs/operator-playbooks/_fragments/lifecycle-seam-writes.md",
         "docs/operator-playbooks/_fragments/qa-verdict-is-a-comment.md",
-        "docs/operator-playbooks/_fragments/checks-fetch.md"
+        "docs/operator-playbooks/_fragments/checks-fetch.md",
+        "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
       ],
       "route": "/docs/skill/hydra-qa",
       "source": {
@@ -331,9 +313,11 @@
       "name": "hydra-research",
       "path": "docs/operator-playbooks/hydra-research.md",
       "stage": "operator-interactive",
-      "description": "Research improvement opportunities for the Hydra orchestrator itself. Analyzes codebase architecture, control loop efficiency, learning system, agent quality, and infrastructure to produce actionable GitHub issues.",
+      "description": "Research improvement opportunities for the Hydra orchestrator itself. Analyzes codebase architecture, dispatch efficiency, learning system, agent quality, and infrastructure to produce actionable GitHub issues.",
       "dispatchedBy": [],
-      "composedFrom": [],
+      "composedFrom": [
+        "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
+      ],
       "route": "/docs/skill/hydra-research",
       "source": {
         "path": "docs/operator-playbooks/hydra-research.md"
@@ -350,7 +334,9 @@
           "via": "default"
         }
       ],
-      "composedFrom": [],
+      "composedFrom": [
+        "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
+      ],
       "route": "/docs/skill/hydra-retro",
       "source": {
         "path": "docs/operator-playbooks/hydra-retro.md"
@@ -398,7 +384,9 @@
           "via": "default"
         }
       ],
-      "composedFrom": [],
+      "composedFrom": [
+        "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
+      ],
       "route": "/docs/skill/hydra-sweep",
       "source": {
         "path": "docs/operator-playbooks/hydra-sweep.md"
@@ -421,7 +409,8 @@
         "docs/operator-playbooks/_fragments/hydra-target-build-anchor-preflight.md",
         "docs/operator-playbooks/_fragments/target-seam-preamble.md",
         "docs/operator-playbooks/_fragments/target-self-isolation-preamble.md",
-        "docs/operator-playbooks/_fragments/reflection-telemetry-deposit.md"
+        "docs/operator-playbooks/_fragments/reflection-telemetry-deposit.md",
+        "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
       ],
       "route": "/docs/skill/hydra-target-build",
       "source": {
@@ -459,7 +448,8 @@
         }
       ],
       "composedFrom": [
-        "docs/operator-playbooks/_fragments/target-seam-preamble.md"
+        "docs/operator-playbooks/_fragments/target-seam-preamble.md",
+        "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
       ],
       "route": "/docs/skill/hydra-target-discover",
       "source": {
@@ -470,7 +460,7 @@
       "name": "hydra-target-incident",
       "path": "docs/operator-playbooks/hydra-target-incident.md",
       "stage": "operator-interactive",
-      "description": "Automated incident response for the Target project — post-merge regressions, web-service crashes, and deploy failures. Single-realm to the target's app directory; investigates root cause, attempts fix or revert, files a post-mortem. Target sibling of hydra-incident (which is Orchestrator-only).",
+      "description": "Automated incident response for the Target project — post-merge regressions, web-service crashes, and deploy failures. Single-realm to the target's app directory; investigates root cause, attempts fix or revert, files a post-mortem.",
       "dispatchedBy": [],
       "composedFrom": [
         "docs/operator-playbooks/_fragments/target-seam-preamble.md"
@@ -511,7 +501,8 @@
         }
       ],
       "composedFrom": [
-        "docs/operator-playbooks/_fragments/target-seam-preamble.md"
+        "docs/operator-playbooks/_fragments/target-seam-preamble.md",
+        "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
       ],
       "route": "/docs/skill/hydra-target-research",
       "source": {
@@ -525,7 +516,8 @@
       "description": "Per-run (or daily) Target retrospective — deep-reads failed and reframed Target builds plus subagent friction reports, extracts recurring failure patterns, and files them — capped ≤2/run, deduped — as needs-triage issues on the Target board. NO gated PR, NO tier machinery.",
       "dispatchedBy": [],
       "composedFrom": [
-        "docs/operator-playbooks/_fragments/target-seam-preamble.md"
+        "docs/operator-playbooks/_fragments/target-seam-preamble.md",
+        "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
       ],
       "route": "/docs/skill/hydra-target-retro",
       "source": {
@@ -544,7 +536,8 @@
         }
       ],
       "composedFrom": [
-        "docs/operator-playbooks/_fragments/target-seam-preamble.md"
+        "docs/operator-playbooks/_fragments/target-seam-preamble.md",
+        "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
       ],
       "route": "/docs/skill/hydra-target-sweep",
       "source": {
@@ -623,7 +616,7 @@
       "name": "thermo-nuclear-code-quality-review",
       "path": "docs/operator-playbooks/thermo-nuclear-code-quality-review.md",
       "stage": "operator-interactive",
-      "description": "Operator-invoked, full-repo architectural review for infrastructure-scale ideation. Walks the entire codebase plus its operational surface (devops, CI, services, hosting, hardware), produces a free-form system map with ranked pressure points, then fires parallel deep-dives that propose code-judo restructurings — restructurings that delete whole subsystems, not polish them. Use when the operator wants a thermo-nuclear review, deep architectural audit, infrastructure ideation, or harsh full-repo quality sweep. Sibling to `improve-codebase-architecture` (module-scoped, opportunity-framed) — this skill is repo-scoped and blocker-framed.",
+      "description": "Operator-invoked full-repo architectural review at infrastructure scale. Maps the codebase and its operational surface, ranks pressure points, then runs parallel deep-dives proposing restructurings that delete whole subsystems. Use for a thermo-nuclear review, deep architectural audit, or harsh full-repo quality sweep. Repo-scoped sibling of the module-scoped `improve-codebase-architecture`.",
       "dispatchedBy": [],
       "composedFrom": [
         "docs/operator-playbooks/_fragments/thermo-nuclear-proposal-format.md"

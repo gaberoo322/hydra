@@ -166,20 +166,4 @@ the verification state recorded as of the last poll and a one-line note on what
 is still pending. A partial result the autopilot can resume beats a pending one
 only an external resume can finish.
 
-## Slot lifecycle events — PostToolUse hook
-
-Every tool call inside this skill emits a `subagent_tool_call` event onto the
-Redis stream `hydra:autopilot:slot-events`, classified at emit-time so the
-/now-pixel dashboard can route on `category`:
-
-- `milestone` — Write, Edit, MultiEdit, NotebookEdit, MCP write surfaces, and
-  Bash matching `^(git commit|gh pr|npm test|npm run build|npm run typecheck)`
-- `io` — other Bash, WebFetch, WebSearch, MCP read surfaces
-- `background` — Read, Grep, Glob
-
-Hook script: `scripts/autopilot/hooks/on-subagent-tool-call.sh`. Registration:
-sibling `<this-playbook>.settings.json` → `~/.claude/skills/<this-skill>/.claude/settings.json`
-(propagated by `scripts/sync-skills.sh`). The hook MUST NEVER propagate errors
-back to this session — a Redis outage, a malformed payload, or a missing `jq`
-all result in a stderr warning and `exit 0`. See
-`test/on-subagent-tool-call.test.mts` for the pinned behavior.
+@include _fragments/slot-lifecycle-hook.md

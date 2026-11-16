@@ -99,10 +99,6 @@ esac
 - **Per-day cap precedes any revert.** Once `HYDRA_HOLDBACK_MAX_REVERTS_PER_DAY` is reached, the producer emits `holdback.cap-reached` and suppresses further reverts for the UTC day.
 - **No new runtime dependency** (ADR-0005). Window, cap and TTL are named, env-overridable config (defaults in `src/redis/holdback.ts`, documented in `config/direction/outcomes.yaml`), never magic literals.
 
-## Slot lifecycle events
-
-Every tool call emits a `subagent_tool_call` event onto `hydra:autopilot:slot-events`. The category classification (a `milestone` is Bash matching `npm run build` or `npm run typecheck`, among others) and the never-propagate-errors contract are described once, in the "Slot lifecycle events" section of `hydra-dev.md`.
-
 ### 9.4 Reviewer commit (class A) and class B (ADR-0046 Decision 2)
 
 `scripts/qa/route.ts` runs the `reviewer-commit` engine phase in-process, between the fold and the trailer, on a reviewed FAIL only, reading the `reviewer-commits` stage at the FIXED point (`git show <fixedSha>:config/orchestrator/qa-rollout.json`, never the session tree). On `commit-a` it PAUSES before any effect: pass 1 returns `nextStep: "reviewer-commit"` plus a `reviewerCommit` plan and writes nothing. Run this block only then, with every input taken from `$ROUTE_JSON.reviewerCommit`; it exports `RC_OK` and, on success, `NEW_HEAD`. The `reviewer-commits` switch still ships `off`, so no QA pass reaches this block today. The PR head is checked out in a nested `git worktree add --detach` so the session tree stays untouched while the trusted scripts run from a separate master worktree (`$MASTER_WT`, built from the plan's `fixedSha`), with `HYDRA_REPO_ROOT` pointing the regenerators at the PR worktree and never running PR-authored scripts; the session tree is asserted unchanged on exit.
