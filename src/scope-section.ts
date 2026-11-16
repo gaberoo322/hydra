@@ -138,8 +138,3 @@ export const MECHANICAL_COMPANIONS: readonly string[] = [
   "test/fixtures/test-subject-baseline.json",
   "test/fixtures/test-title-provenance-baseline.json",
 ];
-
-/** True when `path` is a mechanical companion: exact match, or under a `/`-terminated entry. */
-export function isMechanicalCompanion(path: string): boolean {
-  return MECHANICAL_COMPANIONS.some((e) => (e.endsWith("/") ? path.startsWith(e) : path === e));
-}

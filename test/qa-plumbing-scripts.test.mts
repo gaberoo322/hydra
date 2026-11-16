@@ -491,7 +491,7 @@ describe("packet (steps 7.0 / 7.0a / 7.0b)", () => {
     const dir = mkdtempSync(join(tmpdir(), "qa-packet-test-"));
     try {
       const withCompanions = harness({
-        gitHandler: packetGit({ [`diff --no-renames --name-only ${BASE_SHA}...${HEAD}`]: ok("src/a.ts\ndocs/generated/adrs.json\ntest/fixtures/suite-count-baseline.json\ntest/fixtures/qa-cohort-baseline.json\n") }),
+        gitHandler: packetGit({ [`diff --name-only ${BASE_SHA}...${HEAD}`]: ok("src/a.ts\ndocs/generated/adrs.json\ntest/fixtures/suite-count-baseline.json\ntest/fixtures/qa-cohort-baseline.json\n") }),
         ghHandler: prBodyGh("Merge danger: two-way — docs\n"),
       });
       const r1 = await runPacket(readyPre(), "gaberoo322/hydra", withCompanions.ports, { loadStandards: standardsOk, outDir: dir });
