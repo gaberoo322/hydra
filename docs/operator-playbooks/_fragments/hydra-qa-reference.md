@@ -239,28 +239,6 @@ esac
   env-overridable config (defaults in `src/redis/holdback.ts`, documented in
   `config/direction/outcomes.yaml`), never magic literals.
 
-## Slot lifecycle events — PostToolUse hook (issue #671)
-
-Every tool call inside this skill emits a `subagent_tool_call` event onto the
-Redis stream `hydra:autopilot:slot-events`. The classification is done at
-emit-time so the /now-pixel dashboard can route on `category` without
-re-deriving it from the tool name:
-
-- `milestone` — Write, Edit, MultiEdit, NotebookEdit, MCP write surfaces, and
-  Bash matching `^(git commit|gh pr|npm test|npm run build|npm run typecheck)`
-- `io` — other Bash, WebFetch, WebSearch, MCP read surfaces
-- `background` — Read, Grep, Glob
-
-**Hook script:** `scripts/autopilot/hooks/on-subagent-tool-call.sh`
-**Hook registration:** sibling `<this-playbook>.settings.json` →
-`~/.claude/skills/<this-skill>/.claude/settings.json` (propagated by
-`scripts/sync-skills.sh`)
-
-The hook MUST NEVER propagate errors back to this skill's session — a Redis
-outage, a malformed payload, or a missing `jq` all result in a stderr
-warning and `exit 0`. See `test/on-subagent-tool-call.test.mts` for the
-pinned behavior.
-
 ### 9.4 Reviewer commit (class A) and class B (issues #5267, #5268, ADR-0046 Decision 2)
 
 > **Wired (issue #5415, after the #5269 plumbing refactor).** `scripts/qa/route.ts` runs the `reviewer-commit` engine phase in-process, between the fold and the trailer, on a reviewed FAIL only. It reads the `reviewer-commits` stage at the FIXED point (`git show <fixedSha>:config/orchestrator/qa-rollout.json`, never the session tree). When the decision is `commit-a` it PAUSES before any effect: pass 1 returns `nextStep: "reviewer-commit"` plus a `reviewerCommit` plan and writes nothing. The agent runs the block below with every input taken from that plan, then re-calls `route` with `--reviewer-fixed <sha40>` (route verifies the pushed commit, then posts PASS-pending-CI at the new head with the `QA-Fix: A` trailer inputs) or `--reviewer-commit-aborted` (the original FAIL, after a head-unchanged check). The rollout switch `reviewer-commits` still ships `off`, so no QA pass reaches this block today; flipping it is a separate operator-merged item. **Recorded INV-5 deviation:** the PR head is checked out in a nested `git worktree add --detach` (rather than a detached checkout inside the session tree) so the session tree stays untouched while the trusted scripts run from a separate master worktree; the session tree is asserted unchanged on exit.

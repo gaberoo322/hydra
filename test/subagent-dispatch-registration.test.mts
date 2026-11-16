@@ -41,6 +41,7 @@ import {
   existsSync,
   statSync,
   readFileSync,
+  readdirSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -572,5 +573,25 @@ describe("populated registry → in-flight slot seed is non-empty (#2406 accepta
     const seed = deriveInflightSlotSeed(await listActiveSubagentDispatches());
     assert.equal(seed.qa_orch, undefined, "the reaped qa_orch dispatch must not be re-seeded");
     assert.equal(seed.dev_orch?.task_id, "sess-5142-live", "the in-flight dev_orch dispatch is still carried");
+  });
+});
+
+describe("playbook sources describe the slot hook in exactly one home (#5559)", () => {
+  test("only _fragments/slot-lifecycle-hook.md names the hook script; no playbook claims every tool call emits", () => {
+    const dirs = [
+      join(REPO_ROOT, "docs", "operator-playbooks"),
+      join(REPO_ROOT, "docs", "operator-playbooks", "_fragments"),
+    ];
+    const offenders: string[] = [];
+    for (const dir of dirs) {
+      for (const name of readdirSync(dir)) {
+        if (!name.endsWith(".md") || name === "slot-lifecycle-hook.md") continue;
+        const text = readFileSync(join(dir, name), "utf8");
+        if (text.includes("Every tool call in") || text.includes("on-subagent-tool-call.sh")) {
+          offenders.push(name);
+        }
+      }
+    }
+    assert.deepEqual(offenders, []);
   });
 });
