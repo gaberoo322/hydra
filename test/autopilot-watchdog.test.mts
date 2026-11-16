@@ -853,15 +853,14 @@ describe("watchdog liveness production adapters (issue #5096 QA round 1)", () =>
         return (label === "needs-triage" ? rows(["needs-triage"], 2) : { kind: "ok", data: [] }) as never;
       },
     };
-    const r = await readPendingWork({ github: gh, readQueue: async () => 1, log: () => {} });
+    const r = await readPendingWork({ github: gh, log: () => {} });
     assert.deepEqual(seen.sort(), ["needs-research", "needs-triage", "ready-for-agent"]);
-    assert.deepEqual(r, { ok: true, total: 3 });
+    assert.deepEqual(r, { ok: true, total: 2 });
   });
 
   test("pendingWork: a failed per-label read is ok:false, never zero work", async () => {
     const r = await readPendingWork({
       github: fakeGithub({ "ready-for-agent": { kind: "empty" }, "needs-research": { kind: "ok", data: [] }, "needs-triage": { kind: "ok", data: [] } }),
-      readQueue: async () => 0,
       log: () => {},
     });
     assert.deepEqual(r, { ok: false });
@@ -871,7 +870,6 @@ describe("watchdog liveness production adapters (issue #5096 QA round 1)", () =>
     const empty = { kind: "ok", data: [] };
     const r = await readPendingWork({
       github: fakeGithub({ "ready-for-agent": empty, "needs-research": empty, "needs-triage": empty }),
-      readQueue: async () => 0,
       log: () => {},
     });
     assert.deepEqual(r, { ok: true, total: 0 });

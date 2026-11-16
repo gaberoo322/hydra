@@ -70,7 +70,7 @@ import { isLivePid, signalPid } from "../process-probe.ts";
 import { countOpenBoard } from "../autopilot/turn-snapshot/board-saturation.ts";
 import { createTurnSnapshotGithub, type TurnSnapshotGithub } from "../autopilot/turn-snapshot/github-port.ts";
 import { pingRedis } from "../redis/utility.ts";
-import { closeTurnSnapshotRedis, getAnchorQueueLength, quietTurnSnapshotRedisErrors } from "../redis/turn-snapshot.ts";
+import { closeTurnSnapshotRedis, quietTurnSnapshotRedisErrors } from "../redis/turn-snapshot.ts";
 import { parseDeliberateStopMarker, readDeliberateStop } from "../scheduler/stop-marker.ts";
 import type { DeliberateStopRead, HealthRead, PendingWorkRead, SchedulerRead } from "./liveness.ts";
 
@@ -354,7 +354,6 @@ export const PENDING_WORK_LIST_LIMIT = 100;
 
 export interface PendingWorkDeps {
   github: Pick<TurnSnapshotGithub, "openIssueLabelsWithLabel">;
-  readQueue: () => Promise<number>;
   log: (line: string) => void;
 }
 
@@ -366,11 +365,10 @@ export interface PendingWorkDeps {
  */
 export async function readPendingWork(deps: PendingWorkDeps): Promise<PendingWorkRead> {
   try {
-    const [rfa, research, triage, queue] = await Promise.all([
+    const [rfa, research, triage] = await Promise.all([
       deps.github.openIssueLabelsWithLabel("ready-for-agent", PENDING_WORK_LIST_LIMIT),
       deps.github.openIssueLabelsWithLabel("needs-research", PENDING_WORK_LIST_LIMIT),
       deps.github.openIssueLabelsWithLabel("needs-triage", PENDING_WORK_LIST_LIMIT),
-      deps.readQueue(),
     ]);
     const a = countOpenBoard(rfa);
     const b = countOpenBoard(research);
@@ -382,7 +380,7 @@ export async function readPendingWork(deps: PendingWorkDeps): Promise<PendingWor
       }
     }
     if ("reason" in a || "reason" in b || "reason" in c) return { ok: false };
-    return { ok: true, total: a.value.readyForAgent + b.value.needsResearch + c.value.needsTriage + queue };
+    return { ok: true, total: a.value.readyForAgent + b.value.needsResearch + c.value.needsTriage };
   } catch (err) {
     deps.log(`WARN work-signal read FAILED: ${err instanceof Error ? err.message : String(err)} — cannot prove no work pending`);
     return { ok: false };
@@ -399,7 +397,7 @@ export function createProductionLivenessDeps(
 ): LivenessDeps {
   const prefix = "hydra-orchestrator-watchdog:";
   quietTurnSnapshotRedisErrors(() => {
-    /* intentional: Redis errors surface as the ping/marker/queue read failing, never as stderr noise */
+    /* intentional: Redis errors surface as the ping/marker read failing, never as stderr noise */
   });
   const github = createTurnSnapshotGithub();
   return {
@@ -480,7 +478,6 @@ export function createProductionLivenessDeps(
       pendingWork: () =>
         readPendingWork({
           github,
-          readQueue: () => withTimeout(getAnchorQueueLength("work-queue"), REDIS_TIMEOUT_MS, "work-queue read"),
           log: (line) => log(`${prefix} ${line}`),
         }),
     },

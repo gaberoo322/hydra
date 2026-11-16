@@ -1,7 +1,7 @@
 /**
- * turn-snapshot/board-saturation.ts — the Redis-queue, scout, arch/cleanup/
+ * turn-snapshot/board-saturation.ts — the scout, arch/cleanup/
  * skill-prune board and hitl-grill inbox Turn Snapshot collectors (ADR-0043
- * slice 5B, #4933). They were collect_redis_queues, collect_scout,
+ * slice 5B, #4933). They were collect_scout,
  * collect_arch_cleanup_boards and collect_hitl_grill in collect-state.sh.
  *
  * Reads go through the typed `TurnSnapshotRedis` and `TurnSnapshotGithub`
@@ -9,9 +9,6 @@
  * below. Semantics carried over verbatim (golden files under
  * test/fixtures/turn-snapshot/remaining/ pin the bytes):
  *
- *   - redis queues (#3478): `backlog_subsystem=retired-adr0031` (the ADR-0031
- *     retired-backlog marker), then `work_queue` / `reframe_queue` /
- *     `prior_failures` — the LLEN of each anchor queue, `0` when unreadable.
  *   - scout (#485, #532): `scout_last_walk_iso` (the calendar-walk stamp, `"`
  *     stripped, empty when unset/unreadable); `scout_board_open_enhancements`
  *     (open `enhancement` issues, `0` on a failed read); today's (UTC)
@@ -36,7 +33,7 @@
 import { DEGRADE, type Classified, type DegradeReason, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import type { GhJsonRead, TurnSnapshotGithub } from "./github-port.ts";
 import { eachValue } from "./json-values.ts";
-import { REDIS_UNREACHABLE, type AnchorQueueName, type TurnSnapshotRedis } from "./redis-port.ts";
+import { REDIS_UNREACHABLE, type TurnSnapshotRedis } from "./redis-port.ts";
 
 export interface BoardSaturationDeps {
   readonly github: TurnSnapshotGithub;
@@ -77,20 +74,6 @@ function ghData(read: GhJsonRead): Classified<unknown> {
  * `--jq` errored on, so the whole read degrades, never a guessed count (#5084).
  */
 const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
-
-// ---------------------------------------------------------------------------
-// Redis queues
-// ---------------------------------------------------------------------------
-
-const ANCHOR_QUEUES = ["work-queue", "reframe-queue", "prior-failures"] as const satisfies readonly AnchorQueueName[];
-
-export type RedisQueuesValue = Readonly<Record<AnchorQueueName, Classified<number>>>;
-
-export async function collectRedisQueues(deps: BoardSaturationDeps): Promise<CollectorOutcome<RedisQueuesValue>> {
-  const [wq, rq, pf] = await Promise.all(ANCHOR_QUEUES.map((q) => deps.redis.anchorQueueLength(q)));
-  const value = { "work-queue": wq, "reframe-queue": rq, "prior-failures": pf } as RedisQueuesValue;
-  return outcome("redis-queues", value, ANCHOR_QUEUES.flatMap((q) => marker(q, value[q])));
-}
 
 // ---------------------------------------------------------------------------
 // Scout
@@ -232,10 +215,10 @@ export interface BoardSignals {
   readonly skillPruneSaturated: boolean;
 }
 
-/** The python emitter: idle / saturation verdicts from the counts and the work queue. */
-function foldBoardSignals(c: BoardCounts, workQueue: number): BoardSignals {
+/** The python emitter: idle / saturation verdicts from the board counts. */
+function foldBoardSignals(c: BoardCounts): BoardSignals {
   return {
-    backfillIdle: c.readyForAgent === 0 && c.needsResearch === 0 && c.needsTriage === 0 && workQueue === 0,
+    backfillIdle: c.readyForAgent === 0 && c.needsResearch === 0 && c.needsTriage === 0,
     archOpenScan: c.archSourced,
     archOpenEnhancements: c.enhancementSourced,
     archSaturated: c.archSourced > ARCH_BOARD_SATURATION_CAP || c.enhancementSourced > ARCH_BOARD_ENHANCEMENT_CAP,
@@ -260,24 +243,20 @@ export const BOARD_SIGNALS_SUPPRESSED: BoardSignals = {
 
 export interface ArchBoardsValue {
   readonly lastRunIso: Classified<string | null>;
-  /** The work-queue depth the idle verdict used (0 when unreadable) — exported as ARCH_WORK_QUEUE. */
-  readonly workQueue: number;
   readonly board: Classified<BoardSignals>;
   /** ORCH_BOARD_DEGRADED after this collector: `1` when the board read failed, else the value passed in. */
   readonly orchBoardDegraded: string;
 }
 
 export async function collectArchCleanupBoards(deps: BoardSaturationDeps): Promise<CollectorOutcome<ArchBoardsValue>> {
-  const [boardRead, wq, lastRunIso] = await Promise.all([
+  const [boardRead, lastRunIso] = await Promise.all([
     deps.github.listOpenIssueLabelRows(deps.ghListLimit),
-    deps.redis.anchorQueueLength("work-queue"),
     deps.redis.architectureLastRun(),
   ]);
-  const workQueue = wq.ok ? wq.value : 0;
   const counts = countOpenBoard(boardRead);
-  const board: Classified<BoardSignals> = "reason" in counts ? fail(counts.reason) : okv(foldBoardSignals(counts.value, workQueue));
-  const value: ArchBoardsValue = { lastRunIso, workQueue, board, orchBoardDegraded: board.ok ? deps.orchBoardDegraded : "1" };
-  return outcome("arch-cleanup-boards", value, [...marker("orchBoard", board), ...marker("workQueue", wq), ...marker("archLastRunIso", lastRunIso)]);
+  const board: Classified<BoardSignals> = "reason" in counts ? fail(counts.reason) : okv(foldBoardSignals(counts.value));
+  const value: ArchBoardsValue = { lastRunIso, board, orchBoardDegraded: board.ok ? deps.orchBoardDegraded : "1" };
+  return outcome("arch-cleanup-boards", value, [...marker("orchBoard", board), ...marker("archLastRunIso", lastRunIso)]);
 }
 
 // ---------------------------------------------------------------------------

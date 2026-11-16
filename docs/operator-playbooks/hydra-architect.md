@@ -1,6 +1,6 @@
 ---
 name: hydra-architect
-description: Strategic architecture review of Hydra as an autonomous software building system. Evaluates the control loop, research pipeline, agent quality, autonomy level, and knowledge systems against the operator's vision, then produces ranked recommendations.
+description: Strategic architecture review of Hydra as an autonomous software building system. Evaluates the decision loop, research pipeline, agent quality, autonomy level, and knowledge systems against the operator's vision, then produces ranked recommendations.
 when_to_use: "When the user wants to assess Hydra's architecture, think about system improvements, evaluate the autonomous builder design, or asks 'how can we improve Hydra'."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Agent(*) WebSearch(*) WebFetch(*)
 arguments: [focus]
@@ -17,7 +17,7 @@ If `$focus` provided, weight analysis toward that dimension.
 This skill is operator-invoked, so you start with cwd at `~/hydra` — the
 **live deploy checkout** that `scripts/deploy.sh` refuses to deploy from when
 it carries any uncommitted tracked change. Every read in Phases 1–4 below
-(`vision.md`, `goals.md`, `priorities.md`, `CLAUDE.md`, the metrics/research/
+(`vision.md`, `priorities.md`, `CLAUDE.md`, the metrics/research/
 backlog queries) is safe to run against `~/hydra` as-is — reads never dirty
 the tree. Two things are NOT safe to run against `~/hydra` directly: the
 `npm test` invocation in **Architecture Shape** below, and the report write in
@@ -47,64 +47,12 @@ Autonomous development system: research → prioritize → plan → challenge �
 
 ## Phase 1: Collect Evidence (parallel)
 
-### Cycle Performance (quantitative)
+### Cycle performance, work tracking, agent quality, scheduler
+One collector call covers all four. It prints one `ok`/`code` result per collector and always exits 0; read a failed collector as "no data", not as an abort.
 ```bash
-hydra metrics --count 50 | python3 -c "
-import json,sys
-from collections import Counter
-d=json.load(sys.stdin)
-trend=d.get('trend',d.get('metrics',[]))
-if not trend: print('No metrics'); sys.exit()
-merged=sum(1 for m in trend if int(m.get('tasksMerged',0))>0)
-failed=sum(1 for m in trend if int(m.get('tasksFailed',0))>0)
-abandoned=sum(1 for m in trend if int(m.get('tasksAbandoned',0))>0)
-durations=[int(m.get('totalDurationMs',0)) for m in trend if int(m.get('totalDurationMs',0))>0]
-costs=[float(m.get('costUsd',0)) for m in trend if float(m.get('costUsd',0))>0]
-tests_start=int(trend[-1].get('testsAfter',0))
-tests_end=int(trend[0].get('testsAfter',0))
-anchors=Counter(m.get('anchorType','unknown') for m in trend)
-print(f'Cycles: {len(trend)} | Merged: {merged} | Failed: {failed} | Abandoned: {abandoned}')
-print(f'Merge rate: {100*merged//max(len(trend),1)}%')
-if durations: print(f'Cycle: avg {sum(durations)//len(durations)//1000}s, median {sorted(durations)[len(durations)//2]//1000}s')
-if costs: print(f'Cost: avg \${sum(costs)/len(costs):.2f}/cycle, total \${sum(costs):.2f}')
-print(f'Tests: {tests_start} -> {tests_end} (delta: {tests_end-tests_start})')
-print(f'Anchors: {dict(anchors)}')
-titles=[m.get('taskTitle','') for m in trend]
-repeats=[(t,c) for t,c in Counter(titles).items() if c>1 and t]
-if repeats: print(f'Repeated tasks: {repeats}')
-"
+cd ~/hydra && npx tsx scripts/ops-collect.ts --collectors cycles,board,memory,scheduler --text
 ```
-
-### Work tracking
-```bash
-# `hydra backlog ls` (Redis kanban lanes) was retired by ADR-0031 (#3439, PR
-# #3455) — `/api/backlog` 404s and `hydra backlog` is a retired stub
-# pointing at the replacement (issue #3745). Orchestrator work tracking is
-# now GitHub Issues on gaberoo322/hydra:
-gh issue list --repo gaberoo322/hydra --state open --limit 200 \
-  --json labels --jq '[.[] | .labels[].name] | group_by(.) | map({(.[0]): length}) | add' 2>/dev/null
-```
-
-### Agent Quality
-```bash
-# Memory is consolidated JSON in :patterns (a Redis STRING, not a list) for
-# the `learningAgent` values in scripts/autopilot/classes.json (planner, executor).
-for agent in planner executor; do
-  bytes=$(docker exec hydra-redis-1 redis-cli STRLEN "hydra:memory:${agent}:patterns" 2>/dev/null || echo 0)
-  if [ "${bytes:-0}" -gt 0 ]; then
-    docker exec hydra-redis-1 redis-cli GET "hydra:memory:${agent}:patterns" 2>/dev/null \
-      | python3 -c "
-import json,sys
-try:
-  arr=json.loads(sys.stdin.read())
-  print('$agent: %d patterns, %d total hits' % (len(arr), sum(p.get('hitCount',0) for p in arr)))
-except Exception as e: print('$agent: parse error (%s)' % e)
-"
-  else
-    echo "$agent: 0 patterns"
-  fi
-done
-```
+It leads with a `target:` line. Field meanings for every collector: `npx tsx scripts/ops-collect.ts --help`.
 
 ### Architecture Shape
 ```bash
@@ -122,17 +70,8 @@ echo "=== Config ==="; find ~/hydra/config -name '*.md' | wc -l
 
 ### Autonomy
 ```bash
-hydra scheduler status | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-print(f'Scheduler: {\"running\" if d.get(\"running\") else \"stopped\"} | Cycles: {d.get(\"cyclesRun\",0)} | Errors: {d.get(\"consecutiveErrors\",0)}')
-print(f'Daily spend: \${d.get(\"research\",{}).get(\"dailySpendUsd\",0):.2f}/\${d.get(\"research\",{}).get(\"dailyCostCapUsd\",50)}')
-"
 systemctl --user list-units --type=service --state=failed 2>/dev/null | grep hydra
-# Target commit cadence -- needs the Target seam resolved in this block (see Architecture Shape).
-# Target seam (scripts/target/print-target-facts.ts, ADR-0002 / ADR-0013): never a
-# literal checkout path. On failure --sh prints nothing, TARGET_WS stays empty and
-# every Target collector below is skipped, never substituted with a default path.
+# Target commit cadence: same Target seam as Architecture Shape (empty TARGET_WS -> skipped).
 unset TARGET_WS TARGET_APP_DIR
 eval "$(cd ~/hydra && npx tsx scripts/target/print-target-facts.ts --sh)"
 [ -n "${TARGET_WS:-}" ] || echo "Target unresolved -- skipping Target collectors"
@@ -144,7 +83,6 @@ fi
 
 ### Context files (parallel)
 - `~/hydra/config/direction/vision.md`
-- `~/hydra/config/direction/goals.md`
 - `~/hydra/config/direction/priorities.md`
 - `~/hydra/CLAUDE.md`
 - `$TARGET_WS/CLAUDE.md` (resolve `$TARGET_WS` via the Target seam above; skip when unresolved)
@@ -162,12 +100,12 @@ Surface specific techniques, not vague advice.
 
 ## Phase 3: Evaluate (8 dimensions, 1-10 each, with evidence)
 
-1. **Control Loop Quality** — merge rate, ceremony overhead, efficiency
+1. **Decision Loop Quality** — merge rate, ceremony overhead, efficiency
 2. **Research → Action Pipeline** — conversion rate, repeated topics, idea death
 3. **Grounding & Verification** — bug categories slipping through, rollback frequency
-4. **Agent Quality** — planner novelty, preflight gate effectiveness (high-risk review catches for risk:high tasks), executor minimalism
+4. **Agent Quality** — design-concept gate outcomes (auto-approve vs hydra-grill handoff rate), QA first-FAIL rate and severity mix, dev PR scope discipline (scope-check hits)
 5. **Autonomy Level** — operator intervention rate, recurring manual steps
-6. **Knowledge & Learning** — memory rule usefulness, OV search quality
+6. **Knowledge & Learning** — memory rule usefulness, Pattern Memory / Reflections re-injection hit rate
 7. **Architecture Fitness** — bottlenecks, maintainability, simpler alternatives
 8. **Cost Efficiency** — cost/merged feature, model routing, ROI of research vs build
 

@@ -7,5 +7,7 @@
   { "term": "OpenViking", "retiredBy": "ADR-0033" },
   { "term": "src/gate.ts", "retiredBy": "ADR-0006" },
   { "term": "in-process control loop", "retiredBy": "ADR-0006" },
-  { "term": "src/anchor-selection/", "retiredBy": "ADR-0036" }
+  { "term": "src/anchor-selection/", "retiredBy": "ADR-0036" },
+  { "term": "hydra-incident", "retiredBy": "#5493" },
+  { "term": "hydra-auto-merge-window", "retiredBy": "#5493" }
 ]

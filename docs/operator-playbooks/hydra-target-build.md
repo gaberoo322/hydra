@@ -901,19 +901,4 @@ Do NOT disable or work around the guard itself — it is the isolation fence. Th
 full note (with the `Monitor` CI-poll corollary) lives in
 `_fragments/hydra-dev-parent-flow.md` under the same heading.
 
-## Slot lifecycle events — PostToolUse hook
-
-Every tool call inside this skill emits a `subagent_tool_call` event onto the
-Redis stream `hydra:autopilot:slot-events`, classified at emit-time so the
-/now-pixel dashboard can route on `category`:
-
-- `milestone` — Write, Edit, MultiEdit, NotebookEdit, MCP write surfaces, and
-  Bash matching `^(git commit|gh pr|npm test|npm run build|npm run typecheck)`
-- `io` — other Bash, WebFetch, WebSearch, MCP read surfaces
-- `background` — Read, Grep, Glob
-
-Hook script: `scripts/autopilot/hooks/on-subagent-tool-call.sh`. Registration:
-sibling `<this-playbook>.settings.json` → `~/.claude/skills/<this-skill>/.claude/settings.json`
-(propagated by `scripts/sync-skills.sh`). The hook never propagates errors back
-to this session — any failure is a stderr warning and `exit 0`
-(`test/on-subagent-tool-call.test.mts`).
+@include _fragments/slot-lifecycle-hook.md

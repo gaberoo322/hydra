@@ -484,3 +484,5 @@ pipeline still applies (with the per-cue threshold from #524). Don't call this
 on PASS / PASS-pending-CI (positive QA outcomes currently don't train a memory).
 
 Relay the QA report to the user.
+
+@include _fragments/slot-lifecycle-hook.md

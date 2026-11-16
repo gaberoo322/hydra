@@ -14,442 +14,106 @@ Comprehensive health check of the Hydra autonomous orchestrator. You have full c
 
 If the operator provided a focus area (`$focus`), weight your analysis toward that.
 
-> Prefer `bin/hydra` over raw curl where commands exist. Fall back to `hydra raw GET <path>` for endpoints without a command.
-
 ## Phase 1: Collect (run in parallel)
 
-### Target seam (resolve FIRST — soft)
-```bash
-# ONE soft resolve of the Target identity through the target-config seam
-# (scripts/target/print-target-facts.ts JSON mode, ADR-0002 / ADR-0013
-# Decision 4) — never a literal Target path, name, or unit. This block's
-# sole purpose is the reportable `target: name=... ws=... service=...` line
-# below — it is NOT a source of shell state for other blocks. Each fenced
-# code block in this playbook is its own independent Bash invocation (see
-# the Bash tool contract: "shell state does not [persist]"), and Phase 1's
-# blocks are dispatched in parallel, so a Target-specific probe CANNOT rely
-# on a variable set here surviving into a sibling block — every probe below
-# that needs the Target identity (Git & Working Tree, kill-chain SLO, Timer
-# Health) re-derives it independently in its own block (issue #4608 QA
-# finding: a shared-var dependency across "(run in parallel)" blocks made
-# those three probes silently report "skipped (Target unresolved)" every
-# run, even when the seam resolved fine).
-#
-# Deliberately NOT the shared `_fragments/target-seam-preamble.md`: that
-# `--sh` preamble is fail-closed (exits 1 on a manifest failure) by design,
-# and a doctor must keep diagnosing precisely when the Target is broken.
-# JSON mode still prints the identity facts on a manifest failure (only the
-# exit code flips), so capture stdout regardless and leave the three vars
-# EMPTY on a total failure — each consumer skips itself on an empty value.
-TARGET_FACTS_JSON=$(cd "$HOME/hydra" && npx tsx scripts/target/print-target-facts.ts 2>/dev/null || true)
-TARGET_NAME=$(printf '%s' "$TARGET_FACTS_JSON" | jq -r '.name // empty' 2>/dev/null || true)
-TARGET_WS=$(printf '%s' "$TARGET_FACTS_JSON" | jq -r '.workspace // empty' 2>/dev/null || true)
-TARGET_SERVICE=$(printf '%s' "$TARGET_FACTS_JSON" | jq -r '.serviceName // empty' 2>/dev/null || true)
-echo "target: name=${TARGET_NAME:-<unresolved>} ws=${TARGET_WS:-<unresolved>} service=${TARGET_SERVICE:-<unresolved>}"
-```
-An `<unresolved>` line is itself a finding (the seam is a config defect) —
-report it, then keep going: every Target-specific probe degrades to a
-`skipped (Target unresolved)` line rather than aborting the doctor.
+Every block prints raw output; none of them parses anything.
 
-### Core Health
+### Collectors
+```bash
+cd ~/hydra && npx tsx scripts/ops-collect.ts --collectors cycles,board,alerts,memory,redis-server,timers,redis-backup,journal-errors,target-git,kill-chain --text --count 20 || echo "ops-collect unavailable"
+```
+One line per collector, detail rows indented; field meanings: `npx tsx scripts/ops-collect.ts --help`. A line reading `<collector>: <code> (<reason>)` means no data for that probe, so keep going; `ops-collect unavailable` means the CLI crashed (the lines printed just before it are the cause): a finding.
+
+- The first line is `target:`. `<unresolved>` is a Target-config finding; the Target collectors then print `skipped (Target unresolved)` and the rest still run.
+- `cycles` carries `coverage.classesNotRecorded`: those classes write no cycle record, so their absence is not a zero.
+- `timers` lists every repo-owned timer and the Target's timers; each `TIMER NOT ENABLED`, `TIMER NEVER FIRED` or `TIMER NOT SCHEDULED` entry is a finding.
+- `kill-chain` prints `quiet` or `FLAG`. It is surfaced only and never a gate.
+
+### Core health
 ```bash
 hydra health
 hydra scheduler status
-# External access — checks Cloudflare tunnel + public reachability
 curl -s -o /dev/null -w "External: %{http_code}\n" https://admin.clawstreetbets.xyz/api/health
 ```
+The `curl` line checks the public tunnel.
 
-### Deployed-build drift (issue #2663)
+### Deployed-build drift
 ```bash
-# Compares the SHA the RUNNING orchestrator reports it is deployed from
-# (/api/health.deployedSha) against origin/master HEAD, after a bounded
-# `git fetch`. Closes the 2026-07-02 blind spot where prod ran ~30h-stale
-# code (POST /api/holdback/pending 404'd) while the doctor said "uptime 22h,
-# status ok" — the doctor had no deployed-build-vs-master drift check.
-#
-# Read-only: the fetch updates only origin/* remote-tracking refs — it NEVER
-# checks out, pulls, or mutates the working tree. Fail-safe: an unreachable
-# API, detached origin, or git error degrades to an `unknown` verdict and
-# exits 0 (the check never makes the doctor itself "fail"). `--alert` pushes
-# a critical alert into hydra:alerts ONLY on SUSTAINED drift (past the grace
-# window) — a deploy caught mid-flight reads as `settling`, not an alarm.
-#
-# The verdict is the load-bearing line:
-#   in-sync  — deployed == origin/master. Healthy.
-#   settling — drift younger than the grace window (DEPLOY_DRIFT_GRACE_SECONDS, src/health/deployed-sha.ts). A deploy is
-#              likely mid-flight; re-check next run, don't act yet.
-#   drift    — deployed != origin/master past the grace window. LOUD: prod
-#              is running STALE code. Deploy-on-merge did NOT restart the
-#              service. If a `probable cause: ... dirty tree` note is shown,
-#              a tracked modification tripped deploy.sh's dirty-tree guard —
-#              REPORT it to the operator; never reset/commit it yourself.
-#   unknown  — a SHA couldn't be resolved (service down / detached origin).
-#              Information-only.
-cd ~/hydra && npx tsx scripts/deploy-drift-check.ts --text --alert 2>/dev/null \
-  || echo "deploy-drift check unavailable"
+cd ~/hydra && npx tsx scripts/deploy-drift-check.ts --text --alert 2>/dev/null || echo "deploy-drift check unavailable"
 ```
-A `drift` verdict is the durable backstop for the "prod is stale but health
-says ok" failure mode (`reference_deploy_concurrency_cancels_master`): the
-per-2-min `scripts/hydra-watchdog.ts` deploy-drift check (#734) only auto-deploys when `HYDRA_WATCHDOG_AUTODEPLOY=1`; otherwise its deploy-drift
-check is advisory and its journald WARN is invisible to a `hydra doctor` reader —
-this line renders the same drift as an explicit doctor finding, so a `drift`
-verdict is the operator's cue to run `scripts/deploy.sh`. **Fix (Phase 3):** run
-`scripts/deploy.sh` from the `~/hydra` master checkout (rebuilds dashboard +
-restarts the service); if a dirty-tree cause is shown, REPORT it to the operator
-(the guard exists so uncommitted work is never swept into a deploy) — do not
-reset or commit it.
+Read-only. The verdict line is what matters:
 
-### Cycle Performance (last 20 metrics — richer than cycle/history)
-```bash
-hydra metrics --count 20 | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-trend=d.get('trend',d.get('metrics',[]))
-if not trend: print('No metrics'); sys.exit()
-merged=sum(1 for m in trend if int(m.get('tasksMerged',0))>0)
-failed=sum(1 for m in trend if int(m.get('tasksFailed',0))>0)
-abandoned=sum(1 for m in trend if int(m.get('tasksAbandoned',0))>0)
-durations=[int(m.get('totalDurationMs',0)) for m in trend if int(m.get('totalDurationMs',0))>0]
-tests=[int(m.get('testsAfter',0)) for m in trend if int(m.get('testsAfter',0))>0]
-fixes=sum(1 for m in trend if m.get('anchorType') in ('prior-failure','failing-test') and int(m.get('tasksMerged',0))>0)
-feats=merged-fixes
-print(f'Cycles: {len(trend)} | Merged: {merged} | Failed: {failed} | Abandoned: {abandoned}')
-print(f'Merge rate: {100*merged//max(len(trend),1)}%')
-if durations: print(f'Cycle time: avg {sum(durations)//len(durations)//1000}s, max {max(durations)//1000}s')
-if tests: print(f'Tests: {tests[-1]} -> {tests[0]} (latest)')
-print(f'Fix:Feat ratio: {fixes}:{feats}')
-for m in trend[:5]:
-    status='merged' if int(m.get('tasksMerged',0))>0 else 'failed' if int(m.get('tasksFailed',0))>0 else 'abandoned'
-    print(f'  [{status}] {m.get(\"taskTitle\",\"?\")[:65]}')
-"
-```
+- `in-sync`: the running build is `origin/master`.
+- `settling`: a deploy is probably mid-flight; re-check next run.
+- `drift`: prod is running stale code even though health says ok. A `probable cause: ... dirty tree` note names the tracked modification that blocked the deploy.
+- `unknown`: a SHA could not be resolved (service down, detached origin). Information only.
 
-### Backlog (GitHub Issues board — issue #3745)
+### Tool currency
 ```bash
-# The Redis backlog subsystem (lanes queued/inProgress/blocked/triage) was
-# retired by the ADR-0031 Target-tracking migration (#3439, PR #3455) —
-# `/api/backlog` 404s and `hydra backlog` is a retired stub (issue #3745).
-# Orchestrator work tracking is GitHub Issues on gaberoo322/hydra; read the
-# board the way the Turn Snapshot's Target-board signals do, via `gh issue
-# list` (REST, not GraphQL — cheap enough for an on-demand doctor run).
-gh issue list --repo gaberoo322/hydra --state open --limit 200 \
-  --json number,title,labels 2>/dev/null | python3 -c "
-import json,sys
-from collections import defaultdict
-items=json.load(sys.stdin)
-lanes=['ready-for-agent','needs-triage','blocked','needs-qa','in-progress','ready-for-human']
-by_lane=defaultdict(list)
-for it in items:
-    names={l['name'] for l in it.get('labels',[])}
-    for lane in lanes:
-        if lane in names:
-            by_lane[lane].append(it)
-            break
-for lane in lanes:
-    its=by_lane.get(lane,[])
-    if its:
-        print(f'{lane}: {len(its)} items')
-        for i in its[:3]: print(f'  #{i[\"number\"]} — {i[\"title\"][:60]}')
-" 2>/dev/null || echo "board read unavailable (gh unreachable/rate-limited)"
-docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:work-queue 2>/dev/null | \
-  awk '$1!="0"{print "work-queue (Redis): "$1" items"}'
+cd ~/hydra && npx tsx scripts/tool-currency-check.ts --table --alert 2>/dev/null || echo "tool-currency check unavailable"
 ```
-
-### Alerts
-```bash
-hydra alerts ls --limit 20 | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-alerts=d.get('alerts',[]) if isinstance(d,dict) else d
-if not alerts: print('No alerts'); sys.exit()
-active=[a for a in alerts if not a.get('dismissed')]
-if not active: print('No active alerts'); sys.exit()
-print(f'{len(active)} active alerts:')
-for a in active[:10]:
-    ts=a.get('timestamp','?')[:16]
-    sev=a.get('severity','?')
-    print(f'  [{sev}] {ts} — {a.get(\"message\",\"?\")[:90]}')
-"
-```
-
-### Tool currency (issue #480)
-```bash
-# Compares installed CLI tools against upstream latest and surfaces drift.
-# Read-only — never auto-upgrades. Network failures produce `unknown`
-# verdicts and never crash the doctor. The script also pushes a
-# warning-level alert into `hydra:alerts` for any `outdated` tool when
-# `--alert` is passed, so the next `hydra alerts ls` will show it.
-#
-# Background: the 2026-05-15 incident where Ubuntu's apt-shipped `gh
-# 2.45.0` was ~47 versions behind upstream and `gh pr edit --add-label`
-# silently no-op'd, wedging autopilot. A passive currency check catches
-# this class of failure before the next cycle runs.
-cd ~/hydra && npx tsx scripts/tool-currency-check.ts --table --alert 2>/dev/null \
-  || echo "tool-currency check unavailable"
-```
+Read-only. `unknown` means the upstream feed was unreachable, not that a tool is wrong.
 
 ### Services
 ```bash
 systemctl --user list-units --type=service --state=running,failed 2>/dev/null | grep hydra
-systemctl --user list-units --type=service --state=failed   2>/dev/null | grep hydra
-# Repo-owned timers must exist AND be enabled — the state=failed filters
-# above are blind to a never-installed or disabled timer (issue #4604: the
-# Redis backup timer sat "not-found" on this host for months while the docs
-# claimed a daily backup ran). Every line this loop prints is a finding.
-# The timer set is DERIVED from scripts/systemd/*.timer (issue #4608) — the
-# same glob the Timer Health loop below uses — never a hand-maintained list,
-# so a new repo timer cannot drift out of either loop.
-for unit in "$HOME"/hydra/scripts/systemd/*.timer; do
-  timer=$(basename "$unit" .timer)
-  state=$(systemctl --user is-enabled "${timer}.timer" 2>/dev/null || echo not-found)
-  [ "$state" = "enabled" ] || echo "TIMER NOT ENABLED: ${timer}.timer (${state})"
-done
+```
+For each unit listed as `failed`, read its own log before diagnosing:
+```bash
+journalctl --user -u <failed-unit> --no-pager -n 20
 ```
 
-### Git & Working Tree
+### Working tree, disk, database
 ```bash
-# Orchestrator checkout (a dirty tree here blocks scripts/deploy.sh).
-git -C "$HOME/hydra" status --short | head -10
-# Target checkout — resolved independently through the seam (this block is
-# its own Bash invocation under Phase 1's parallel dispatch, so it cannot
-# rely on $TARGET_WS from the "Target seam" block above; issue #4608).
-TARGET_FACTS_JSON=$(cd "$HOME/hydra" && npx tsx scripts/target/print-target-facts.ts 2>/dev/null || true)
-TARGET_WS=$(printf '%s' "$TARGET_FACTS_JSON" | jq -r '.workspace // empty' 2>/dev/null || true)
-if [ -n "$TARGET_WS" ]; then
-  git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" status --short | head -10
-  git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" log --oneline --since="6 hours ago" | head -10
-else
-  echo "target git: skipped (Target unresolved)"
-fi
-```
-
-### Errors (last hour)
-```bash
-journalctl --user -u hydra-orchestrator.service --no-pager --since "1 hour ago" 2>&1 \
-  | grep -iE "error|fail|reject|crash|fatal" | grep -v "DeprecationWarning" | tail -10
-```
-
-### Agent Memory
-```bash
-# Memory is consolidated JSON in :patterns (a Redis STRING, not a list).
-# Per CLAUDE.md learning system: "Consolidated patterns in hydra:memory:{agent}:patterns"
-# Agents = the `learningAgent` values in scripts/autopilot/classes.json (planner, executor).
-for agent in planner executor; do
-  bytes=$(docker exec hydra-redis-1 redis-cli STRLEN "hydra:memory:${agent}:patterns" 2>/dev/null || echo 0)
-  if [ "$bytes" -gt 0 ]; then
-    docker exec hydra-redis-1 redis-cli GET "hydra:memory:${agent}:patterns" 2>/dev/null \
-      | python3 -c "
-import json,sys
-try:
-  arr=json.loads(sys.stdin.read())
-  total_hits=sum(p.get('hitCount',0) for p in arr)
-  cats={}
-  for p in arr: cats[p.get('category','?')]=cats.get(p.get('category','?'),0)+p.get('hitCount',0)
-  top=sorted(cats.items(),key=lambda x:-x[1])[:3]
-  last_seen=max((p.get('lastSeen','') for p in arr), default='-')
-  print(f'$agent: {len(arr)} patterns, {total_hits} total hits, last_seen={last_seen}, top={top}')
-except Exception as e: print(f'$agent: parse error ({e})')
-"
-  else
-    echo "$agent: 0 patterns (learning may be broken — investigate)"
-  fi
-done
-```
-
-### Infrastructure
-```bash
+git -C ~/hydra status --short | head -10
 df -h / /mnt/hydra-ssd 2>/dev/null | tail -2
-docker exec hydra-redis-1 redis-cli INFO memory 2>/dev/null | grep "used_memory_human"
-docker exec hydra-redis-1 redis-cli DBSIZE 2>/dev/null
+cd ~/hydra && docker compose ps postgres --format '{{.Name}} {{.Status}}'
+cd ~/hydra && docker compose exec -T postgres psql -U hydra -d hydra -t -c "SELECT 'pg_connections: ' || count(*) || '/' || current_setting('max_connections') FROM pg_stat_activity;"
 ```
+A dirty `~/hydra` tree blocks `scripts/deploy.sh`. Postgres is compose infra the Target also uses; probe the container and its connection pool only (Target table freshness belongs to `hydra-target-discover`).
 
-### Database Health (deep)
+### Docker cleanup exclusion
 ```bash
-# hydra-postgres-1 is orchestrator-hosted compose infra the Target also uses —
-# probe the container + connection pool only. Target table freshness is the
-# Target's own runtime health (hydra-target-discover), not a doctor probe
-# (issue #4608 dropped the mothballed Target's betting-table queries).
-cd ~/hydra && docker compose ps postgres --format '{{.Name}} {{.Status}}' 2>/dev/null
-docker exec hydra-postgres-1 psql -U hydra -d hydra -t -c "
-  SELECT 'pg_connections: ' || count(*) || '/' || current_setting('max_connections')
-  FROM pg_stat_activity;" 2>/dev/null
+grep -n "hydra-postgres" ~/.local/bin/hydra-docker-cleanup.sh
 ```
-
-### Kill-chain wiring-ledger soft SLO (dead-code kill-chain epic #2720)
-```bash
-# SOFT SLO — surfaced-only, NEVER CI-blocking. Flags any module that has sat
-# wire-or-retire on the Target's committed ledger for >30 days past the 45-day
-# grace window WITHOUT a wire-or-retire verdict — i.e. a stale decision the
-# /hydra-wire-or-retire resolver (or the operator) has left unresolved. This is
-# an observability nudge, not a gate: staleness must never punish an unrelated
-# PR, so the check lives here, not in ci.yml.
-#
-# Read-only: parses the COMMITTED docs/agents/wiring-status.md; never regenerates
-# it (regeneration is a Target-side `npm run deadcode:ledger` concern). A missing
-# ledger degrades to a `quiet (ledger absent)` verdict and exits 0 — the check
-# never makes the doctor itself fail. The verdict line is load-bearing:
-#   quiet  — no wire-or-retire module >30d past grace (or ledger absent). Healthy.
-#   flag   — one or more wire-or-retire modules are >30d past grace without a
-#            verdict. Surface in the report; steer /hydra-wire-or-retire, do NOT
-#            block anything.
-#
-# The Target workspace is resolved independently, in THIS block, through the
-# seam (print-target-facts.ts JSON mode, issues #4553 / #4608) — never a
-# literal, and never the fail-closed --sh preamble. This block is its own
-# Bash invocation under Phase 1's parallel dispatch, so it cannot rely on
-# $TARGET_WS from the "Target seam" block surviving into this shell. An
-# unresolved workspace leaves LEDGER empty → the `quiet (ledger absent)`
-# verdict; never an abort.
-TARGET_FACTS_JSON=$(cd "$HOME/hydra" && npx tsx scripts/target/print-target-facts.ts 2>/dev/null || true)
-TARGET_WS=$(printf '%s' "$TARGET_FACTS_JSON" | jq -r '.workspace // empty' 2>/dev/null || true)
-LEDGER=""
-if [ -n "${TARGET_WS:-}" ]; then LEDGER="$TARGET_WS/docs/agents/wiring-status.md"; fi
-python3 - "$LEDGER" <<'PY'
-import sys, os, re, datetime
-ledger_path = sys.argv[1]
-GRACE_DAYS, SLO_DAYS = 45, 30
-today = datetime.date.today()
-if not os.path.exists(ledger_path):
-    print("kill-chain soft-SLO: quiet (ledger absent)")
-    sys.exit(0)
-breaches = []
-for line in open(ledger_path):
-    m = re.match(r'^\|\s*`([^`]+)`\s*\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|\s*$', line)
-    if not m or m.group(2).strip() != "wire-or-retire":
-        continue
-    try:
-        d = datetime.date.fromisoformat(m.group(4).strip())
-    except ValueError:
-        continue  # unparseable date → age unknown → never flagged
-    past_grace = (today - d).days - GRACE_DAYS
-    if past_grace > SLO_DAYS:
-        breaches.append((past_grace, m.group(1).strip()))
-if not breaches:
-    print("kill-chain soft-SLO: quiet (no wire-or-retire module >30d past grace)")
-else:
-    breaches.sort(reverse=True)
-    print(f"kill-chain soft-SLO: FLAG — {len(breaches)} wire-or-retire module(s) >{SLO_DAYS}d past grace without a verdict:")
-    for a, p in breaches[:5]:
-        print(f"  {a}d past grace — {p}")
-PY
-# To smoke-test the FLAG path without waiting for a real stale row (AC: "fires on a
-# synthetic >30-day stale row and stays quiet otherwise"), point it at a synthetic
-# ledger — a >30d-past-grace last-touched date FLAGs, a recent one stays quiet:
-#   printf '| `web/src/x.ts` | wire-or-retire | tests only | 2026-01-01 |\n' > /tmp/wl.md
-#   python3 - /tmp/wl.md <<'PY'  ...same script...  PY   # -> FLAG
-#   printf '| `web/src/x.ts` | wire-or-retire | tests only | '"$(date -I)"' |\n' > /tmp/wl.md
-#   ...                                                    # -> quiet
-```
-
-### Timer Health
-```bash
-# Repo-owned timers — DERIVED from scripts/systemd/*.timer (issue #4608), the
-# same glob the Services is-enabled loop uses, never a hand-maintained list.
-# A "not-found"/inactive line here means the deploy install block (or the
-# operator install step for hydra-branch-prune) has not converged on this
-# host; a never-fired `last=` on an enabled timer is a finding too.
-for unit in "$HOME"/hydra/scripts/systemd/*.timer; do
-  timer=$(basename "$unit" .timer)
-  last=$(systemctl --user show "${timer}.timer" -p LastTriggerUSec --value 2>/dev/null)
-  next=$(systemctl --user show "${timer}.timer" -p NextElapseUSecRealtime --value 2>/dev/null)
-  active=$(systemctl --user is-active "${timer}.timer" 2>/dev/null)
-  echo "${timer}: active=${active} last=${last} next=${next}"
-done
-# Target timers — discovered by the `${TARGET_NAME}-*.timer` glob (the Target's
-# units are named after its slug), skipped when the seam did not resolve.
-# Resolved independently, in THIS block: it is its own Bash invocation under
-# Phase 1's parallel dispatch, so it cannot rely on $TARGET_NAME from the
-# "Target seam" block surviving into this shell (issue #4608).
-TARGET_FACTS_JSON=$(cd "$HOME/hydra" && npx tsx scripts/target/print-target-facts.ts 2>/dev/null || true)
-TARGET_NAME=$(printf '%s' "$TARGET_FACTS_JSON" | jq -r '.name // empty' 2>/dev/null || true)
-if [ -n "${TARGET_NAME:-}" ]; then
-  target_timers=$(systemctl --user list-timers --all --no-legend "${TARGET_NAME}-*.timer" 2>/dev/null || true)
-  if [ -n "$target_timers" ]; then
-    printf '%s\n' "$target_timers"
-  else
-    echo "target timers: none installed matching ${TARGET_NAME}-*.timer"
-  fi
-else
-  echo "target timers: skipped (Target unresolved)"
-fi
-# Newest Redis backup + age — the artifact the timer exists to produce
-# (docs/reference.md "## Backups"). The watchdog's redis-backup-freshness
-# block alerts on staleness automatically; this is the interactive read.
-newest=$(ls -1t /mnt/hydra-ssd/backups/redis/hydra-redis-*.rdb.gz 2>/dev/null | head -1)
-if [ -n "$newest" ]; then
-  age_h=$(( ($(date +%s) - $(stat -c %Y "$newest")) / 3600 ))
-  echo "redis-backup artifact: newest=$(basename "$newest") age=${age_h}h (stale past 36h is a finding)"
-else
-  echo "redis-backup artifact: NONE FOUND under /mnt/hydra-ssd/backups/redis/ — a finding"
-fi
-```
-
-### Failed Service Root Cause
-```bash
-for svc in $(systemctl --user list-units --type=service --state=failed --no-legend 2>/dev/null | grep hydra | awk '{print $1}'); do
-  echo "=== ${svc} ==="
-  journalctl --user -u "${svc}" --no-pager -n 20 2>&1 \
-    | grep -v "systemd\|Consumed\|Triggering\|Failed to start\|Failed with" | tail -5
-done
-```
-
-### Docker Container Conflicts
-```bash
-grep -n "hydra-postgres\|grep -v" ~/.local/bin/hydra-docker-cleanup.sh 2>/dev/null \
-  || echo "WARNING: cleanup script has no hydra-postgres exclusion"
-```
+No match means the cleanup script could remove the production Postgres container.
 
 ## Phase 2: Diagnose
 
-Only report issues actually present — don't speculate.
+Report only what the output shows.
 
-- **Cycle health**: Merge rate, fix:feat ratio trend, repeated task titles
-- **Deployed-build drift**: Is the drift verdict `drift`? Prod is running STALE code — deploy-on-merge did not restart the service (the "uptime 22h, status ok" trap). NEVER report a `drift` verdict as healthy. `settling` is a mid-flight deploy (re-check next run). `unknown` is information-only (service unreachable / detached origin). If a dirty-tree probable-cause is shown, that tracked modification is what blocked deploy.sh.
-- **Blockers**: Dirty working tree blocking deploy.sh? Stale cycles?
-- **External access**: Did the external health check return non-200? Tunnel down?
-- **Services**: Any in failed state? Crash loops? Missing module errors?
-- **Failed service root cause**: Don't just report "service X failed" — read the actual error. Classify:
-  - DB connection refused → is postgres running?
-  - API validation error → upstream API changed? Test the API directly.
-  - Module not found → broken dependency?
-  - Rate limited → back off
-- **Kill-chain soft SLO**: Did the wiring-ledger check emit `FLAG`? One or more wire-or-retire modules have sat >30 days past grace without a verdict — the `/hydra-wire-or-retire` decision is overdue. Surface it in the report and (Phase 3) steer `/hydra-wire-or-retire`; this is a SURFACED-only nudge, NEVER a gate — do not block or fail the doctor on it. `quiet` (including "ledger absent") is healthy.
-- **Timer health**: Any repo-owned timer (`scripts/systemd/*.timer`) not enabled, inactive, or never fired? Any `${TARGET_NAME}-*` timer inactive? A `Target unresolved` skip line is a seam/config finding in its own right.
-- **Database health**: Postgres in the compose project? Connections exhausted? (Target table freshness is `hydra-target-discover`'s probe, not the doctor's.)
-- **Docker conflicts**: Could cleanup scripts kill production containers?
-- **Backlog**: Empty queue? Duplicate items? Stale blocked items?
-- **Memory bloat**: Any agent's `:patterns` string unusually large (STRLEN)? Duplicate patterns?
-- **Alerts**: Stale alerts from resolved issues? Alerts that contradict the live state?
-- **Tool currency**: Any tool reporting `outdated` (warning) — does the operator need to upgrade `gh`, switch Node, etc.? `unknown` is information-only — it means the doctor couldn't reach the upstream feed, not that something is wrong.
-- **Disk pressure**: NVMe below 20GB? SSD filling up?
-- **Redis**: Memory growing? Key count unusual?
+- **Cycles**: merge rate, fix-to-feature split, repeated task titles.
+- **Deployed-build drift**: never report a `drift` verdict as healthy.
+- **Blockers**: a dirty `~/hydra` tree; stale cycles.
+- **External access**: a non-200 from the tunnel check.
+- **Services**: for each failed unit, name the root-cause error from its log, not just "service X failed". Classify: DB connection refused (is Postgres running?), API validation error (did the upstream API change?), module not found (broken dependency), rate limited (back off).
+- **Kill-chain**: `FLAG` means a wire-or-retire verdict is overdue; steer `/hydra-wire-or-retire`. It never blocks or fails the doctor.
+- **Timers**: every `timers` finding; a Target timer with no last or next run; a skipped Target line.
+- **Redis backup**: a `stale` or `NONE FOUND` line.
+- **Database**: Postgres missing from the compose project; connections near the limit.
+- **Board**: empty ready lane, duplicate issues, stale blocked issues; a `truncated` board makes every count a floor.
+- **Agent memory**: an agent with 0 patterns (learning may be broken), an unusually large `bytes`, an entry under `failed`.
+- **Alerts**: alerts that the live state contradicts.
+- **Tool currency**: any `outdated` tool.
+- **Disk and Redis**: NVMe below 20GB, SSD filling up, Redis memory near `maxmemory`, an unusual key count.
 
-## Phase 3: Fix (default — always apply quick wins)
+## Phase 3: Fix (default: apply quick wins)
 
-REPORT-ONLY findings (never act on them): a dirty `~/hydra` working tree, stray or
-stale containers (the 4 CI runners share this host — never kill by name/grep
-pattern; CLAUDE.md), and duplicate agent-memory patterns. Surface them in the report
-for the operator.
+Report-only, never act:
 
-Quick wins to apply automatically:
-- Restart hydra-tunnel if external health check returns non-200
-- Restart failed services (after diagnosing root cause)
-- Start postgres if missing: `cd ~/hydra && docker compose up -d postgres`
-- Converge a `drift` verdict (prod stale): run `scripts/deploy.sh` from the
-  `~/hydra` master checkout (rebuilds the dashboard + restarts the
-  service). If the drift check reported a dirty-tree probable-cause, do NOT
-  reset or commit it — REPORT the dirty path for the operator (the main
-  checkout may hold their uncommitted work; hydra-sweep rule 1).
-  (`settling` needs no action — re-check next run; `unknown` is a service
-  reachability issue, not stale code.)
-- Close duplicate board issues: `gh issue close <N> --repo gaberoo322/hydra --comment "Duplicate of #<other>" --reason "not planned"`
-  (issue #3745 — `hydra backlog rm <id>` was never a real subcommand; the
-  board is GitHub Issues, not the retired Redis backlog)
-- Dismiss stale alerts: `hydra alerts dismiss-all`
+- A dirty `~/hydra` working tree. Never reset, stash or commit it; it may hold the operator's uncommitted work.
+- Stray or stale containers and processes. Never kill by name or pattern: the CI runners share this host and user.
+- Outdated tools. Never upgrade one; the operator decides.
+- Duplicate agent-memory patterns.
 
-**Tool currency is NEVER auto-fixed.** The doctor reports drift and the operator decides whether/when to upgrade. CLI upgrades touch the operator's PATH, package manager, and shell environment — categorically outside Hydra's blast radius.
+Quick wins:
 
-**Do NOT blindly restart services.** If a service fails due to a root cause (API down, DB missing, schema drift), restarting just fails again. Diagnose first, fix the cause, then restart.
+- Restart hydra-tunnel when external check is non-200.
+- Restart a failed service only after fixing its root cause; a blind restart fails again.
+- Start Postgres if missing: `cd ~/hydra && docker compose up -d postgres`.
+- Converge a `drift` verdict only by running `scripts/deploy.sh` from the `~/hydra` master checkout. If the drift check names a dirty-tree cause, report the path instead.
+- Close a duplicate board issue: `gh issue close <N> --repo gaberoo322/hydra --comment "Duplicate of #<other>" --reason "not planned"`.
+- Dismiss stale alerts: `hydra alerts dismiss-all`.
 
 ## Phase 4: Report
 
@@ -478,33 +142,8 @@ Quick wins to apply automatically:
 
 When reporting failed services, always include the root cause error message, not just "service X is failed".
 
-## Silencing false positives — tool currency
+## Silencing a tool-currency warning
 
-If the operator deliberately runs a back-revved tool (e.g. holding `gh` at a specific minor to work around an upstream regression), the doctor's tool-currency check will keep emitting a `warning`-severity alert each run. Two options:
+A deliberately back-revved tool re-raises its warning alert on every run. Dismiss it with `hydra alerts dismiss-all`; it returns while the drift persists. There is no per-tool suppression list.
 
-1. **Dismiss the alert** — `hydra alerts dismiss-all` (or dismiss individual via the dashboard). The next doctor run will re-emit if the drift persists; this is intentional. Use this when you plan to upgrade soon.
-2. **Stop running the check with `--alert`** — drop the `--alert` flag from the Phase-1 collector line in the locally edited SKILL.md (or the playbook if path (b)) so the table still renders but no alert lands. Use this only for known-permanent back-rev policies; remember to add it back when the policy ends.
-
-There is no per-tool suppression list yet — if that becomes a real maintenance burden, file a follow-up issue. The current shape favours visibility over silence.
-
-## Slot lifecycle events — PostToolUse hook (issue #671)
-
-Every tool call inside this skill emits a `subagent_tool_call` event onto the
-Redis stream `hydra:autopilot:slot-events`. The classification is done at
-emit-time so the /now-pixel dashboard can route on `category` without
-re-deriving it from the tool name:
-
-- `milestone` — Write, Edit, MultiEdit, NotebookEdit, MCP write surfaces, and
-  Bash matching `^(git commit|gh pr|npm test|npm run build|npm run typecheck)`
-- `io` — other Bash, WebFetch, WebSearch, MCP read surfaces
-- `background` — Read, Grep, Glob
-
-**Hook script:** `scripts/autopilot/hooks/on-subagent-tool-call.sh`
-**Hook registration:** sibling `<this-playbook>.settings.json` →
-`~/.claude/skills/<this-skill>/.claude/settings.json` (propagated by
-`scripts/sync-skills.sh`)
-
-The hook MUST NEVER propagate errors back to this skill's session — a Redis
-outage, a malformed payload, or a missing `jq` all result in a stderr
-warning and `exit 0`. See `test/on-subagent-tool-call.test.mts` for the
-pinned behavior.
+@include _fragments/slot-lifecycle-hook.md

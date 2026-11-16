@@ -142,11 +142,9 @@ function healthyValues(): TurnSnapshotValues {
       readyInflightExcluded: [],
       boardDegraded: false,
     },
-    redisQueues: { "work-queue": ok(2), "reframe-queue": ok(0), "prior-failures": ok(0) },
     scout: { lastWalkIso: ok('"2026-10-05T08:00:00Z"'), openEnhancements: ok("25"), tokensToday: "1200", mirrored: ok(true) },
     archBoards: {
       lastRunIso: ok("2026-10-06T00:00:00Z"),
-      workQueue: 2,
       board: ok({ backfillIdle: false, archOpenScan: 1, archOpenEnhancements: 4, archSaturated: true, cleanupOpenScan: 0, cleanupSaturated: false, skillPruneOpen: 0, skillPruneSaturated: false }),
       orchBoardDegraded: "0",
     },
@@ -181,9 +179,8 @@ function fallbackValues(): TurnSnapshotValues {
     needsQaNumbers: FAILED,
     prGate: prGateFallbackSnapshot("collector-crashed"),
     picks: picksFallbackSnapshot(),
-    redisQueues: { "work-queue": FAILED, "reframe-queue": FAILED, "prior-failures": FAILED },
     scout: { lastWalkIso: FAILED, openEnhancements: FAILED, tokensToday: "0", mirrored: FAILED },
-    archBoards: { lastRunIso: FAILED, workQueue: 1, board: FAILED, orchBoardDegraded: "1" },
+    archBoards: { lastRunIso: FAILED, board: FAILED, orchBoardDegraded: "1" },
     hitlGrill: FAILED,
     targetScan: targetScanFallbackSnapshot("collector-crashed"),
     targetRiskSurface: { manifest: { ok: false, reason: DEGRADE.COLLECTOR_CRASHED } },
@@ -437,7 +434,7 @@ describe("turn snapshot JSON: contract — golden documents through zod and the 
 
   test("the observability section carries the collector values no decide.py rule reads", () => {
     const doc = JSON.parse(readFileSync(join(PARITY_DIR, "golden-healthy.json"), "utf-8"));
-    assert.deepEqual(Object.keys(doc.observability).sort(), ["active_dev_orch", "capacity", "direction_drift", "health", "orch_ready_inflight_excluded", "recommendations", "redis_queues", "retro", "scheduler"]);
+    assert.deepEqual(Object.keys(doc.observability).sort(), ["active_dev_orch", "capacity", "direction_drift", "health", "orch_ready_inflight_excluded", "recommendations", "retro", "scheduler"]);
     assert.equal(doc.observability.scheduler.stall, "ok");
     assert.equal(typeof doc.observability.active_dev_orch, "number");
     assert.deepEqual(Object.keys(doc.observability.retro).sort(), ["candidate", "drillable", "drillableReason"]);

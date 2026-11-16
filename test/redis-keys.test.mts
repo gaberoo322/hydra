@@ -21,10 +21,6 @@ describe("redisKeys naming convention", () => {
     ["cycleActive", redisKeys.cycleActive],
     ["depsCompleted", redisKeys.depsCompleted],
     ["depsIndex", redisKeys.depsIndex],
-    ["anchorWorkQueue", redisKeys.anchorWorkQueue],
-    ["anchorProcessing", redisKeys.anchorProcessing],
-    ["anchorPriorFailures", redisKeys.anchorPriorFailures],
-    ["anchorReframeQueue", redisKeys.anchorReframeQueue],
     ["metricsIndex", redisKeys.metricsIndex],
     ["memoryLastConsolidation", redisKeys.memoryLastConsolidation],
     ["reflectionPrefix", redisKeys.reflectionPrefix],
@@ -81,10 +77,6 @@ describe("redisKeys uniqueness", () => {
       ["cycleActive", redisKeys.cycleActive()],
       ["depsCompleted", redisKeys.depsCompleted()],
       ["depsIndex", redisKeys.depsIndex()],
-      ["anchorWorkQueue", redisKeys.anchorWorkQueue()],
-      ["anchorProcessing", redisKeys.anchorProcessing()],
-      ["anchorPriorFailures", redisKeys.anchorPriorFailures()],
-      ["anchorReframeQueue", redisKeys.anchorReframeQueue()],
       ["metricsIndex", redisKeys.metricsIndex()],
       ["memoryLastConsolidation", redisKeys.memoryLastConsolidation()],
       ["backlogItems", redisKeys.backlogItems()],
@@ -125,10 +117,6 @@ describe("redisKeys uniqueness", () => {
 describe("redisKeys snapshot", () => {
   test("static keys match expected values", () => {
     assert.equal(redisKeys.cycleActive(), "hydra:cycle:active");
-    assert.equal(redisKeys.anchorWorkQueue(), "hydra:anchors:work-queue");
-    assert.equal(redisKeys.anchorProcessing(), "hydra:anchors:processing");
-    assert.equal(redisKeys.anchorPriorFailures(), "hydra:anchors:prior-failures");
-    assert.equal(redisKeys.anchorReframeQueue(), "hydra:anchors:reframe-queue");
     assert.equal(redisKeys.metricsIndex(), "hydra:metrics:index");
     assert.equal(redisKeys.backlogItems(), "hydra:backlog:items");
     assert.equal(redisKeys.backlogCounter(), "hydra:backlog:counter");

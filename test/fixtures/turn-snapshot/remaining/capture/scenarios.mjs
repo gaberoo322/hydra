@@ -6,9 +6,6 @@
 
 const DATE = "2026-10-07";
 const TOKENS_KEY = `hydra:metrics:tokens:by-skill:daily:${DATE}`;
-const WQ = "hydra:anchors:work-queue";
-const RQ = "hydra:anchors:reframe-queue";
-const PF = "hydra:anchors:prior-failures";
 const WALK = "hydra:scout:last-calendar-walk";
 const ARCH = "hydra:architecture:last-run";
 
@@ -30,7 +27,7 @@ const ok = (json) => ({ json });
 const FAIL = { exitCode: 1 };
 
 // ---------------------------------------------------------------- group A
-const redisHealthy = { lists: { [WQ]: 3, [RQ]: 0, [PF]: 7 }, strings: { [WALK]: "2026-09-18T20:26:04.715Z", [ARCH]: "2026-10-06T10:00:00Z" }, hashes: { [TOKENS_KEY]: { "hydra-tool-scout": "12345" } } };
+const redisHealthy = { strings: { [WALK]: "2026-09-18T20:26:04.715Z", [ARCH]: "2026-10-06T10:00:00Z" }, hashes: { [TOKENS_KEY]: { "hydra-tool-scout": "12345" } } };
 
 const groupA = [
   { name: "redis-queues-healthy", collectors: ["redis-queues"], redis: redisHealthy },
@@ -56,7 +53,7 @@ const groupA = [
   {
     name: "arch-mixed-board",
     collectors: ["arch-cleanup-boards"],
-    redis: { ...redisHealthy, lists: { [WQ]: 0 } },
+    redis: { ...redisHealthy },
     gh: {
       [BOARD]: ok(
         board([
@@ -72,8 +69,7 @@ const groupA = [
       ),
     },
   },
-  { name: "arch-idle-board", collectors: ["arch-cleanup-boards"], redis: { lists: { [WQ]: 0 } }, gh: { [BOARD]: ok([]) } },
-  { name: "arch-idle-but-work-queue", collectors: ["arch-cleanup-boards"], redis: { lists: { [WQ]: 2 } }, gh: { [BOARD]: ok([]) } },
+  { name: "arch-idle-board", collectors: ["arch-cleanup-boards"], redis: {}, gh: { [BOARD]: ok([]) } },
   { name: "arch-target-backlog-only-is-idle", collectors: ["arch-cleanup-boards"], redis: {}, gh: { [BOARD]: ok(board([[["ready-for-agent", "target-backlog"], 4]])) } },
   {
     name: "arch-saturated-at-caps",

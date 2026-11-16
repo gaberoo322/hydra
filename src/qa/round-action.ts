@@ -6,6 +6,7 @@
  * scripts/ci/qa-verdict.ts re-exports the names its consumers import.
  */
 
+import { logger } from "../logger.ts";
 import { isVerifierCore } from "../untouchable.ts";
 import type { ReviewVerdict } from "./admission.ts";
 import { classifyQaFixPath } from "./fix-proof.ts";
@@ -655,7 +656,7 @@ export function decideReviewerCommit(input: ReviewerCommitInput): ReviewerCommit
       followUpTestPaths: optionalTestPaths,
     };
   } catch (err) {
-    console.error("[round-action] decideReviewerCommit failed; refusing the commit path:", err);
+    logger.error({ err }, "[round-action] decideReviewerCommit failed; refusing the commit path");
     return noReviewerCommit("decision-error", "decision threw; fail closed");
   }
 }
@@ -676,7 +677,7 @@ export function countTestCases(text: string): number {
     }
     return n;
   } catch (err) {
-    console.error("[round-action] countTestCases failed; reporting 0:", err);
+    logger.error({ err }, "[round-action] countTestCases failed; reporting 0");
     return 0;
   }
 }
@@ -732,7 +733,7 @@ export function checkBodyScopeEdit(orig: string, next: string): { ok: boolean; r
     }
     return { ok: true, reason: "only Files in scope bullets were added" };
   } catch (err) {
-    console.error("[round-action] checkBodyScopeEdit failed; refusing:", err);
+    logger.error({ err }, "[round-action] checkBodyScopeEdit failed; refusing");
     return { ok: false, reason: "check threw; fail closed" };
   }
 }

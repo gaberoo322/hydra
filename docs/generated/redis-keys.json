@@ -29,64 +29,6 @@
       }
     },
     {
-      "builder": "anchorPriorFailures",
-      "pattern": "hydra:anchors:prior-failures",
-      "params": [],
-      "callSites": 1,
-      "accessors": [
-        "src/redis/turn-snapshot.ts"
-      ],
-      "servedBy": [],
-      "home": null,
-      "retired": false,
-      "source": {
-        "path": "src/redis/keys.ts"
-      }
-    },
-    {
-      "builder": "anchorProcessing",
-      "pattern": "hydra:anchors:processing",
-      "params": [],
-      "callSites": 0,
-      "accessors": [],
-      "servedBy": [],
-      "home": null,
-      "retired": false,
-      "source": {
-        "path": "src/redis/keys.ts"
-      }
-    },
-    {
-      "builder": "anchorReframeQueue",
-      "pattern": "hydra:anchors:reframe-queue",
-      "params": [],
-      "callSites": 1,
-      "accessors": [
-        "src/redis/turn-snapshot.ts"
-      ],
-      "servedBy": [],
-      "home": null,
-      "retired": false,
-      "source": {
-        "path": "src/redis/keys.ts"
-      }
-    },
-    {
-      "builder": "anchorWorkQueue",
-      "pattern": "hydra:anchors:work-queue",
-      "params": [],
-      "callSites": 1,
-      "accessors": [
-        "src/redis/turn-snapshot.ts"
-      ],
-      "servedBy": [],
-      "home": null,
-      "retired": false,
-      "source": {
-        "path": "src/redis/keys.ts"
-      }
-    },
-    {
       "builder": "architectureLastRun",
       "pattern": "hydra:architecture:last-run",
       "params": [],

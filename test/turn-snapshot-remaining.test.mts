@@ -1,6 +1,6 @@
 /**
  * Turn Snapshot — the last seven collect-state.sh collectors (ADR-0043 slice
- * 5B, #4933): redis-queues, scout, arch-cleanup-boards, hitl-grill, retro,
+ * 5B, #4933): scout, arch-cleanup-boards, hitl-grill, retro,
  * wayfinder-frontier, tickets.
  *
  * All at the TS interface: no `gh`, `docker`, `hydra`, `python3`, Redis or
@@ -82,7 +82,6 @@ interface GhScript {
 
 interface RedisWorld {
   down?: boolean;
-  lists?: Record<string, number>;
   strings?: Record<string, string>;
   hashes?: Record<string, Record<string, string>>;
 }
@@ -118,17 +117,10 @@ function ghKey(args: readonly string[]): string {
   return `issue-list:${after("--label") ?? "-"}:${after("--json")}`;
 }
 
-const ANCHOR_KEYS = {
-  "work-queue": "hydra:anchors:work-queue",
-  "reframe-queue": "hydra:anchors:reframe-queue",
-  "prior-failures": "hydra:anchors:prior-failures",
-} as const;
-
 /** A fake Redis port over the scenario keyspace (the keys the bash's redis-cli calls named). */
 function fakeRedis(world: RedisWorld, writes: string[][]): TurnSnapshotRedis {
   const read = async <T,>(v: T) => (world.down ? { ok: false as const, reason: degradeDetail("redis-unreachable: down") } : { ok: true as const, value: v });
   return {
-    anchorQueueLength: (q) => read(world.lists?.[ANCHOR_KEYS[q]] ?? 0),
     scoutLastCalendarWalk: () => read(world.strings?.["hydra:scout:last-calendar-walk"] ?? null),
     architectureLastRun: () => read(world.strings?.["hydra:architecture:last-run"] ?? null),
     scoutTokens: (d) => read(world.hashes?.[`hydra:metrics:tokens:by-skill:daily:${d}`]?.["hydra-tool-scout"] ?? null),
@@ -207,11 +199,6 @@ const redisString = (c: { ok: boolean; value?: string | null }) => (c.ok ? (c.va
  */
 function signalView(values: Record<string, any>): Record<string, string> {
   const out: Record<string, string> = {};
-  const q = values["redis-queues"];
-  if (q !== undefined) {
-    const n = (c: { ok: boolean; value?: number }) => (c.ok ? String(c.value) : "0");
-    Object.assign(out, { work_queue: n(q["work-queue"]), reframe_queue: n(q["reframe-queue"]), prior_failures: n(q["prior-failures"]) });
-  }
   const sc = values.scout;
   if (sc !== undefined) {
     Object.assign(out, {
@@ -315,8 +302,8 @@ function boardOf(counts: Record<string, number>): ReturnType<typeof issue>[] {
   for (const [k, n] of Object.entries(counts)) for (let i = 0; i < n; i++) out.push(issue(out.length + 1, ...(label[k] as string[])));
   return out;
 }
-async function arch(counts: Record<string, number>, workQueue = 0, extra: Partial<World> = {}): Promise<Record<string, string>> {
-  return (await runWorld({ collectors: ["arch-cleanup-boards"], gh: { [BOARD]: { json: boardOf(counts) } }, redis: { lists: { "hydra:anchors:work-queue": workQueue } }, ...extra })).view;
+async function arch(counts: Record<string, number>, extra: Partial<World> = {}): Promise<Record<string, string>> {
+  return (await runWorld({ collectors: ["arch-cleanup-boards"], gh: { [BOARD]: { json: boardOf(counts) } }, redis: {}, ...extra })).view;
 }
 async function hitl(script: GhScript | undefined): Promise<Record<string, string>> {
   return (await runWorld({ collectors: ["hitl-grill"], gh: script === undefined ? {} : { [HITL]: script } })).view;
@@ -359,7 +346,6 @@ describe("hitl-grill inbox saturation signals (issue #4391; ported from autopilo
     const r = await runWorld({ collectors: ["arch-cleanup-boards", "hitl-grill"], gh: { [BOARD]: { json: [] } }, redis: {} });
     assert.equal(r.view.orch_board_signals_degraded, "false");
     assert.equal(r.view.hitl_grill_saturated, "true");
-    assert.equal(r.values["arch-cleanup-boards"].workQueue, 0);
     assert.equal(r.values["arch-cleanup-boards"].orchBoardDegraded, "0");
   });
 
@@ -393,10 +379,6 @@ describe("architecture fallback signals (issue #789; ported from autopilot-arch-
     const out = await arch({});
     assert.equal(out.orch_backfill_idle, "true");
     assert.equal(out.arch_board_saturated, "false");
-  });
-
-  test("orch_backfill_idle=false when work_queue is non-empty", async () => {
-    assert.equal((await arch({}, 3)).orch_backfill_idle, "false");
   });
 
   test("orch_backfill_idle=false when any actionable label count is non-zero", async () => {
@@ -464,7 +446,7 @@ describe("arch_board_saturated enhancement>20 fold (issue #4657; ported from aut
 
 describe("orch board degraded flag — the ARCH read (issue #4130; ported from autopilot-arch-fallback-signals)", () => {
   test("a failed ARCH read never substitutes fake zeros into the idle computation", async () => {
-    const out = (await runWorld({ collectors: ["arch-cleanup-boards"], gh: {}, redis: { lists: { "hydra:anchors:work-queue": 0 } } })).view;
+    const out = (await runWorld({ collectors: ["arch-cleanup-boards"], gh: {}, redis: {} })).view;
     assert.equal(out.orch_backfill_idle, "false", "an all-zero board computed from a read that never happened is the inverse-fire bug");
   });
 
@@ -482,7 +464,6 @@ describe("orch board degraded flag — the ARCH read (issue #4130; ported from a
       skill_prune_board_saturated: "false",
       orch_board_signals_degraded: "true",
     });
-    assert.equal(r.values["arch-cleanup-boards"].workQueue, 0);
     assert.equal(r.values["arch-cleanup-boards"].orchBoardDegraded, "1");
   });
 
@@ -491,7 +472,6 @@ describe("orch board degraded flag — the ARCH read (issue #4130; ported from a
     assert.equal(healthy.view.orch_board_signals_degraded, "false");
     const upstream = await runWorld({ collectors: ["arch-cleanup-boards"], gh: { [BOARD]: { json: [] } }, redis: {}, orchBoardDegraded: "1" });
     assert.equal(upstream.view.orch_board_signals_degraded, "true");
-    assert.equal(upstream.values["arch-cleanup-boards"].workQueue, 0);
     assert.equal(upstream.values["arch-cleanup-boards"].orchBoardDegraded, "1");
   });
 });
@@ -615,11 +595,12 @@ describe("unified orch_backfill_idle signal (issue #959; ported from autopilot-i
   });
 
   test("orch_backfill_idle=true iff all four actionable counts are zero", async () => {
-    assert.equal((await arch({}, 0)).orch_backfill_idle, "true", "fully-idle board → true");
+    assert.equal((await arch({})).orch_backfill_idle, "true", "fully-idle board → true");
   });
 
-  test("orch_backfill_idle=false when work_queue is non-empty", async () => {
-    assert.equal((await arch({}, 2)).orch_backfill_idle, "false", "non-empty work-queue → false");
+  test("orch_backfill_idle is board-only: the retired anchor work-queue has no term in the verdict", async () => {
+    assert.equal((await arch({})).orch_backfill_idle, "true", "an empty board is idle with no queue read at all");
+    assert.equal(REMAINING_COLLECTORS["redis-queues" as keyof typeof REMAINING_COLLECTORS], undefined, "the redis-queues collector is gone");
   });
 
   test("orch_backfill_idle=false when any actionable label count is non-zero", async () => {
@@ -795,7 +776,6 @@ describe("retro_run_drillable reads novelStuckSignals (#5029)", () => {
 describe("Turn Snapshot Redis port — bounded, fail-open, closes", () => {
   function ops(over: Partial<TurnSnapshotRedisOps>, log: string[]): TurnSnapshotRedisOps {
     return {
-      anchorQueueLength: async () => 4,
       scoutLastCalendarWalk: async () => "iso",
       architectureLastRun: async () => null,
       scoutTokens: async () => "12",
@@ -811,7 +791,7 @@ describe("Turn Snapshot Redis port — bounded, fail-open, closes", () => {
     const r = createTurnSnapshotRedis({ ops: ops({}, log) });
     r.close();
     assert.deepEqual(log, [], "close before any call must not touch the connection");
-    assert.deepEqual(await r.anchorQueueLength("work-queue"), { ok: true, value: 4 });
+    assert.deepEqual(await r.architectureLastRun(), { ok: true, value: null });
     assert.deepEqual(await r.mirrorScoutSpend("2026-10-07", "12", 604800), { ok: true, value: true });
     r.close();
     assert.deepEqual(log, ["open", "set 2026-10-07 12 604800", "close"]);
@@ -935,10 +915,10 @@ describe("Turn Snapshot slice 5B — CLI and fail-open runner", () => {
   test("a collector that throws returns its full fallback plus a note; the others still read; redis is closed", async () => {
     let closed = 0;
     const github = createTurnSnapshotGithub({ transport: async () => ({ ok: false, stderr: "" }), repo: DEFAULT_GITHUB_REPO });
-    const run = await runRemainingCollectors(["tickets", "redis-queues"], {
+    const run = await runRemainingCollectors(["tickets"], {
       github: { ...github, openIssueAssigneesWithLabel: async () => Promise.reject(new Error("boom")) },
       hydra: createTurnSnapshotHydra({ baseUrl: BASE, transport: async () => assert.fail("no HTTP read") }),
-      redis: { ...fakeRedis({ lists: { "hydra:anchors:work-queue": 2, "hydra:anchors:reframe-queue": 2, "hydra:anchors:prior-failures": 2 } }, []), close: () => void closed++ },
+      redis: { ...fakeRedis({}, []), close: () => void closed++ },
       now: () => 0,
       ghListLimit: 100,
       orchBoardDegraded: "0",
@@ -946,9 +926,6 @@ describe("Turn Snapshot slice 5B — CLI and fail-open runner", () => {
     assert.deepEqual(signalView(run.values), {
       tickets_available: "false",
       tickets_orch_pending_spec: "none",
-      work_queue: "2",
-      reframe_queue: "2",
-      prior_failures: "2",
     });
     assert.deepEqual(run.degraded, [{ collector: "tickets", field: "tickets", reason: "collector-crashed" }]);
     assert.deepEqual(run.notes, ["orch turn-snapshot tickets collector crashed (boom) — emitting its fail-open fallback (issue #4933)"]);
@@ -956,7 +933,7 @@ describe("Turn Snapshot slice 5B — CLI and fail-open runner", () => {
   });
 
   test("slice-5B collectors are known to --collectors and take --orch-board-degraded", () => {
-    const args = parseArgs(["--collectors", "redis-queues,tickets", "--format", "values", "--orch-board-degraded", "1"]);
+    const args = parseArgs(["--collectors", "scout,tickets", "--format", "values", "--orch-board-degraded", "1"]);
     assert.ok(!("error" in args));
     assert.equal((args as { orchBoardDegraded: string }).orchBoardDegraded, "1");
     assert.match((parseArgs(["--collectors", "nope", "--format", "values"]) as { error: string }).error, /unknown collector/);
@@ -975,12 +952,9 @@ describe("Turn Snapshot slice 5B — CLI and fail-open runner", () => {
 
   test("every registry fallback equals the bash all-reads-failed goldens", () => {
     // Compared through the signal view: the degraded REASONs differ (which read failed vs a crash), and the
-    // crash fails its work-queue depth closed at 1 where a failed Redis read reads 0 (asserted below).
     const fb = (names: string[]) => signalView(Object.fromEntries(names.map((n) => [n, REMAINING_COLLECTORS[n as keyof typeof REMAINING_COLLECTORS].fallback])));
-    assert.deepEqual(fb(["redis-queues", "scout", "arch-cleanup-boards", "hitl-grill"]), signalView(loadGolden("remaining-group-a-all-failed.json").expected.values));
+    assert.deepEqual(fb(["scout", "arch-cleanup-boards", "hitl-grill"]), signalView(loadGolden("remaining-group-a-all-failed.json").expected.values));
     assert.deepEqual(fb(["retro", "wayfinder-frontier", "tickets"]), signalView(loadGolden("remaining-group-b-all-failed.json").expected.values));
-    // A crashed arch collector fails its work-queue depth CLOSED (1), so target backfill cannot fire.
-    assert.equal(REMAINING_COLLECTORS["arch-cleanup-boards"].fallback.workQueue, 1);
     assert.equal(REMAINING_COLLECTORS["arch-cleanup-boards"].fallback.orchBoardDegraded, "1");
   });
 });

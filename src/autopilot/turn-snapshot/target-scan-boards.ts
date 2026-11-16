@@ -9,8 +9,7 @@
  * inputs arrive from outside the collector because they belong to other
  * collectors: the lane-degraded accumulator (#4130, set by the target-board
  * collector — a failed counts read must still flip
- * `target_board_signals_degraded` here) and the orchestrator work-queue
- * length (`backfill_idle`, read by the still-bash arch-cleanup collector).
+ * `target_board_signals_degraded` here).
  *
  * Semantics (unchanged; history in the issues):
  *   truncated   len(rows) ≥ the page size — advisory (#3710)
@@ -83,8 +82,6 @@ export interface TargetScanDeps {
   readonly ghListLimit: number;
   /** The lane accumulator the target-board collector produced (#4130). */
   readonly laneDegraded: boolean;
-  /** The orchestrator work-queue length (`backfill_idle`). */
-  readonly workQueue: number;
   /** The Target workspace (`""` = unresolved → no ADR, fail closed). */
   readonly workspace: string;
   /** Defaults to {@link designLanguageAdrPresent} on the real filesystem. */
@@ -116,7 +113,7 @@ export function designLanguageAdrPresent(workspace: string): boolean {
 }
 
 /** Classify the open-issue rows (`[{number, labels: [name…]}]`). Pure. */
-export function classifyTargetScan(rows: readonly unknown[], opts: { limit: number; workQueue: number }): TargetScanSignals {
+export function classifyTargetScan(rows: readonly unknown[], opts: { limit: number }): TargetScanSignals {
   const L = TARGET_SCAN_LABELS;
   let triage = 0;
   const triageNumbers = new Set<number>();
@@ -150,7 +147,7 @@ export function classifyTargetScan(rows: readonly unknown[], opts: { limit: numb
   return {
     truncated: rows.length >= opts.limit,
     needsTriageItems: [...triageNumbers].sort((a, b) => a - b),
-    backfillIdle: triage === 0 && queued === 0 && opts.workQueue === 0,
+    backfillIdle: triage === 0 && queued === 0,
     cleanupOpenScan: openScan,
     cleanupSaturated: openScan > TARGET_CLEANUP_BOARD_SATURATION_CAP,
     wireOrRetireTriage: worTriage,
@@ -175,7 +172,7 @@ export async function collectTargetScanBoards(deps: TargetScanDeps): Promise<Col
     signals = { ok: false, reason: DEGRADE.UNPARSEABLE };
   } else {
     const rows = Array.isArray(read.data) ? read.data : [];
-    signals = { ok: true, value: classifyTargetScan(rows, { limit: deps.ghListLimit, workQueue: deps.workQueue }) };
+    signals = { ok: true, value: classifyTargetScan(rows, { limit: deps.ghListLimit }) };
   }
   if ("reason" in signals) degraded.push({ field: "scanSignals", reason: signals.reason });
   return {

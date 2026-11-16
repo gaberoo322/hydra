@@ -1,0 +1,1 @@
+- refactor: hydra-doctor reads cycles, board, alerts, memory, Redis, timers, backups, journal errors, Target git and kill-chain through the ops-collect CLI; ops-collect gains the doctor and digest collectors, per-collector timeouts and skipped results (#5562)
