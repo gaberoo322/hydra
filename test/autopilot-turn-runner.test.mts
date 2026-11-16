@@ -91,7 +91,6 @@ function baseState(): Record<string, unknown> {
       unattended: true,
       schema_version: 2,
       daily_spend_cap_usd: 0,
-      scout_cost_share: 0.04,
     },
     slots: {
       dev_orch: null,

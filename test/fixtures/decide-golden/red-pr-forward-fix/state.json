@@ -13,7 +13,6 @@
   "unattended": true,
   "schema_version": 2,
   "daily_spend_cap_usd": 0,
-  "scout_cost_share": 0.04,
   "context_compaction_turns": 0
  },
  "cumulative_tokens": 0,

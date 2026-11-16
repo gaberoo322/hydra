@@ -249,10 +249,7 @@ double-file the same finding:
 # refuses `mapfile -t X < <(...)`. See "Guard-compatible shell forms" in
 # _fragments/hydra-dev-parent-flow.md.
 BASELINE_TMP=$(mktemp)
-gh issue list --state open --json number,title \
-  --jq '.[] | .title' > "$BASELINE_TMP"
-gh issue list --state closed --json number,title,closedAt \
-  --jq '[.[] | select(.closedAt > (now - 7*24*3600 | todate))] | .[] | .title' >> "$BASELINE_TMP"
+bash scripts/ci/backfill-dedup-baseline.sh > "$BASELINE_TMP"
 mapfile -t BASELINE_TITLES < "$BASELINE_TMP"
 rm -f "$BASELINE_TMP"
 
@@ -317,7 +314,7 @@ EOF
 $(hydra_issue_footer hydra-discover 'tier N')"
 ```
 
-**State label (HARD):** `gh issue create` carries FLAG labels only, never a state. Immediately after it returns the issue URL, write the first state through the lifecycle seam: `npx tsx scripts/lifecycle.ts advance <N> needs-triage --actor hydra-discover` (from none, gate-free). If it returns `illegal-transition` with observed state `needs-triage` (the reconcile zero-state backstop raced it), carry on. A non-zero exit is otherwise final — never fall back to a direct label write (ADR-0047 D3/D4).
+@include _fragments/issue-first-state.md
 
 ## Calibration
 

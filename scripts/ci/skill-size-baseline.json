@@ -5,7 +5,7 @@
       "body": 104
     },
     "docs/operator-playbooks/_fragments/hydra-autopilot-class-wiring.md": {
-      "body": 1031
+      "body": 1041
     },
     "docs/operator-playbooks/_fragments/hydra-autopilot-dispatch-reference.md": {
       "body": 3871
@@ -14,7 +14,7 @@
       "body": 1818
     },
     "docs/operator-playbooks/_fragments/hydra-autopilot-ops-reference.md": {
-      "body": 1857
+      "body": 1840
     },
     "docs/operator-playbooks/_fragments/hydra-autopilot-phase6-ops.md": {
       "body": 803
@@ -37,6 +37,9 @@
     "docs/operator-playbooks/_fragments/hydra-target-build-merge-flow.md": {
       "body": 3880
     },
+    "docs/operator-playbooks/_fragments/issue-first-state.md": {
+      "body": 72
+    },
     "docs/operator-playbooks/_fragments/reflection-telemetry-deposit.md": {
       "body": 138
     },
@@ -51,8 +54,8 @@
       "description": 32
     },
     "docs/operator-playbooks/hydra-architecture-scan.md": {
-      "body": 4386,
-      "description": 38
+      "body": 5886,
+      "description": 39
     },
     "docs/operator-playbooks/hydra-autopilot.md": {
       "body": 7469,
@@ -79,7 +82,7 @@
       "description": 21
     },
     "docs/operator-playbooks/hydra-discover.md": {
-      "body": 2201,
+      "body": 2026,
       "description": 26
     },
     "docs/operator-playbooks/hydra-doctor.md": {
@@ -115,8 +118,8 @@
       "description": 27
     },
     "docs/operator-playbooks/hydra-research.md": {
-      "body": 2591,
-      "description": 25
+      "body": 2365,
+      "description": 24
     },
     "docs/operator-playbooks/hydra-retro.md": {
       "body": 2425,
@@ -127,7 +130,7 @@
       "description": 34
     },
     "docs/operator-playbooks/hydra-skill-prune.md": {
-      "body": 1205,
+      "body": 1442,
       "description": 49
     },
     "docs/operator-playbooks/hydra-sweep.md": {
@@ -171,7 +174,7 @@
       "description": 32
     },
     "docs/operator-playbooks/hydra-tool-scout.md": {
-      "body": 2697,
+      "body": 2706,
       "description": 36
     },
     "docs/operator-playbooks/hydra-wayfinder.md": {

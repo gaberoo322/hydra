@@ -29,7 +29,8 @@
         }
       ],
       "composedFrom": [
-        "docs/operator-playbooks/_vendor/improve-codebase-architecture.md"
+        "docs/operator-playbooks/_vendor/improve-codebase-architecture.md",
+        "docs/operator-playbooks/_fragments/issue-first-state.md"
       ],
       "route": "/docs/skill/hydra-architecture-scan",
       "source": {
@@ -153,6 +154,7 @@
         }
       ],
       "composedFrom": [
+        "docs/operator-playbooks/_fragments/issue-first-state.md",
         "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
       ],
       "route": "/docs/skill/hydra-discover",
@@ -310,6 +312,7 @@
       "description": "Research improvement opportunities for the Hydra orchestrator itself. Analyzes codebase architecture, dispatch efficiency, learning system, agent quality, and infrastructure to produce actionable GitHub issues.",
       "dispatchedBy": [],
       "composedFrom": [
+        "docs/operator-playbooks/_fragments/issue-first-state.md",
         "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
       ],
       "route": "/docs/skill/hydra-research",
@@ -361,7 +364,9 @@
           "via": "default"
         }
       ],
-      "composedFrom": [],
+      "composedFrom": [
+        "docs/operator-playbooks/_fragments/issue-first-state.md"
+      ],
       "route": "/docs/skill/hydra-skill-prune",
       "source": {
         "path": "docs/operator-playbooks/hydra-skill-prune.md"
@@ -569,7 +574,9 @@
           "via": "default"
         }
       ],
-      "composedFrom": [],
+      "composedFrom": [
+        "docs/operator-playbooks/_fragments/issue-first-state.md"
+      ],
       "route": "/docs/skill/hydra-tool-scout",
       "source": {
         "path": "docs/operator-playbooks/hydra-tool-scout.md"
