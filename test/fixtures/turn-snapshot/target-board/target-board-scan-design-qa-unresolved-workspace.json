@@ -6,7 +6,6 @@
   "repo": "acme/target-app",
   "limit": 100,
   "laneDegraded": "0",
-  "workQueue": 0,
   "adr": "missing",
   "gh": {
     "scanIssues": {

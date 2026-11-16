@@ -442,14 +442,8 @@ def _select_slot_dev_target(
     # (the Turn Snapshot sets it from `target_ready_for_agent > 0`, which is
     # already open-blocker-excluded via the inherited #3059 filter — ADR-0031
     # Decision 5). This is the orch-style Target dispatch decision:
-    # ready-for-agent present → dev_target. EXPAND PHASE (ADR-0030): fire on
-    # EITHER the legacy Redis `target_work_available` OR the new GitHub-board
-    # `target_board_work_available` — both live in parallel during cutover;
-    # nothing Redis-side is deleted here.
-    if (
-        _signal_present(state, events, "target_work_available")
-        or _signal_present(state, events, "target_board_work_available")
-    ):
+    # ready-for-agent present → dev_target.
+    if _signal_present(state, events, "target_board_work_available"):
         intent = TargetFresh()
         # ISSUE #1129 (finished): the dev-steer half of the single target
         # candidate boundary now reads the SAME feed-owned flag the

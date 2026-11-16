@@ -14,7 +14,7 @@ Generated: see `docs/generated/streams.json`. The Redis Streams event bus lives 
 
 ## API Endpoints (port 4000, all under /api)
 
-Generated: see `docs/generated/routes.json`. Routes are split into domain sub-routers in `src/api/` (each exports a `create*Router(eventBus?)` factory) and classified by `src/operator-actions/parity.ts` (ADR-0034 §9); `POST /kill` and `POST /research/start` were retired under ADR-0024 §3 (issue #4638). The work queue is a Redis LIST (`hydra:anchors:work-queue`) with no per-item id addressing; read it via `GET /api/autopilot/work-queue`.
+Generated: see `docs/generated/routes.json`. Routes are split into domain sub-routers in `src/api/` (each exports a `create*Router(eventBus?)` factory) and classified by `src/operator-actions/parity.ts` (ADR-0034 §9); `POST /kill` and `POST /research/start` were retired under ADR-0024 §3 (issue #4638). The operator work queue is `GET /api/autopilot/work-queue`, a projection over GitHub-board issues (`src/autopilot/work-projections.ts`); the Redis `hydra:anchors:*` lists were retired (ADR-0031 / ADR-0036) and their readers removed (#5570).
 
 ## Target Outcomes (issue #241, ADR-0003 + ADR-0015)
 

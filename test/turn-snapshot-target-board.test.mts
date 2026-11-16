@@ -82,7 +82,6 @@ interface Golden {
   limit: number;
   prRefsUnavailable?: string | null;
   laneDegraded?: string;
-  workQueue?: number;
   adr?: "present" | "absent" | "founding-only" | "missing";
   http?: Record<string, { body: string; status?: number }>;
   gh?: Record<string, GoldenRead>;
@@ -167,7 +166,7 @@ describe("Turn Snapshot Target board family — golden files from the bash colle
       const workspace = g.collector === "target-scan-boards" ? makeWorkspace(g.adr) : "";
       const argv = ["--collectors", g.collector, "--format", "values", "--gh-list-limit", String(g.limit ?? 100)];
       if (g.collector === "target-scan-boards") {
-        argv.push("--target-lane-degraded", g.laneDegraded ?? "0", "--target-work-queue", String(g.workQueue ?? 0));
+        argv.push("--target-lane-degraded", g.laneDegraded ?? "0");
       }
       let stdout = "";
       let stderr = "";
@@ -852,8 +851,8 @@ describe("target-scan-boards — blocked items (issue #5167)", () => {
       { number: 9, labels: ["ready-for-agent"] },
       { number: "12", labels: ["blocked"] },
     ];
-    assert.deepEqual(classifyTargetScan(rows, { limit: 100, workQueue: 0 }).blockedItems, [187, 305]);
-    const none = classifyTargetScan([{ number: 9, labels: ["ready-for-agent"] }], { limit: 100, workQueue: 0 });
+    assert.deepEqual(classifyTargetScan(rows, { limit: 100 }).blockedItems, [187, 305]);
+    const none = classifyTargetScan([{ number: 9, labels: ["ready-for-agent"] }], { limit: 100 });
     assert.equal("blockedItems" in none, false, "no blocked row → the key is absent (value shape unchanged)");
   });
 });
@@ -1083,13 +1082,12 @@ describe("target-board — target_dev_resume_pick (issue #4739)", () => {
 
 const rows = (n: number, labels: string[] = ["needs-triage"]) => Array.from({ length: n }, (_, i) => ({ number: i + 1, labels }));
 
-async function runScan(o: { rows?: unknown; read?: GhJsonRead; limit?: number; laneDegraded?: boolean; workQueue?: number; adr?: boolean }) {
+async function runScan(o: { rows?: unknown; read?: GhJsonRead; limit?: number; laneDegraded?: boolean; adr?: boolean }) {
   const fake = fakeTarget({ scanIssues: o.read ?? ok(o.rows ?? []) });
   const outcome = await collectTargetScanBoards({
     github: fake.github,
     ghListLimit: o.limit ?? 100,
     laneDegraded: o.laneDegraded ?? false,
-    workQueue: o.workQueue ?? 0,
     workspace: "/ws",
     adrPresent: () => o.adr ?? false,
   });
@@ -1131,7 +1129,7 @@ describe("target-scan-boards — truncation signal (issue #3710)", () => {
 });
 
 describe("target-scan-boards — wire-or-retire unlabelled advisory count (issue #3973)", () => {
-  const scan = (r: { labels: string[] }[]) => classifyTargetScan(r, { limit: 100, workQueue: 0 });
+  const scan = (r: { labels: string[] }[]) => classifyTargetScan(r, { limit: 100 });
 
   test("wire-or-retire + bug only is counted (the live #760 case)", () => {
     const s = scan([{ labels: ["wire-or-retire", "bug"] }]);
@@ -1362,12 +1360,11 @@ describe("target-risk-surface — one well-formed blob, fail-closed (issue #4411
 
 describe("turn-snapshot CLI — Target collectors (ADR-0043 slice 4)", () => {
   test("the Target collectors are registered and their flags validated", () => {
-    const a = parseArgs(["--collectors", "target-scan-boards,target-risk-surface", "--format", "values", "--target-lane-degraded", "1", "--target-work-queue", "4"]);
+    const a = parseArgs(["--collectors", "target-scan-boards,target-risk-surface", "--format", "values", "--target-lane-degraded", "1"]);
     assert.ok(!("error" in a));
     assert.equal(a.targetLaneDegraded, true);
-    assert.equal(a.targetWorkQueue, 4);
     assert.ok("error" in parseArgs(["--collectors", "target-board", "--format", "values", "--target-lane-degraded", "yes"]));
-    assert.ok("error" in parseArgs(["--collectors", "target-board", "--format", "values", "--target-work-queue", "-1"]));
+    assert.ok("error" in parseArgs(["--collectors", "target-board", "--format", "values", "--target-work-queue", "4"]), "the retired flag is now unknown");
   });
 
   test("a crashing Target collector reports a note and returns its fail-closed fallback (exit 0)", async () => {

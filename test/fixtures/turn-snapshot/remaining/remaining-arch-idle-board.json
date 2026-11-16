@@ -13,11 +13,7 @@
       "json": []
     }
   },
-  "redis": {
-    "lists": {
-      "hydra:anchors:work-queue": 0
-    }
-  },
+  "redis": {},
   "http": {},
   "expected": {
     "stderrNotes": [],
@@ -43,7 +39,6 @@
           "ok": true,
           "value": null
         },
-        "workQueue": 0,
         "board": {
           "ok": true,
           "value": {

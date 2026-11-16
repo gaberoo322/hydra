@@ -3222,8 +3222,8 @@ def _rule_pipeline_dispatch(
             continue
         # Target WIP-saturation guard (issue #4475, CSB swap prep, ex-#4241) —
         # checked BEFORE the selector, mirroring the orch-realm guard above, so it
-        # suppresses dev_target for EITHER trigger (legacy
-        # target_work_available or target_board_work_available). The boolean
+        # suppresses dev_target on the
+        # target_board_work_available trigger. The boolean
         # is pre-resolved by the Turn Snapshot via scripts/autopilot/target-wip.py
         # — the ONE source of truth for the WIP limit and the liveness
         # predicate (an `in-progress` claim counts only when an open Target PR
@@ -3811,7 +3811,7 @@ def decide(
            b) class not scope-excluded
            c) at least one eligible candidate / signal for that slot
            d) for dev_orch: `orch_work_available` signal is set (post-#458)
-           e) for dev_target: `target_work_available` signal is set; the top
+           e) for dev_target: `target_board_work_available` signal is set; the top
               /api/anchor/candidates entry is surfaced as an anchor hint
               when its score >= 0.5
            f) for research_target: top candidate score below 0.5 forces a
@@ -4336,7 +4336,6 @@ def _zy_positive_evidence_present(state: dict, events: list[dict], cls: str) -> 
         return (
             _signal_present(state, events, "needs_triage_target")
             or _signal_present(state, events, "target_board_work_available")
-            or _signal_present(state, events, "target_work_available")
         )
     return False
 

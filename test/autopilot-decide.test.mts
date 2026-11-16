@@ -275,8 +275,8 @@ describe("decide.py — pipeline dispatch (issue #426 AC: 6-slot pipeline)", () 
     assert.deepEqual(d2.intent, { kind: "TargetReviewPr", pr_ref: url });
   });
 
-  test("dispatches dev_target on target_work_available signal", () => {
-    const state = baseState({ signals: { target_work_available: true } });
+  test("dispatches dev_target on target_board_work_available signal", () => {
+    const state = baseState({ signals: { target_board_work_available: true } });
     const plan = runDecide(state, null);
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target");
     assert.ok(dispatch);
@@ -704,7 +704,7 @@ describe("decide.py — scope filter exclusion mask (INV-008)", () => {
     const state = baseState({
       scope: "orch-only",
       signals: {
-        target_work_available: true,
+        target_board_work_available: true,
         target_board_research_due: true,
         needs_qa_target: true,
         needs_triage_target: true,
@@ -749,7 +749,7 @@ describe("decide.py — scope filter exclusion mask (INV-008)", () => {
   test("scope=all is the identity filter", () => {
     const state = baseState({
       scope: "all",
-      signals: { needs_qa_orch: true, target_work_available: true },
+      signals: { needs_qa_orch: true, target_board_work_available: true },
     });
     const plan = runDecide(state, null);
     const slots = (plan.actions ?? []).map((a: any) => a.slot);
@@ -1317,10 +1317,10 @@ describe("decide.py — orch-realm weekly-share guard (issue #4161)", () => {
     signals?: Record<string, unknown>;
     signalLastFired?: Record<string, number>;
   }): any {
-    // orch_work_available arms dev_orch; target_work_available arms dev_target,
+    // orch_work_available arms dev_orch; target_board_work_available arms dev_target,
     // so one fixture can pin both directions of the one-directional guard.
     const s = baseState({
-      signals: o.signals ?? { orch_work_available: true, target_work_available: true },
+      signals: o.signals ?? { orch_work_available: true, target_board_work_available: true },
     });
     if (o.maxShare !== undefined) s.limits.orch_realm_weekly_share_cap = o.maxShare;
     if (o.share !== undefined) s.signals.orch_realm_weekly_share = o.share;
@@ -2937,7 +2937,7 @@ describe("decide.py — should_auto_merge() policy table", () => {
 // (8 orch GH `ready-for-agent` issues sat idle: #449, #448, #443, ...).
 //
 // Fix: dev_orch consumes the orchestrator GH board via the
-// `orch_work_available` signal; dev_target keeps target_work_available
+// `orch_work_available` signal; dev_target keeps target_board_work_available
 // AND surfaces the top candidate as an anchor hint; the
 // candidate-driven research force moved from research_orch to
 // research_target.
@@ -2967,11 +2967,11 @@ describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
       "target-product candidate must NOT trigger dev_orch (was the #458 misroute)");
 
     // The same candidates SHOULD NOT trigger dev_target either, because
-    // target_work_available signal isn't set — the candidate feed is a
+    // target_board_work_available signal isn't set — the candidate feed is a
     // hint, not a trigger.
     const devTarget = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target");
     assert.equal(devTarget, undefined,
-      "dev_target needs target_work_available signal, not just candidates");
+      "dev_target needs target_board_work_available signal, not just candidates");
   });
 
   test("ISSUE-458: dev_orch dispatches on orch_work_available signal with NO target anchor", () => {
@@ -2992,17 +2992,17 @@ describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
     assert.equal(dispatch.prompt_args, undefined);
   });
 
-  test("ISSUE-458: dev_target dispatches on target_work_available AND carries top candidate as anchor", () => {
+  test("ISSUE-458: dev_target dispatches on target_board_work_available AND carries top candidate as anchor", () => {
     // The candidates feed IS the target backlog — when dev_target fires,
     // the top `issue-N` entry is surfaced as the TargetFresh intent's anchor so
     // hydra-target-build gets a clear pointer (#5383: an intent, no prompt_args).
-    const state = baseState({ signals: { target_work_available: true } });
+    const state = baseState({ signals: { target_board_work_available: true } });
     const cands = {
       candidates: [{ issue: 267, anchorRef: "issue-267", score: 0.85 }],
     };
     const plan = runDecide(state, cands);
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target");
-    assert.ok(dispatch, "target_work_available must fire dev_target");
+    assert.ok(dispatch, "target_board_work_available must fire dev_target");
     assert.equal(dispatch.skill, "hydra-target-build");
     assert.deepEqual(dispatch.intent, { kind: "TargetFresh", anchor: "issue-267" },
       "dev_target must surface the top candidate as its anchor (#458)");
@@ -3010,7 +3010,7 @@ describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
   });
 
   test("ISSUE-458/#5383: a non-issue-ref candidate hint (item-267) dispatches an UNPINNED TargetFresh", () => {
-    const state = baseState({ signals: { target_work_available: true } });
+    const state = baseState({ signals: { target_board_work_available: true } });
     const cands = { candidates: [{ issue: 267, anchorRef: "item-267", score: 0.85 }] };
     const plan = runDecide(state, cands);
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target");
@@ -3026,7 +3026,7 @@ describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
     // gates this dev-steer hint even though #3832 retired the research_target
     // force it used to pair with (the candidate feed no longer drives the
     // research_target selector — see the "#3832" suite above).
-    const state = baseState({ signals: { target_work_available: true } });
+    const state = baseState({ signals: { target_board_work_available: true } });
     const cands = { candidates: [{ issue: 1, anchorRef: "x", score: 0.3 }], research_recommended: true };
     const plan = runDecide(state, cands);
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target");
@@ -3041,7 +3041,7 @@ describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
     // A strong score (0.9) that the feed nonetheless flags for research must
     // NOT be steered — keying both slots off the one flag eliminates the
     // dead-zone / double-fire risk the original #1129 comment only mitigated.
-    const state = baseState({ signals: { target_work_available: true } });
+    const state = baseState({ signals: { target_board_work_available: true } });
     const cands = { candidates: [{ issue: 42, anchorRef: "item-42", score: 0.9 }], research_recommended: true };
     const plan = runDecide(state, cands);
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target");
@@ -3057,7 +3057,7 @@ describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
     // (0.4) the feed does NOT flag for research IS steerable — under the
     // unified semantics decide.py no longer second-guesses the feed with a
     // private 0.5 cutoff.
-    const state = baseState({ signals: { target_work_available: true } });
+    const state = baseState({ signals: { target_board_work_available: true } });
     const cands = { candidates: [{ issue: 43, anchorRef: "issue-43", score: 0.4 }], research_recommended: false };
     const plan = runDecide(state, cands);
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target");
@@ -3069,7 +3069,7 @@ describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
   test("ISSUE-458: dev_target with NO candidates feed fires bare (no anchor)", () => {
     // candidates=null is the bootstrap / API-down case. dev_target should
     // still dispatch on the signal — it has its own queue to consult.
-    const state = baseState({ signals: { target_work_available: true } });
+    const state = baseState({ signals: { target_board_work_available: true } });
     const plan = runDecide(state, null);
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target");
     assert.ok(dispatch);
@@ -3112,7 +3112,7 @@ describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
     // hot AND the candidates feed has a strong target item. dev_orch
     // picks from GH; dev_target picks the candidate. No misroute.
     const state = baseState({
-      signals: { orch_work_available: true, target_work_available: true },
+      signals: { orch_work_available: true, target_board_work_available: true },
     });
     const cands = { candidates: [{ issue: 267, anchorRef: "issue-267", score: 0.85 }] };
     const plan = runDecide(state, cands);
@@ -3161,7 +3161,7 @@ describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
     // restricted scope.
     const state = baseState({
       scope: "orch-only",
-      signals: { orch_work_available: true, target_work_available: true },
+      signals: { orch_work_available: true, target_board_work_available: true },
     });
     const plan = runDecide(state, null);
     const devOrch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
@@ -3237,7 +3237,7 @@ describe("decide.py — worktreeBranch stamping (issue #527)", () => {
     // Mirror the dashboard consumer's resolution rule (Autopilot.jsx:236-237)
     // — action.worktreeBranch || action.worktree_branch || action.branch ||
     // outcome?.worktreeBranch — and confirm the resulting href is valid.
-    const state = baseState({ signals: { target_work_available: true } });
+    const state = baseState({ signals: { target_board_work_available: true } });
     (state as any).run_id = "11223344-aaaa-bbbb-cccc-ddddeeeeffff";
     (state as any).turn = 12;
     const plan = runDecide(state, null);
@@ -4970,7 +4970,7 @@ describe("decide.py — research_target re-fire interval (issue #4611)", () => {
 
   test("#4611 INV-8: the re-fire interval never gates dev_target", () => {
     const state = baseState({
-      signals: { target_work_available: true, target_board_research_due: true },
+      signals: { target_board_work_available: true, target_board_research_due: true },
       signal_last_fired: { health: 0, research_target: nowSec() - 60 },
     });
     const plan = runDecide(state, null);

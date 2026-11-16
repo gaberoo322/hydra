@@ -13,7 +13,6 @@
   "orch_stale_in_progress_items": [],
   "orch_stale_blocked_items": [],
   "untriaged_orphans_orch": false,
-  "target_work_available": false,
   "target_board_work_available": true,
   "target_board_research_due": false,
   "target_wip_saturated": false,

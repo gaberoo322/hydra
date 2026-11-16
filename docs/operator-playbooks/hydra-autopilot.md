@@ -199,8 +199,8 @@ across pace-gate relaunches (measured: ~73k tokens every 30 min, 0 filed).
 fires → 4h between fires, 6+ → 24h (equal to `BACKFILL_STARVATION_FLOOR_SEC`,
 so the class is never fully dark). The streak increments only on a real
 dispatch (plan-time stamp), resets only on POSITIVE non-idle evidence
-(`needs_triage_target` / `target_board_work_available` /
-`target_work_available` — a degraded board read HOLDS the ladder, and a pass
+(`needs_triage_target` /
+`target_board_work_available` — a degraded board read HOLDS the ladder, and a pass
 that files something resets it on the next snapshot with no output parsing),
 and survives relaunches via the Run Ledger's file-only carry-forward
 (`run_ledger.carry_forward`). Suppressed turns surface as their own
