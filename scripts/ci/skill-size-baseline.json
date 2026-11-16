@@ -40,6 +40,9 @@
     "docs/operator-playbooks/_fragments/reflection-telemetry-deposit.md": {
       "body": 138
     },
+    "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md": {
+      "body": 63
+    },
     "docs/operator-playbooks/_fragments/thermo-nuclear-proposal-format.md": {
       "body": 795
     },

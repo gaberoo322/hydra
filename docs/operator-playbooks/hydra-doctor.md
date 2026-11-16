@@ -146,6 +146,4 @@ When reporting failed services, always include the root cause error message, not
 
 A deliberately back-revved tool re-raises its warning alert on every run. Dismiss it with `hydra alerts dismiss-all`; it returns while the drift persists. There is no per-tool suppression list.
 
-## Slot lifecycle events
-
-Every tool call in this skill emits a `subagent_tool_call` event through `scripts/autopilot/hooks/on-subagent-tool-call.sh`, registered by the sibling `hydra-doctor.settings.json`. The hook never propagates an error into this session; `test/on-subagent-tool-call.test.mts` pins its behaviour.
+@include _fragments/slot-lifecycle-hook.md

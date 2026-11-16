@@ -210,6 +210,4 @@ Print summary table using captured before/after values:
 Also report:
 - **Auto-triaged**, **Tracking parents identified**, **Critical path** (which RFA was picked and why), **Needs operator attention**, **Still blocked**, **Labels cleaned**, **Errors**.
 
-## Slot lifecycle events
-
-When this skill runs as a dispatched subagent, the PostToolUse hook `scripts/autopilot/hooks/on-subagent-tool-call.sh` emits each tool call to the slot-event stream. It always exits 0; the sweep never calls it.
+@include _fragments/slot-lifecycle-hook.md
