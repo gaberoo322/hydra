@@ -27,7 +27,7 @@ The mode is read from the shell variable `$DESIGN_CONCEPT_MODE` (default `warn`)
 The preflight's admission and short-circuit levers obey these invariants:
 
 - **INV-A** — any admission or short-circuit lever is a derivation of `aggregateAdversarialReview()` / `classifyVerdict()` in `scripts/ci/qa-verdict.ts`, never an independent policy.
-- **INV-B** — a review may only be **deferred**, never depth-reduced below what the preflight's `.fanout.mode` requires, by any such lever.
+- **INV-B** — a review may only be **deferred**, never depth-reduced below what the preflight's `.fanout.mode` requires, by any such lever. T3, T4 and Verifier-Core reviews are never depth-reduced at all (`decideReviewerFanout` gives them `adversarial`; pinned by `test/qa-fanout.test.mts`).
 - **INV-C** — every PR that reaches auto-merge has been reviewed at the full depth the preflight requires: a deferred or pre-spawn-skipped PR never merges without a real review on a later pass.
 - **INV-D** — the emitted verdict literals, `aggregateAdversarialReview()`, `classifyVerdict()`, and `decide.py`'s `should_auto_merge()` (`INV-007`) are untouched by any such lever.
 - **INV-E** — every unknown input (an unreachable tier classifier, an unknown `mergeStateStatus`, a gate-script error) fails closed to FULL review depth, never to a skip.
