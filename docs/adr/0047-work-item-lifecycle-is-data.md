@@ -88,7 +88,7 @@ GitHub UI (`external`). A human-hold exit from any other source goes on the atte
   - merged → closed;
   - closed unmerged → `ready-for-agent`.
 - **`ready-for-agent` with exactly one open, non-draft PR closing it and no held dispatch claim →
-  `needs-qa`** (reconcile-fired, gate `pr-open`, #5489): no other lane reaches such an issue; skipped (counted `prCovered.skippedQaFail`) when the issue's last written transition was a `needs-qa` bounce, so a QA-FAIL does not ping-pong.
+  `needs-qa`** (reconcile-fired, gate `pr-open`, #5489): no other lane reaches such an issue; skipped (counted `prCovered.skippedQaFail`) when the issue's last written transition was a `needs-qa` bounce, so a QA-FAIL does not ping-pong. Deliberate amendment to the design concept (INV-3 / INV-8): the guard also skips when the journal still reads `needs-qa` (an external move out of QA not yet journaled), and a read failure of the journal skips the issue. Residual: an issue bounced out of `needs-qa` whose PR is later fixed without a label change is not re-promoted by this arm; `needs-dev-resume` and the seam `qa-verdict-stale` handling cover it.
 - **A record counts on shape + binding.** It must parse, match the head SHA, match the PR/issue refs,
   and **post-date the issue's entry into its current state**. Records are not signed.
 - **Design-concept gate fails closed at dispatch.** When the issue is flagged `needs-design-concept`,
