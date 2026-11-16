@@ -132,11 +132,15 @@ describe("hydra-qa playbook — spawn step branches on change shape (issue #4733
     assert.ok(playbook.includes("fanout.reviewers"), "playbook must carry the decided reviewer list");
   });
 
-  test("step 7 has a single-reviewer branch; T4 and code PRs keep the full fan-out", () => {
+  test("step 7 has a single-reviewer branch; the fan-out mode is the preflight's, never a tier literal in the playbook", () => {
     assert.match(playbook, /#### 7c\. [^\n]*single reviewer/i);
     assert.ok(
-      playbook.includes("A T4 PR or a `code` PR always gets the full fan-out"),
-      "playbook must pin the T4/code full-fan-out rule",
+      playbook.includes("The preflight decides the mode; `.fanout.reviewers` is authoritative."),
+      "playbook must defer the fan-out mode to the preflight",
+    );
+    assert.ok(
+      !playbook.includes("A T4 PR or a `code` PR always gets the full fan-out"),
+      "playbook must not restate the tier-keyed fan-out rule (INV-3)",
     );
   });
 
