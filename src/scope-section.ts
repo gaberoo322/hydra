@@ -96,3 +96,50 @@ export function extractScopeFromBody(body: string): string[] {
 export function hasScopeSection(body: string): boolean {
   return extractScopeFromBody(body).length > 0;
 }
+
+/**
+ * Paths a required or advisory drift guard REGENERATES, so a PR touching them is
+ * never scope creep (issue #5528; supersedes scope-check's `ALWAYS_IN_SCOPE`,
+ * #3678). Criterion: a path is listed iff (a) a repo script produces its content
+ * from other tracked files and (b) a CI drift guard fails when the committed copy
+ * is stale. `test/fixtures/qa-cohort-baseline.json` is a deliberately written
+ * graduation ledger, so it is excluded.
+ *
+ * Entry shape: a repo-root-relative directory prefix ending in `/`, or a full
+ * file path. Never a bare suffix: `classifyScope`'s matcher has an `endsWith`
+ * arm that would turn a suffix into an implicit glob.
+ */
+export const MECHANICAL_COMPANIONS: readonly string[] = [
+  ".changelog/",
+  "docs/generated/",
+  "scripts/ci/anthropic-seam-baseline.json",
+  "scripts/ci/claude-cli-seam-baseline.json",
+  "scripts/ci/github-seam-baseline.json",
+  "scripts/ci/host-probe-seam-baseline.json",
+  "scripts/ci/journal-seam-baseline.json",
+  "scripts/ci/never-throw-baseline.json",
+  "scripts/ci/playbook-reference-baseline.json",
+  "scripts/ci/playbook-vocabulary-baseline.json",
+  "scripts/ci/query-seam-baseline.json",
+  "scripts/ci/redis-seam-baseline.json",
+  "scripts/ci/schema-seam-baseline.json",
+  "scripts/ci/skill-size-baseline.json",
+  "scripts/ci/target-coupling-baseline.json",
+  "scripts/ci/telegram-seam-baseline.json",
+  "scripts/ci/test-typecheck-baseline.json",
+  "test/fixtures/adr-area-baseline.json",
+  "test/fixtures/coding-standards-baseline.json",
+  "test/fixtures/docs-drift-baseline.json",
+  "test/fixtures/fail-loud-baseline.json",
+  "test/fixtures/lifecycle-seam-baseline.json",
+  "test/fixtures/suite-count-baseline.json",
+  "test/fixtures/test-pools.json",
+  "test/fixtures/test-source-read-baseline.json",
+  "test/fixtures/test-subject-baseline.json",
+  "test/fixtures/test-title-provenance-baseline.json",
+];
+
+/** True when `path` is a mechanical companion: exact match, or under a `/`-terminated entry. */
+export function isMechanicalCompanion(path: string): boolean {
+  return MECHANICAL_COMPANIONS.some((e) => (e.endsWith("/") ? path.startsWith(e) : path === e));
+}

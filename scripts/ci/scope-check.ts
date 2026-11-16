@@ -74,24 +74,18 @@ const DEFAULT_MIN_COUNT = 3;
 // stay imported here for the sibling extractors below.
 import {
   extractScopeFromBody,
+  MECHANICAL_COMPANIONS,
   extractSection,
   looksLikePath,
 } from "../../src/scope-section.ts";
 import { readChangedFiles } from "../../src/mutation-gate-inputs.ts";
 
-export { extractScopeFromBody };
+export { extractScopeFromBody, MECHANICAL_COMPANIONS };
 
-/**
- * Issue #3678: path prefixes that are ALWAYS in scope for every PR, regardless
- * of the "Files in scope" section. `.changelog/` fragments (the per-PR release-
- * note convention, epic #3676) are conflict-free additive files that any PR may
- * carry, so a PR that adds only a changelog fragment must never trip the scope
- * gate. Unioned into the in-scope set in main() before classification; the
- * existing startsWith matcher covers the whole `.changelog/**` subtree from the
- * single `.changelog/` prefix, and in-scope-wins (#1872) additionally reconciles
- * away any incidental out-of-scope listing of a `.changelog/` path.
- */
-export const ALWAYS_IN_SCOPE: string[] = [".changelog/"];
+// Issue #3678 / #5528: paths always in scope (`.changelog/` fragments plus the
+// gate-regenerated companions) live in `MECHANICAL_COMPANIONS`
+// (src/scope-section.ts), unioned into the in-scope set in main(); in-scope-wins
+// (#1872) reconciles any incidental out-of-scope listing of them.
 
 /**
  * Issue #396: explicit "Files out of scope" block. Any changed file matching
@@ -398,7 +392,7 @@ function main(): number {
   // the report). Filtering here is the gate-side backstop for already-filed
   // issues; hydra-prd-render.ts now partitions them at generation time.
   const inScope = Array.from(new Set([
-    ...ALWAYS_IN_SCOPE,
+    ...MECHANICAL_COMPANIONS,
     ...extractScopeFromBody(prBody),
     ...extractScopeFromBody(issueBody),
   ])).filter((p) => !isTargetRepoPath(p));

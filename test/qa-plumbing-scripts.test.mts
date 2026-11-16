@@ -487,6 +487,26 @@ describe("packet (steps 7.0 / 7.0a / 7.0b)", () => {
     }
   });
 
+  test("packet: the Mechanical companions line lists only companions present in the diff, `none` otherwise", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "qa-packet-test-"));
+    try {
+      const withCompanions = harness({
+        gitHandler: packetGit({ [`diff --no-renames --name-only ${BASE_SHA}...${HEAD}`]: ok("src/a.ts\ndocs/generated/adrs.json\ntest/fixtures/suite-count-baseline.json\ntest/fixtures/qa-cohort-baseline.json\n") }),
+        ghHandler: prBodyGh("Merge danger: two-way — docs\n"),
+      });
+      const r1 = await runPacket(readyPre(), "gaberoo322/hydra", withCompanions.ports, { loadStandards: standardsOk, outDir: dir });
+      const p1 = readFileSync(r1.reviewPacketPath, "utf8");
+      assert.match(p1, /\n\nMechanical companions in this diff \([^)]*\): docs\/generated\/adrs\.json, test\/fixtures\/suite-count-baseline\.json\n\nMerge danger check/);
+      assert.ok(!/Mechanical companions[^\n]*qa-cohort-baseline/.test(p1), "the graduation ledger is not a companion");
+
+      const without = harness({ gitHandler: packetGit(), ghHandler: prBodyGh("Merge danger: two-way — docs\n") });
+      const r2 = await runPacket(readyPre(), "gaberoo322/hydra", without.ports, { loadStandards: standardsOk, outDir: dir });
+      assert.match(readFileSync(r2.reviewPacketPath, "utf8"), /\): none\n\nMerge danger check/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("packet: a non-missing-path show failure is degraded, not rendered as a deleted file; a failed since-diff is degraded", async () => {
     const dir = mkdtempSync(join(tmpdir(), "qa-packet-test-"));
     try {
