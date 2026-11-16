@@ -38,7 +38,7 @@ Every number comes from a collector field; the only arithmetic left is cost per 
 | Headline, Cycle Performance | `cycles`: `cycles`, `merged`, `mergeRatePct`, `failed`, `totalCostUsd`, `anchors` |
 | Per-class cost | `cost-by-class`: `source`, `classes` |
 | Test Suite | `cycles`: `testsFirst`, `testsLast`, `testsDelta` |
-| What Was Built | `today.merges`, `target-git.commitSample` (a capped sample; `commits` is the true count), the `git log` lines |
+| What Was Built | `today.merges` (when `mergesUnavailable`, print `n/a (<mergesNote>)`; when `mergesTruncated`, the list is a floor), `target-git.commitSample` (a capped sample; `commits` is the true count), the `git log` lines |
 | What Failed | `cycles`: `failed`, `abandoned`, the non-merged entries of `recent`, `repeatedTasks` |
 | Backlog Flow | `board.byLabel` (`board.truncated` makes every count a floor) |
 | Kill-chain | `reframe-saves`: `count`, `undateable`; `kill-chain`: `verdict`, `ledger`, `baseline` |

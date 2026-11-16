@@ -632,6 +632,15 @@ describe("--text renderers for cycles, board and memory", () => {
     assert.doesNotMatch(renderText("board", collectBoard(rows, 200)), /at least/);
   });
 
+  test("board: sample rows render '#n title' with whitespace collapsed, cap three", () => {
+    const rows = [1, 2, 3, 4].map((n) => ({ number: n, title: n === 1 ? "fix\nthe  thing" : `t${n}`, labels: ["x"] }));
+    const out = renderText("board", collectBoard(rows, 200));
+    assertShape("board", out);
+    assert.equal(out.split("\n").length, 2);
+    assert.match(out, /x: 4 \(#1 fix the thing; #2 t2; #3 t3\)/);
+    assert.doesNotMatch(out, /#4/);
+  });
+
   test("board: an empty board is one line with no detail rows", () => {
     const out = renderText("board", collectBoard([], 200));
     assertShape("board", out);

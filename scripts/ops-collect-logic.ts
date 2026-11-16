@@ -981,7 +981,7 @@ const TEXT: { [K in keyof TextData]: (data: TextData[K]) => string } = {
     return [
       `${d.truncated ? "at least " : ""}${d.open} open issues, ${labels.length} labels${d.truncated ? " (read limit hit, counts are a floor)" : ""}`,
       ...labels.map(([label, n]) => {
-        const nums = (d.samples[label] ?? []).map((s) => `#${s.number}`).join(" ");
+        const nums = (d.samples[label] ?? []).map((s) => `#${s.number} ${s.title.replace(/\s+/g, " ").trim()}`.trim()).join("; ");
         return `  ${label}: ${n}${nums ? ` (${nums})` : ""}`;
       }),
     ].join("\n");
