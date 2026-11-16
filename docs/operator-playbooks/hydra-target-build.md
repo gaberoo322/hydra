@@ -474,7 +474,7 @@ mirror at `$HYDRA_GATE_DIR/scripts/target/target-design-concept.ts` (synced
 into the sibling scratch dir by Step 0.6); this step is
 the I/O wrapper. Invoke its subcommands through the `$DC_CLI` path under
 `$HYDRA_GATE_DIR` (the mirror is a sibling of the worktree, so a cwd-relative
-path can no longer reach it) — never from `~/hydra`.
+path cannot reach it) — never from `~/hydra`.
 
 **Gate on risk-critical first — safe-path builds skip this step entirely.**
 `shouldCaptureDesignConcept()` routes on the keystone classifier
