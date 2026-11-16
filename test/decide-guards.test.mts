@@ -1442,8 +1442,8 @@ describe("target-wip.py — liveness-aware Target WIP predicate (issue #4475)", 
     assert.doesNotMatch(step1, /\/3 in-progress/, "the WIP limit literal must live only in target-wip.py");
   });
 
-  test("decide.py suppresses dev_target on target_wip_saturated for EITHER trigger", () => {
-    for (const trigger of ["target_work_available", "target_board_work_available"]) {
+  test("decide.py suppresses dev_target on target_wip_saturated on the target_board_work_available trigger", () => {
+    for (const trigger of ["target_board_work_available"]) {
       const dir = mkdtempSync(join(tmpdir(), "decide-target-wip-"));
       try {
         const statePath = join(dir, "state.json");

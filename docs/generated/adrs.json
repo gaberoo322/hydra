@@ -920,7 +920,8 @@
         "docs/operator-playbooks/hydra-target-research.md",
         "docs/operator-playbooks/hydra-target-retro.md",
         "docs/operator-playbooks/hydra-target-sweep.md",
-        "docs/operator-playbooks/hydra-wire-or-retire.md"
+        "docs/operator-playbooks/hydra-wire-or-retire.md",
+        "docs/reference.md"
       ],
       "source": {
         "path": "docs/adr/0031-target-tracking-migrates-to-github-issues.md"
@@ -1055,7 +1056,8 @@
         "CONTEXT-MAP.md",
         "CONTEXT.md",
         "docs/historical/README.md",
-        "docs/historical/candidate-feed.md"
+        "docs/historical/candidate-feed.md",
+        "docs/reference.md"
       ],
       "source": {
         "path": "docs/adr/0036-anchor-selection-retired-candidate-feed.md"

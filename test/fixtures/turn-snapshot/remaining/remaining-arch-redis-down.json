@@ -41,7 +41,6 @@
           "ok": false,
           "reason": "redis-unreachable: down"
         },
-        "workQueue": 0,
         "board": {
           "ok": true,
           "value": {

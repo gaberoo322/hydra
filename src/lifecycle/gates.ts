@@ -184,11 +184,14 @@ export interface GateInput {
 const pass = (code = "ok"): GateResult => ({ ok: true, code });
 const fail = (code: string): GateResult => ({ ok: false, code });
 
-/** Judgment transitions: closed `--reason` list for the target + non-empty rationale. */
+/** Judgment transitions: closed `--reason` list for the target + non-empty rationale; `-> ready-for-agent` also needs a scope section. */
 export function gateJudgment(input: GateInput): GateResult {
   if (!input.reason) return fail("reason-required");
   if (!isAllowedReason(input.to, input.reason)) return fail("reason-not-allowed");
   if (!input.rationale || input.rationale.trim().length === 0) return fail("rationale-required");
+  // issue-label-validation.yml reverts a `ready-for-agent` write whose issue has
+  // no parseable `## Files in scope`; refuse it at the seam instead (#5570).
+  if (input.to === "ready-for-agent" && !hasScopeSection(input.body ?? "")) return fail("scope-section-missing");
   return pass();
 }
 

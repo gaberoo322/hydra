@@ -71,10 +71,7 @@ echo "=== Config ==="; find ~/hydra/config -name '*.md' | wc -l
 ### Autonomy
 ```bash
 systemctl --user list-units --type=service --state=failed 2>/dev/null | grep hydra
-# Target commit cadence -- needs the Target seam resolved in this block (see Architecture Shape).
-# Target seam (scripts/target/print-target-facts.ts, ADR-0002 / ADR-0013): never a
-# literal checkout path. On failure --sh prints nothing, TARGET_WS stays empty and
-# every Target collector below is skipped, never substituted with a default path.
+# Target commit cadence: same Target seam as Architecture Shape (empty TARGET_WS -> skipped).
 unset TARGET_WS TARGET_APP_DIR
 eval "$(cd ~/hydra && npx tsx scripts/target/print-target-facts.ts --sh)"
 [ -n "${TARGET_WS:-}" ] || echo "Target unresolved -- skipping Target collectors"
@@ -106,9 +103,9 @@ Surface specific techniques, not vague advice.
 1. **Decision Loop Quality** — merge rate, ceremony overhead, efficiency
 2. **Research → Action Pipeline** — conversion rate, repeated topics, idea death
 3. **Grounding & Verification** — bug categories slipping through, rollback frequency
-4. **Agent Quality** — planner novelty, preflight gate effectiveness (high-risk review catches for risk:high tasks), executor minimalism
+4. **Agent Quality** — design-concept gate outcomes (auto-approve vs hydra-grill handoff rate), QA first-FAIL rate and severity mix, dev PR scope discipline (scope-check hits)
 5. **Autonomy Level** — operator intervention rate, recurring manual steps
-6. **Knowledge & Learning** — memory rule usefulness, OV search quality
+6. **Knowledge & Learning** — memory rule usefulness, Pattern Memory / Reflections re-injection hit rate
 7. **Architecture Fitness** — bottlenecks, maintainability, simpler alternatives
 8. **Cost Efficiency** — cost/merged feature, model routing, ROI of research vs build
 

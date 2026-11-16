@@ -13,6 +13,10 @@ the recorded stdout and exported globals were dropped with the kv renderers.
 The recipe below reproduces the original bash capture (stdout form) from git
 history.
 
+#5570 hand-trimmed the retired `hydra:anchors:*` queue keys (work-queue, reframe-queue,
+prior-failures) and the `arch-idle-but-work-queue` scenario from `capture/scenarios.mjs`;
+the recipe no longer reproduces the original capture byte for byte.
+
 Recipe (`capture/`):
 
 ```bash

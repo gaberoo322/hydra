@@ -1,0 +1,1 @@
+- refactor: retire the writerless anchor-queue readers and the target_work_available signal; the sweep promotes only issues with a Files in scope section (#5570)

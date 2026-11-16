@@ -4,7 +4,7 @@
  * write) through (ADR-0043 slice 5B, #4933).
  *
  * One method per Redis operation the strangled bash made through
- * `docker exec hydra-redis-1 redis-cli …`: the three anchor-queue `LLEN`s, the
+ * `docker exec hydra-redis-1 redis-cli …`: the
  * scout calendar-walk and architecture-pass `GET`s, the scout token `HGET`, and
  * the `SET hydra:scout:spend:<DATE> <tokens> EX 604800` mirror (kept — a
  * behaviour-preserving move, ADR-0040 D6 / ADR-0043 D4). Tests hand the
@@ -23,19 +23,14 @@ import { getSkillTokensRaw } from "../../redis/cost.ts";
 import { getScoutLastCalendarWalk, setScoutSpendDaily } from "../../redis/scout.ts";
 import {
   closeTurnSnapshotRedis,
-  getAnchorQueueLength,
   getArchitectureLastRun,
   quietTurnSnapshotRedisErrors,
-  type AnchorQueueName,
 } from "../../redis/turn-snapshot.ts";
-
-export type { AnchorQueueName } from "../../redis/turn-snapshot.ts";
 
 /** The skill whose daily token spend the scout cost-cap mirrors (issue #532). */
 const SCOUT_SKILL = "hydra-tool-scout";
 
 export interface TurnSnapshotRedis {
-  anchorQueueLength(queue: AnchorQueueName): Promise<Classified<number>>;
   scoutLastCalendarWalk(): Promise<Classified<string | null>>;
   architectureLastRun(): Promise<Classified<string | null>>;
   /** `HGET hydra:metrics:tokens:by-skill:daily:<isoDate> hydra-tool-scout`. */
@@ -48,7 +43,6 @@ export interface TurnSnapshotRedis {
 
 /** The raw operations under the production port (injectable so the bounding is testable without Redis). */
 export interface TurnSnapshotRedisOps {
-  anchorQueueLength(queue: AnchorQueueName): Promise<number>;
   scoutLastCalendarWalk(): Promise<string | null>;
   architectureLastRun(): Promise<string | null>;
   scoutTokens(isoDate: string): Promise<string | null>;
@@ -59,7 +53,6 @@ export interface TurnSnapshotRedisOps {
 
 /** The production ops: the src/redis typed accessors over the shared connection. */
 const accessorOps: TurnSnapshotRedisOps = {
-  anchorQueueLength: getAnchorQueueLength,
   scoutLastCalendarWalk: getScoutLastCalendarWalk,
   architectureLastRun: getArchitectureLastRun,
   scoutTokens: (isoDate) => getSkillTokensRaw(isoDate, SCOUT_SKILL),
@@ -117,7 +110,6 @@ export function createTurnSnapshotRedis(opts: TurnSnapshotRedisOptions = {}): Tu
   }
 
   return {
-    anchorQueueLength: (queue) => bounded(() => ops.anchorQueueLength(queue)),
     scoutLastCalendarWalk: () => bounded(() => ops.scoutLastCalendarWalk()),
     architectureLastRun: () => bounded(() => ops.architectureLastRun()),
     scoutTokens: (isoDate) => bounded(() => ops.scoutTokens(isoDate)),

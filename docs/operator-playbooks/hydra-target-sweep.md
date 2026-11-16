@@ -195,7 +195,7 @@ The 90-minute version gives operators a fast feedback signal when the WIP slots 
 
 ### 6. (retired) Prior-failures list
 
-The Redis `hydra:anchors:prior-failures` list is retired with the substrate migration (ADR-0031). Recurring-failure signal now lives on the issue itself — a reframed issue carries its retry history in its body, and the enforced `Closes #N` close-discipline plus the merged-title overlap check (Step 2/4) is what removes work already shipped. No separate prior-failures sweep is needed.
+The Redis prior-failures list is retired with the substrate migration (ADR-0031). Recurring-failure signal now lives on the issue itself — a reframed issue carries its retry history in its body, and the enforced `Closes #N` close-discipline plus the merged-title overlap check (Step 2/4) is what removes work already shipped. No separate prior-failures sweep is needed.
 
 ### 7. Detect completed board items
 

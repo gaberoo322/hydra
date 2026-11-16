@@ -44,7 +44,6 @@
           "ok": true,
           "value": null
         },
-        "workQueue": 0,
         "board": {
           "ok": false,
           "reason": "malformed-payload"

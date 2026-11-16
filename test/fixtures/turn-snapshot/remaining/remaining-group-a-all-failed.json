@@ -3,7 +3,6 @@
   "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
   "capturedFrom": "scripts/autopilot/collect-state.sh @ 46347d1714f563e41a579cebadc1d102e8efaf4c (collect_redis_queues + collect_scout + collect_arch_cleanup_boards + collect_hitl_grill)",
   "collectors": [
-    "redis-queues",
     "scout",
     "arch-cleanup-boards",
     "hitl-grill"
@@ -63,20 +62,6 @@
     "httpCalls": [],
     "redisWrites": [],
     "values": {
-      "redis-queues": {
-        "work-queue": {
-          "ok": false,
-          "reason": "redis-unreachable: down"
-        },
-        "reframe-queue": {
-          "ok": false,
-          "reason": "redis-unreachable: down"
-        },
-        "prior-failures": {
-          "ok": false,
-          "reason": "redis-unreachable: down"
-        }
-      },
       "scout": {
         "lastWalkIso": {
           "ok": false,
@@ -97,7 +82,6 @@
           "ok": false,
           "reason": "redis-unreachable: down"
         },
-        "workQueue": 0,
         "board": {
           "ok": false,
           "reason": "gh-read-failed"

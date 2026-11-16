@@ -48,8 +48,7 @@ prevent that gate-re-parsing round-trip:
   constant in `board-saturation.ts`. It is the anti-feedback-loop guard: a board
   that already holds enough proposal-grade architecture work suppresses the scan.
 - **`arch_fallback_due`** is the "nothing else to do, go deepen" trigger. It is
-  true when `ready_for_agent`, `needs_research`, `needs_triage` and the
-  `hydra:anchors:work-queue` count are all 0.
+  true when `ready_for_agent`, `needs_research` and `needs_triage` are all 0.
 
 The per-class cooldown is the back-stop, honoured by the shared
 `signal_is_cooled` guard. The class's `scope` column is `orch` (it scans the
