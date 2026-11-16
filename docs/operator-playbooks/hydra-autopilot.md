@@ -161,8 +161,8 @@ any playbook prose:
   (`npm run docs:inventories` after an edit; the drift test pins it), grouped
   by lifecycle stage, every class linked to its skill view.
 - **Rationale:** each row's `notes` column carries the per-class rationale
-  (issue refs, protocol pointers, and the model rationale the routing section
-  below used to duplicate as a table column).
+  (issue refs and protocol pointers); the model reasoning is in the dispatch
+  reference's Model routing rationale.
 
 The one structural fact the table cannot carry — which classes are pipeline
 slots vs signal classes — is the section title above and the slot semantics
@@ -613,10 +613,10 @@ hydra-target-build Step 0.6 runs):
 **`dev_orch` dispatches carry a SECOND required preamble block — the
 forbidden-ending rule (issue #3866), unchanged.** Append verbatim, immediately
 after the worktree-guard preamble above, for every `dev_orch` dispatch. As of
-issue #4272, `qa_orch` and `dev_target` no longer share this block — each
-carries its OWN forbidden-ending preamble variant instead (the `qa_orch`
-blocking-fan-out variant, appended after the `dev_target` block further down;
-the `dev_target` delegated-mode variant, immediately below this one). Every
+issue #4272, `qa_orch` and `dev_target` each carry their OWN forbidden-ending
+preamble variant (the `qa_orch` blocking-fan-out variant, appended after the
+`dev_target` block further down; the `dev_target` delegated-mode variant,
+immediately below this one) and never this block. Every
 code-writing dispatch class carries EXACTLY ONE forbidden-ending block, chosen
 by class — never this block composed with either variant:
 
@@ -822,7 +822,7 @@ SKILL.md). Read it before proposing to relax the rule.
 
 ## Safety rules
 
-1. NEVER modify `~/hydra` or `~/hydra-betting` working trees directly.
+1. NEVER modify the orchestrator working tree (`~/hydra`) or the Target workspace (`$TARGET_WS`, from the Target facts seam) directly.
 2. Worktree-guard preamble is mandatory for every code-writing dispatch — the default variant for `dev_orch` and every other class whose plan action carries `isolation: "worktree"`, the self-isolation variant (`_fragments/target-self-isolation-preamble.md`) for every class whose action carries `isolation: "self"` (never the default: its cwd-ABORT clause false-aborts a class launched without `isolation="worktree"`, issues #4178/#4476).
 3. One subagent per pipeline slot.
 4. Token budget is a hard cap; subagent caps (#395) bound a single misbehaving subagent.

@@ -1,175 +1,110 @@
 # hydra-autopilot — Phase 6 operational detail
 
-Read this file for the full implementation contract of Phase 6: cycle-record
-writes, register handoff on auto-merge, and token-surrogate write. The running
-autopilot calls `dispatch.sh cycle-record` and `POST /api/holdback/pending`
-directly — read this when debugging a missing record or metric.
+Read this file when debugging a missing cycle record, a missing holdback
+enrollment or a token metric that did not move. The running autopilot calls
+`dispatch.sh cycle-record` and `dispatch.sh holdback-pending` directly. The
+orchestrator runs no self-driving cycle (ADR-0006), so subagent outcomes
+reach `hydra:cycle:*` records only through the writes this file describes.
 
-### Phase 6 cycle-record contract (issue #430)
+## Cycle-record contract
 
-After PR-3 (#383) deleted the in-process control loop (ADR-0006), `src/cycle.ts`
-declared that autopilot subagents would write their own `hydra:cycle:*`
-records. That handoff is implemented by `POST /api/autopilot/cycle-record`
-(see `src/api/autopilot-lifecycle.ts`), invoked via `dispatch.sh cycle-record`.
-
-The cycle-record write fires at **reap time**:
+`POST /api/autopilot/cycle-record` (`src/api/autopilot-lifecycle.ts`, invoked by
+`dispatch.sh cycle-record`) writes the cycle record at **reap time**:
 
 1. **`reap.py completion`** — when a code-writing class (`hydra-dev` /
-   `hydra-target-build`) reaps, it fires cycle-record with `status=completed`
-   (or `status=failed` if the soft cap was tripped). The `cycleId` is the
-   dispatch's **`effective_cycle_id = worktree_branch or task_id`** (`reap.py` symbol `effective_cycle_id`,
-   issue #3391): for a worktree/feature-branch dispatch it is the synthesised
-   worktree branch (`worktree-agent-<runToken>-t<N>-<slot>`); only a branch-less
-   signal-class completion keys on the bare autopilot task_id. Either way the id
-   gives natural dedup across retries. This write has no PR number (reap.py runs
-   before the merge lands), so it files the record with NO PR/files data — the
-   merged-status enrichment (below) fills them in **and MUST key on the SAME
-   `effective_cycle_id`**, or it mints an un-joinable bare-UUID twin with no
-   anchorType → `unclassified` (issue #3539). The arming step therefore forwards
-   the worktree branch to `holdback-pending` (see the register handoff below).
+   `hydra-target-build`) reaps, it files the record with `status=completed`, or
+   `status=failed` when the soft token cap tripped. The `cycleId` is the
+   dispatch's `effective_cycle_id = worktree_branch or task_id` (the `reap.py`
+   symbol of the same name): a worktree dispatch keys on its synthesised branch
+   (`worktree-agent-<runToken>-t<N>-<slot>`), and only a branch-less
+   signal-class completion keys on the bare autopilot `task_id`. The id gives
+   dedup across retries. Reap runs before the merge lands, so this write carries
+   no PR number and no files data.
+2. **Merged-status enrichment** — once the registered PR lands, the
+   merge-completion watcher (`src/scheduler/chores/holdback-merge-watch.ts`)
+   fetches the merged PR's `changedFiles` and calls
+   `recordCycle({cycleId, prNumber, filesChanged})` in-process. `recordCycle` is
+   idempotent on `cycleId`, so the second call enriches the existing record
+   without re-firing any lifetime counter. The enrichment must key on the SAME
+   `effective_cycle_id`; a different key mints an un-joinable twin with no
+   `anchorType`, which classifies as `unclassified`. The arming step therefore
+   forwards the worktree branch to `holdback-pending`.
 
-The **merged-status enrichment** — the follow-up that stamps `filesChanged` +
-`prNumber` on the already-recorded metrics hash (issue #2063) — is NO LONGER
-posted by the auto-merge handler. It now fires **in-process** from the
-merge-completion watcher (`src/scheduler/chores/holdback-merge-watch.ts`, issue
-#2623): once a registered PR (see the register handoff below) lands, the watcher
-fetches the merged PR's `changedFiles` and calls `recordCycle({cycleId,
-prNumber, filesChanged})` itself. Because `recordCycle` is idempotent on
-`cycleId`, that duplicate post ENRICHES the existing record WITHOUT re-firing any
-lifetime counter — the same enrichment semantics the auto-merge follow-up used
-to carry, but coupled to the merge event in-process rather than shelled out from
-the playbook.
+The reap-time write covers three surfaces atomically, server-side:
 
-The reap-time write covers three surfaces atomically server-side:
+- `hydra:cycle:<id>` hash and the `hydra:cycle:index` ZSET, read by
+  `/api/cycle/history`
+- `hydra:metrics:<id>` via `recordCycleMetrics(source: "claude")`, read by
+  `/api/metrics` and `mergeRateWindow` from `GET /api/scheduler/status`
+- the `hydra:scheduler:cycles-run`, `cycles-merged`, `cycles-failed` and
+  `cycles-unaccounted` lifetime counters, read as `mergeRateLifetime` from
+  `GET /api/scheduler/status`
 
-- `hydra:cycle:<id>` hash + `hydra:cycle:index` ZSET → `/api/cycle/history`
-- `hydra:metrics:<id>` via `recordCycleMetrics(source: "claude")` →
-  `/api/metrics` and `mergeRateWindow` (from `GET /api/scheduler/status`) (carries the
-  enriched `filesChanged` count once the watcher posts the merged enrichment)
-- `hydra:scheduler:cycles-run`, `hydra:scheduler:cycles-merged`, `hydra:scheduler:cycles-failed`, `hydra:scheduler:cycles-unaccounted` lifetime counters →
-  `mergeRateLifetime` (from `GET /api/scheduler/status`)
+`dispatch.sh cycle-record` is best-effort: a 5xx or unreachable API is logged to
+the run log and the autopilot proceeds.
 
-`dispatch.sh cycle-record` is best-effort: a 5xx or unreachable API is logged
-to the nightly run log and the autopilot proceeds.
+## Register handoff on auto-merge
 
-### Phase 6 register handoff on auto-merge (issues #2055, #2621–#2624)
+`gh pr merge --auto --squash` runs only once `scripts/ci/qa-merge-guard.ts`
+allows it (see the `auto-merge` action row in the main playbook). It arms the
+merge, so the PR may land seconds to minutes later, out-of-band from the turn.
+The handler therefore **registers** the armed PR and hands both merge-coupled
+follow-ups, the Outcome-Holdback enrollment and the merged cycle-record
+enrichment, to the merge-completion watcher.
 
-The auto-merge handler no longer holds the merge — `gh pr merge --auto --squash`
-(run only once `scripts/ci/qa-merge-guard.ts` allows it; see the `auto-merge`
-action row, issue #4738) ARMS auto-merge, so the PR may land seconds to minutes later, out-of-band from
-this print-mode turn. Rather than block the turn waiting for the squash SHA, the
-handler simply **registers** the armed PR and hands both merge-coupled
-follow-ups (Outcome-Holdback enroll + the merged cycle-record enrichment) to the
-in-process **merge-completion watcher** (`src/scheduler/chores/holdback-merge-watch.ts`,
-issue #2623).
-
-After the guarded arm (`qa-merge-guard.ts` allows, then `gh pr merge --auto --squash`) succeeds for an
-`auto-merge` action, fire ONE register call:
+After the guarded arm succeeds, fire ONE register call:
 
 ```bash
-# The ONLY post-merge follow-up the handler makes. $pr_number is the just-armed
-# PR; $pr_tier is the integer tier from the auto-merge action payload
-# (state.actions[].tier, 1–4 per ADR-0015, or empty/`null` for unknown-tier);
-# $task_id is the autopilot task_id. Best-effort: a non-2xx or unreachable
-# endpoint is logged and the autopilot cycle proceeds — registration NEVER blocks
-# or delays a merge.
-#
-# Issue #3078: this arming step is now the AUDITED `dispatch.sh holdback-pending`
-# subcommand (mirroring `cycle-record` / `capacity-writeback`), NOT an inlined
-# `curl … | jq …`. That inlined step was the drop-prone spaghetti that left the
-# Outcome Attribution Spine ledger dark for 7+ days when a print-mode turn dropped
-# the POST. The subcommand centralises the body-shape + the HYDRA_API_BASE origin
-# resolution, and the cycle-merge-reconcile chore now self-arms any confirmed-
-# merged PR still missing from the registry — so a dropped arm is recovered on the
-# next housekeeping tick with no new event surface.
-#
-# Issue #2800: pass an EXPLICIT anchorType (4th arg) so the merge-watch enrichment
-# classifies the cycle even when it becomes the FIRST cycle-record write (the
-# qa_orch relay case, where reap never wrote a record for this cycleId). Without
-# it, the bare-UUID cycleId falls through the slot-suffix inference to the
-# `unclassified` sentinel — the data-quality gap.
-#
-# Issue #3579: RESOLVE the anchorType from the arming action's dispatch SKILL
-# through the ONE shared `resolve_anchor_type_from_skill` mapping in
-# `scripts/autopilot/dispatch.sh` — do NOT blanket-default to `work-queue`. The
-# old `${pr_anchor_type:-work-queue}` default mislabelled EVERY non-dev arm (a
-# discover/architecture/qa/grill arm all became `work-queue`), and because the
-# merge-watch chore forwards the pending entry's anchorType onto the FIRST
-# cycle-record write for an un-joinable cycleId, that wrong lane became the
-# record's permanent classification. Export `HYDRA_ARM_SKILL=<dispatch-skill>`
-# (the `hydra-*` skill of the auto-merge action's producing class) and let the
-# subcommand resolve it: a mapped skill yields its true lane; an unmapped/unknown
-# skill (or an unset HYDRA_ARM_SKILL with no literal 4th arg) omits the field and
-# degrades to the merge-watch inference-then-`unclassified` path — an honest
-# `unclassified` beats a confidently-wrong lane (NEVER-GUESS, #2822). A caller
-# that already holds the literal lane may still pass it as the 4th positional
-# (which takes precedence over HYDRA_ARM_SKILL).
-#
-# Issue #3539: pass the dispatch's synthesised worktree branch (5th arg). It
-# becomes the pending entry's cycleId, so the merge-watch enrichment keys on the
-# SAME `effective_cycle_id = worktree_branch or task_id` reap used for its
-# CLASSIFIED cycle-record (`reap.py` `effective_cycle_id`). Without it, arming keyed the pending
-# entry on the bare $task_id while reap keyed its classified record on the branch
-# — divergent keys — so on every worktree dispatch the enrichment became an
-# un-joinable bare-UUID FIRST write with no anchorType → `unclassified` (the
-# recurring 14% gap, the #3391 un-joinable-twin defect on the anchorType axis).
-# $pr_worktree_branch is the branch of the dispatch slot that opened the PR
-# (`state.slots.<class>.branch`); empty for a branch-less signal-class arm (then
-# the cycleId stays $task_id, matching reap's `or task_id`). Omitting the 5th arg
-# degrades to the prior task_id-keyed behaviour.
-# Resolve the anchorType from the producing dispatch skill (issue #3579). Export
-# HYDRA_ARM_SKILL so the subcommand maps the class → lane through the one shared
-# table; leave $pr_anchor_type empty (no blanket work-queue default) so an
-# unmapped class degrades to omit → unclassified rather than a wrong lane.
+# pr_number: the armed PR. pr_tier: state.actions[].tier (1-4), or null. task_id: the autopilot task_id.
+# HYDRA_ARM_SKILL: the hydra-* skill of the class that produced the action; dispatch.sh maps it to an
+#   anchorType, and an unmapped skill omits the field (honest `unclassified` beats a wrong lane).
+# pr_worktree_branch: state.slots.<class>.branch of the dispatch that opened the PR (empty for a
+#   branch-less signal class, so the cycleId stays $task_id). A literal 4th arg beats HYDRA_ARM_SKILL.
+# Best-effort: a non-2xx or unreachable endpoint is logged and the cycle proceeds.
 HYDRA_ARM_SKILL="${pr_arm_skill:-}" \
 scripts/autopilot/dispatch.sh holdback-pending \
   "$pr_number" "${pr_tier:-null}" "$task_id" "${pr_anchor_type:-}" "${pr_worktree_branch:-}"
 ```
 
-`POST /api/holdback/pending` (`src/api/holdback.ts`, issue #2622) records the
-armed PR into the durable **pending-enroll registry** (idempotent on `prNumber`;
-it records intent only — it never arms, blocks, or performs a merge). The
-merge-completion watcher then consumes that registry each housekeeping tick and,
-for each entry whose merge has landed, fires BOTH merge-coupled follow-ups
-in-process:
+`POST /api/holdback/pending` (`src/api/holdback.ts`) records the armed PR in the
+durable **pending-enroll registry**. It is idempotent on `prNumber` and records
+intent only; it never arms, blocks or performs a merge. The cycle-merge-reconcile
+chore self-arms any confirmed-merged PR missing from the registry, so a dropped
+arm recovers on the next housekeeping tick. Each housekeeping tick, the watcher
+consumes the registry and, for each entry whose merge has landed, fires both
+follow-ups:
 
 1. **Outcome-Holdback enroll** — `enrollHoldback({commitSha, prNumber, tier})`
-   against the landed squash SHA (ADR-0004 step 4, #786). Outcome Holdback
-   **carries up** the monotonic tier ladder (#741, ADR-0015) — **T2, T3, and T4
-   merges all enroll** while **T1 (prompt-shaped) and unknown-tier merges are
-   exempt** (`enrollHoldback` enforces the carry-up exemption server-side, so the
-   single source of truth for the invariant stays on the server). The watcher
-   POSTs the `tier` from the register call verbatim; do NOT add a client-side
-   `if tier in {2,3,4}` guard.
+   against the landed squash SHA (ADR-0015 owns the holdback step). Outcome
+   Holdback carries up the monotonic tier ladder: T2, T3 and T4 merges enroll,
+   while T1 and unknown-tier merges are exempt. `enrollHoldback` enforces the
+   exemption server-side, so the watcher posts the `tier` verbatim and the
+   playbook adds no client-side tier guard.
 2. **Merged cycle-record enrichment** — `recordCycle({cycleId, prNumber,
-   filesChanged})` (issue #2063), idempotent-enriching the reap-time record.
+   filesChanged})`, as in the cycle-record contract.
 
-The watcher is idempotent (per-PR enrolled marker), leaves a still-open PR in the
-registry for a later tick, and never throws (all best-effort). So the auto-merge
-handler is reduced to *arm the merge, register the PR* — it holds no merge SHA
-and makes no enroll/cycle-record call itself. The **check** mechanism that
-watches each enrolled merge lives in the `hydra-qa` Post-merge Regression Check
-section B.
+The watcher is idempotent through a per-PR enrolled marker, leaves a still-open
+PR in the registry for a later tick, and never throws. The handler holds no merge
+SHA and makes no enroll or cycle-record call itself. The `hydra-qa` Post-merge
+Regression Check section B watches each enrolled merge.
 
-### Phase 6 token-surrogate write (issue #394)
+Historical: ADR-0004 first described the holdback enroll step. <!-- ref-check: example -->
 
-After PR-3 (#383) deleted `codex-runner.ts` (the Codex CLI, retired by ADR-0006), the legacy `recordSpend` writer
-that fed the retired daily-spend surrogate for code-writing work was removed.
-The autopilot now owns the daily-spend signal via a token surrogate. `reap.py` posts it on every reap that has authoritative `total_tokens` (the `wait_or_reap` / `reap` action-table rows in the main playbook) — the parent never hand-posts `/api/metrics/tokens`, which would double-count.
+## Token-surrogate write
 
-`reap.py`'s token post is best-effort and idempotent at the autopilot's `reaped_task_ids`
-layer (the reaper already dedupes by `task_id` before firing follow-up
-writes, so the same `cycleId` never bumps the counter twice). The endpoint
+`reap.py` posts the token surrogate on every reap that has authoritative
+`total_tokens` (the `wait_or_reap` and `reap` action-table rows in the main
+playbook). The parent never hand-posts `/api/metrics/tokens`, which would
+double-count. The post is best-effort and idempotent: the reaper dedupes by
+`task_id` through `reaped_task_ids` before firing follow-up writes. The endpoint
 bumps three Redis keys:
 
 - `hydra:metrics:tokens:autopilot:daily:<YYYY-MM-DD>` — INT total
 - `hydra:metrics:tokens:by-skill:daily:<YYYY-MM-DD>` — HASH {skill -> tokens}
 - `hydra:metrics:tokens:by-cycle:<cycleId>` — HASH {tokens, skill}
 
-The first two have a 30-day TTL; the per-cycle hash has 7 days. The
-dashboard `CostWidget` (Metrics page) reads these via `GET /api/metrics/cost`
-and surfaces a clearly-labelled `source` so the operator never mistakes
-surrogate USD for real billed spend. Dollar conversion uses
-`HYDRA_TOKEN_USD_RATE` (USD per million tokens, default 0 — operators must
-opt in to a rate they trust).
-
+The key TTLs live in the handler behind `POST /api/metrics/tokens`. The
+dashboard `CostWidget` reads these keys via `GET /api/metrics/cost` and labels
+its `source`, so surrogate USD is never mistaken for billed spend. Dollar
+conversion uses `HYDRA_TOKEN_USD_RATE` (USD per million tokens; the default
+makes the dollar figure zero until an operator sets a trusted rate).
