@@ -185,22 +185,23 @@ export function resolveQaPr(
     if (n !== null && n > 0) return n;
     break;
   }
-  return singleClosingPr(openPrs, issue);
+  return singleClosingPr(openPrs, issue, true);
 }
 
 /**
  * The one OPEN, non-draft PR whose body closes the issue; null for a failed PR
- * read, zero candidates or 2+ candidates. Drafts are dropped before counting.
+ * read, zero candidates or 2+ candidates. Drafts are dropped before counting unless
+ * `includeDrafts` (the qa-passed exit, resolveQaPr, stays draft-agnostic: INV-3).
  */
-export function singleClosingPr(openPrs: readonly OpenPrRef[] | null, issue: number): number | null {
+export function singleClosingPr(openPrs: readonly OpenPrRef[] | null, issue: number, includeDrafts = false): number | null {
   if (openPrs === null) return null;
-  const candidates = closingPrs(openPrs, issue);
+  const candidates = closingPrs(openPrs, issue, includeDrafts);
   return candidates.length === 1 ? candidates[0].number : null;
 }
 
 /** The one definition of a candidate: OPEN, non-draft PRs whose body closes the issue (#5489 INV-3). */
-export function closingPrs(openPrs: readonly OpenPrRef[], issue: number): OpenPrRef[] {
-  return openPrs.filter((p) => p.isDraft !== true && bodyClosesIssue(p.body, issue));
+export function closingPrs(openPrs: readonly OpenPrRef[], issue: number, includeDrafts = false): OpenPrRef[] {
+  return openPrs.filter((p) => (includeDrafts || p.isDraft !== true) && bodyClosesIssue(p.body, issue));
 }
 
 /** The newest written entry that carries a destination state, or null. */
