@@ -138,3 +138,19 @@ export const MECHANICAL_COMPANIONS: readonly string[] = [
   "test/fixtures/test-subject-baseline.json",
   "test/fixtures/test-title-provenance-baseline.json",
 ];
+
+/**
+ * The scope gate's path matcher: exact, prefix either way, or suffix match
+ * against any entry of `list`. Shared by `classifyScope` (scripts/ci/scope-check.ts)
+ * and the QA packet so the gate and the packet cannot disagree (issue #5528).
+ */
+export function matchesScopeList(target: string, list: readonly string[]): boolean {
+  if (list.length === 0) return false;
+  if (list.includes(target)) return true;
+  return list.some((s) => target.startsWith(s) || s.startsWith(target) || target.endsWith(s));
+}
+
+/** True when `path` is a gate-regenerated companion (see MECHANICAL_COMPANIONS). */
+export function isMechanicalCompanion(path: string): boolean {
+  return matchesScopeList(path, MECHANICAL_COMPANIONS);
+}

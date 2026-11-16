@@ -75,12 +75,13 @@ const DEFAULT_MIN_COUNT = 3;
 import {
   extractScopeFromBody,
   MECHANICAL_COMPANIONS,
+  matchesScopeList,
   extractSection,
   looksLikePath,
 } from "../../src/scope-section.ts";
 import { readChangedFiles } from "../../src/mutation-gate-inputs.ts";
 
-export { extractScopeFromBody, MECHANICAL_COMPANIONS };
+export { extractScopeFromBody };
 
 // Issue #3678 / #5528: paths always in scope (`.changelog/` fragments plus the
 // gate-regenerated companions) live in `MECHANICAL_COMPANIONS`
@@ -198,11 +199,7 @@ export function classifyScope(
   const scopeNormalised = inScope.map(normalisePath).filter((s) => s.length > 0);
   const outDeclaredNormalised = outOfScopeDeclared.map(normalisePath).filter((s) => s.length > 0);
 
-  const matches = (target: string, list: string[]): boolean => {
-    if (list.length === 0) return false;
-    if (list.includes(target)) return true;
-    return list.some((s) => target.startsWith(s) || s.startsWith(target) || target.endsWith(s));
-  };
+  const matches = matchesScopeList;
 
   // In-scope wins (issue #1872): drop from the declared out-of-scope set any
   // entry that also matches the in-scope set under the same matcher. A file the

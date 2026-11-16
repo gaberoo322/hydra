@@ -17,9 +17,9 @@ import {
   extractScopeJustifications,
   classifyScope,
   isTargetRepoPath,
-  MECHANICAL_COMPANIONS,
   validateIssueScope,
 } from "../scripts/ci/scope-check.ts";
+import { MECHANICAL_COMPANIONS, isMechanicalCompanion } from "../src/scope-section.ts";
 
 describe("extractScopeFromBody", () => {
   test("pulls backticked paths from a markdown ## section", () => {
@@ -422,12 +422,24 @@ describe("isTargetRepoPath (#2175)", () => {
   });
 });
 
-describe("MECHANICAL_COMPANIONS (issues #3678, #5528)", () => {
+describe("MECHANICAL_COMPANIONS", () => {
   // Classified-or-fail: a new gate-regenerated file must be listed or explicitly excluded.
   const COMPANION_EXCLUSIONS = ["test/fixtures/qa-cohort-baseline.json"];
 
   test("includes the .changelog/ prefix", () => {
-    assert.equal(MECHANICAL_COMPANIONS[0], ".changelog/");
+    assert.ok(MECHANICAL_COMPANIONS.includes(".changelog/"));
+  });
+
+  test("isMechanicalCompanion accepts dir-prefix and exact-file companions", () => {
+    assert.equal(isMechanicalCompanion(".changelog/5528-a.md"), true);
+    assert.equal(isMechanicalCompanion("docs/generated/routes.json"), true);
+    assert.equal(isMechanicalCompanion("scripts/ci/skill-size-baseline.json"), true);
+  });
+
+  test("isMechanicalCompanion rejects ordinary files and the deliberate ledger", () => {
+    assert.equal(isMechanicalCompanion("src/scope-section.ts"), false);
+    assert.equal(isMechanicalCompanion("docs/quality-gates.md"), false);
+    assert.equal(isMechanicalCompanion("test/fixtures/qa-cohort-baseline.json"), false);
   });
 
   test("every entry is a root-relative dir prefix ending in / or a full file path, never a suffix", () => {

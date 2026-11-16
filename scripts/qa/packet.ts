@@ -39,8 +39,7 @@ import {
 } from "../../src/schemas/qa-plumbing-cli.ts";
 import { ensurePrHead } from "../../src/qa/pr-head.ts";
 import { compareMergeDanger, parseMergeDangerField } from "../../src/qa/change-shape.ts";
-import { MECHANICAL_COMPANIONS } from "../../src/scope-section.ts";
-import { classifyScope } from "../ci/scope-check.ts";
+import { isMechanicalCompanion } from "../../src/scope-section.ts";
 import { detectOneWayDoor } from "../../src/qa/one-way-door.ts";
 import { loadCodingStandards, type LoadResult } from "../../src/qa/standards-loader.ts";
 
@@ -151,8 +150,7 @@ export async function runPacket(
   // creep. Filters the changed-file list read in 7.0 through the scope gate's own
   // matcher (classifyScope), so the gate and this packet cannot disagree.
   const changedNames = names.stdout.split("\n").filter((l) => l !== "");
-  const outside = new Set(classifyScope(changedNames, [...MECHANICAL_COMPANIONS]).outOfScope);
-  const hits = changedNames.filter((f) => !outside.has(f));
+  const hits = changedNames.filter(isMechanicalCompanion);
   const companionPaths = hits.length > 0 ? hits.join(", ") : "none";
   packet += `\n\nMechanical companions in this diff (gate-forced regenerations — never scope creep; ratchet direction is still reviewed): ${companionPaths}`;
 
