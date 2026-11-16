@@ -16,6 +16,7 @@ import {
   resolveQaPr,
   RECONCILE_ACTOR,
   closingPrs,
+  PR_COVERED_QA_BOUNCE_SKIP_MS,
   singleClosingPr,
   runReconcile,
   type OpenPrRef,
@@ -689,6 +690,18 @@ describe("PR-covered ready-for-agent promotion (#5489)", () => {
     assert.deepEqual(w.edits.map((e) => e.issue), [541]);
     assert.equal(report.prCovered.promoted, 1);
     assert.equal(report.prCovered.skippedQaFail, 1);
+  });
+
+  test("a needs-qa exit older than the skip window no longer blocks re-promotion once the PR is still open (#5489 expiry)", async () => {
+    const { w, add, journal } = world();
+    add(570, ["ready-for-agent"]);
+    w.prs = [closing(570)];
+    w.prRecords.set(1470, { number: 1470, state: "OPEN", body: "Closes #570" });
+    journal(570).push(je({ from: "needs-qa", to: "ready-for-agent", ts: NOW - PR_COVERED_QA_BOUNCE_SKIP_MS - 1000 }));
+    const report = await runReconcile(w.deps);
+    assert.deepEqual(w.edits.map((e) => e.issue), [570]);
+    assert.equal(report.prCovered.promoted, 1);
+    assert.equal(report.prCovered.skippedQaFail, 0);
   });
 
   test("an external needs-qa -> ready-for-agent move detected in the same pass is not undone by a re-promote", async () => {

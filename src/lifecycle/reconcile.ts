@@ -50,6 +50,8 @@ export const STALE_CLAIM_AGE_MS = 2 * 60 * 60 * 1000;
 /** Bound on stale-claim closes per reconcile pass. */
 export const MAX_STALE_CLAIM_CLOSES = 25;
 export const RECONCILE_ACTOR = "reconcile";
+/** How long a needs-qa exit blocks PR-covered re-promotion; after it the open PR is reviewed again (#5489). */
+export const PR_COVERED_QA_BOUNCE_SKIP_MS = 6 * 60 * 60 * 1000;
 export const INVALID_STATE_RESULT = "invalid:state-ambiguous";
 
 export interface OpenPrRef {
@@ -425,7 +427,9 @@ export async function runReconcile(deps: ReconcileDeps, opts: ReconcileOptions =
       // undone by re-promoting. `entries` includes this pass's external appends, so the last
       // written transition decides; a journal still at needs-qa while GitHub reads
       // ready-for-agent is an external move not yet journaled (timeline budget spent).
-      if (lastWrittenTransition(entries)?.from === "needs-qa" || lastKnownState(entries) === "needs-qa") {
+      const lastMove = lastWrittenTransition(entries);
+      const freshBounce = lastMove?.from === "needs-qa" && now - lastMove.ts < PR_COVERED_QA_BOUNCE_SKIP_MS;
+      if (freshBounce || lastKnownState(entries) === "needs-qa") {
         report.prCovered.skippedQaFail++;
         return;
       }
