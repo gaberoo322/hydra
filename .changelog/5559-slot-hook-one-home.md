@@ -1,0 +1,1 @@
+- docs: replace eleven overstated slot-lifecycle hook sections in playbooks with one shared fragment (#5559)

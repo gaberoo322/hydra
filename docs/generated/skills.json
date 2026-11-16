@@ -121,7 +121,8 @@
       "composedFrom": [
         "docs/operator-playbooks/_vendor/implement.md",
         "docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md",
-        "docs/operator-playbooks/_fragments/hydra-dev-child-flow.md"
+        "docs/operator-playbooks/_fragments/hydra-dev-child-flow.md",
+        "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
       ],
       "route": "/docs/skill/hydra-dev",
       "source": {
@@ -151,7 +152,9 @@
           "via": "default"
         }
       ],
-      "composedFrom": [],
+      "composedFrom": [
+        "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
+      ],
       "route": "/docs/skill/hydra-discover",
       "source": {
         "path": "docs/operator-playbooks/hydra-discover.md"
@@ -168,7 +171,9 @@
           "via": "default"
         }
       ],
-      "composedFrom": [],
+      "composedFrom": [
+        "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
+      ],
       "route": "/docs/skill/hydra-doctor",
       "source": {
         "path": "docs/operator-playbooks/hydra-doctor.md"
@@ -290,7 +295,8 @@
       "composedFrom": [
         "docs/operator-playbooks/_vendor/code-review.md",
         "docs/operator-playbooks/_fragments/hydra-qa-reference.md",
-        "docs/operator-playbooks/_fragments/checks-fetch.md"
+        "docs/operator-playbooks/_fragments/checks-fetch.md",
+        "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
       ],
       "route": "/docs/skill/hydra-qa",
       "source": {
@@ -303,7 +309,9 @@
       "stage": "operator-interactive",
       "description": "Research improvement opportunities for the Hydra orchestrator itself. Analyzes codebase architecture, dispatch efficiency, learning system, agent quality, and infrastructure to produce actionable GitHub issues.",
       "dispatchedBy": [],
-      "composedFrom": [],
+      "composedFrom": [
+        "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
+      ],
       "route": "/docs/skill/hydra-research",
       "source": {
         "path": "docs/operator-playbooks/hydra-research.md"
@@ -320,7 +328,9 @@
           "via": "default"
         }
       ],
-      "composedFrom": [],
+      "composedFrom": [
+        "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
+      ],
       "route": "/docs/skill/hydra-retro",
       "source": {
         "path": "docs/operator-playbooks/hydra-retro.md"
@@ -368,7 +378,9 @@
           "via": "default"
         }
       ],
-      "composedFrom": [],
+      "composedFrom": [
+        "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
+      ],
       "route": "/docs/skill/hydra-sweep",
       "source": {
         "path": "docs/operator-playbooks/hydra-sweep.md"
@@ -391,7 +403,8 @@
         "docs/operator-playbooks/_fragments/hydra-target-build-anchor-preflight.md",
         "docs/operator-playbooks/_fragments/target-seam-preamble.md",
         "docs/operator-playbooks/_fragments/target-self-isolation-preamble.md",
-        "docs/operator-playbooks/_fragments/reflection-telemetry-deposit.md"
+        "docs/operator-playbooks/_fragments/reflection-telemetry-deposit.md",
+        "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
       ],
       "route": "/docs/skill/hydra-target-build",
       "source": {
@@ -429,7 +442,8 @@
         }
       ],
       "composedFrom": [
-        "docs/operator-playbooks/_fragments/target-seam-preamble.md"
+        "docs/operator-playbooks/_fragments/target-seam-preamble.md",
+        "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
       ],
       "route": "/docs/skill/hydra-target-discover",
       "source": {
@@ -481,7 +495,8 @@
         }
       ],
       "composedFrom": [
-        "docs/operator-playbooks/_fragments/target-seam-preamble.md"
+        "docs/operator-playbooks/_fragments/target-seam-preamble.md",
+        "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
       ],
       "route": "/docs/skill/hydra-target-research",
       "source": {
@@ -495,7 +510,8 @@
       "description": "Per-run (or daily) Target retrospective — deep-reads failed and reframed Target builds plus subagent friction reports, extracts recurring failure patterns, and files them — capped ≤2/run, deduped — as needs-triage issues on the Target board. NO gated PR, NO tier machinery.",
       "dispatchedBy": [],
       "composedFrom": [
-        "docs/operator-playbooks/_fragments/target-seam-preamble.md"
+        "docs/operator-playbooks/_fragments/target-seam-preamble.md",
+        "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
       ],
       "route": "/docs/skill/hydra-target-retro",
       "source": {
@@ -514,7 +530,8 @@
         }
       ],
       "composedFrom": [
-        "docs/operator-playbooks/_fragments/target-seam-preamble.md"
+        "docs/operator-playbooks/_fragments/target-seam-preamble.md",
+        "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
       ],
       "route": "/docs/skill/hydra-target-sweep",
       "source": {
