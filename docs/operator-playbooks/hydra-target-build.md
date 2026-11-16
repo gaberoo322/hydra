@@ -359,7 +359,7 @@ if [ -n "${ANCHOR_NUM:-}" ]; then
   if gh api --paginate "repos/$TARGET_GH_REPO/issues/$ANCHOR_NUM/comments" >"$OD_TMP" 2>/dev/null; then
     # --paginate concatenates pages as adjacent JSON arrays; jq -s add merges
     # them into one. The pure selector tolerates the raw REST objects as-is.
-    if jq -s 'add' "$OD_TMP" >"$OD_TMP.merged" 2>/dev/null && OD_OUT=$(npx tsx "${HYDRA_GATE_DIR:?}/scripts/target/target-design-concept.ts" select-decision <"$OD_TMP.merged"); then
+    if jq -s 'add' "$OD_TMP" >"$OD_TMP.merged" 2>/dev/null && OD_OUT=$(node --experimental-strip-types "${HYDRA_GATE_DIR:?}/scripts/target/target-design-concept.ts" select-decision <"$OD_TMP.merged"); then
       OPERATOR_DECISION_JSON="$OD_OUT"
     else
       echo "hydra-target-build: WARN: operator-decision selection FAILED for ${ANCHOR_REF:-issue-$ANCHOR_NUM} (jq/node error after a successful read) — proceeding on the issue body alone (fail-open)" >&2
@@ -491,20 +491,20 @@ diff against — proceed straight to Step 5.
 DC_KEY="hydra:target:design-concept:${ANCHOR_REF}"
 
 DC_CLI="${HYDRA_GATE_DIR:?}/scripts/target/target-design-concept.ts"
-CAPTURE=$(npx tsx "$DC_CLI" should-capture $EXPECTED_PATHS)
+CAPTURE=$(node --experimental-strip-types "$DC_CLI" should-capture $EXPECTED_PATHS)
 
 if [ "$CAPTURE" = "no" ]; then
   echo "safe-path build — skipping design-concept artifact"
 else
   # Reuse-on-retry: if a prior attempt persisted one, read it back and reuse.
   EXISTING=$(docker exec hydra-redis-1 redis-cli GET "$DC_KEY" 2>/dev/null)
-  REUSED=$(npx tsx "$DC_CLI" parse "$EXISTING")
+  REUSED=$(node --experimental-strip-types "$DC_CLI" parse "$EXISTING")
 
   # staleness: a persisted artifact captured BEFORE the latest
   # operator decision — or one carrying no `operatorDecision` field at all —
   # must NOT be reused. Discard and fall through to recapture.
   if [ -n "$REUSED" ] && [ -n "${OPERATOR_DECISION_JSON:-}" ]; then
-    STALE=$(npx tsx "$DC_CLI" stale "$REUSED" "$OPERATOR_DECISION_JSON")
+    STALE=$(node --experimental-strip-types "$DC_CLI" stale "$REUSED" "$OPERATOR_DECISION_JSON")
     if [ "$STALE" != "fresh" ]; then  # anything but a clean "fresh" (incl. a node failure) recaptures
       echo "persisted design-concept for $ANCHOR_REF predates the latest operator decision — recapturing"
       REUSED=""
@@ -513,7 +513,7 @@ else
 
   if [ -n "$REUSED" ]; then
     echo "reusing persisted design-concept for $ANCHOR_REF (retry):"
-    printf '%s\n' "$REUSED" | npx tsx "$DC_CLI" summarize
+    printf '%s\n' "$REUSED" | node --experimental-strip-types "$DC_CLI" summarize
     # Fold the reused artifact into the plan you hand the executor role.
   else
     # First attempt (or corrupt prior value): the planner authors the four
@@ -524,7 +524,7 @@ else
     if [ -n "${OPERATOR_DECISION_JSON:-}" ]; then
       DC_INPUT_JSON=$(printf '%s' "$DC_INPUT_JSON" | jq --argjson od "$OPERATOR_DECISION_JSON" '. + {operatorDecision: $od}')
     fi
-    DC_JSON=$(npx tsx "$DC_CLI" build "$DC_INPUT_JSON")
+    DC_JSON=$(node --experimental-strip-types "$DC_CLI" build "$DC_INPUT_JSON")
     # Persist per-anchor with a 14-day TTL so a stale anchor self-cleans.
     # Never SET an empty artifact (a failed build prints nothing).
     if [ -n "$DC_JSON" ]; then

@@ -550,7 +550,7 @@ describe("runCli — playbook subcommands (Steps 3.3 / 4.5)", () => {
   });
 
   test("should-capture answers yes or no; an unknown subcommand exits 2; bad JSON exits 1", () => {
-    assert.match(runCli(["should-capture", "docs/readme.md"], noStdin).out, /^(yes|no)$/);
+    assert.equal(runCli(["should-capture", "docs/readme.md"], noStdin).out, "no");
     assert.equal(runCli(["bogus"], noStdin).code, 2);
     assert.equal(runCli(["build", "{nope"], noStdin).code, 1);
   });
