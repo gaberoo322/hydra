@@ -960,8 +960,12 @@ describe("ops-collect CLI, spawned", () => {
   });
 
   test("stderr is empty on a normal run and on an API-unreachable run, so a playbook can keep it visible", () => {
-    assert.equal(spawn(["--help"]).stderr, "");
-    const down = spawn(["--collectors", "cycles,scheduler,today"]);
+    // The Target identity is pinned to a valid manifest fixture so the env-dependent config and manifest warnings stay out of the property.
+    const workspace = new URL("./fixtures/target-manifest-fixture/", import.meta.url).pathname;
+    const env = { ...process.env, HYDRA_API_URL: "http://127.0.0.1:1", HYDRA_PROJECT_WORKSPACE: workspace, HYDRA_TARGET_NAME: "acme", HYDRA_TARGET_GITHUB_REPO: "acme/acme" };
+    const quiet = (args: string[]) => spawnSync(process.execPath, ["--experimental-strip-types", cli, ...args], { encoding: "utf8", env, timeout: 30000 });
+    assert.equal(quiet(["--help"]).stderr, "");
+    const down = quiet(["--collectors", "cycles,scheduler,today"]);
     assert.equal(down.status, 0);
     assert.equal(down.stderr, "");
   });
