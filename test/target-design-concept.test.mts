@@ -13,7 +13,9 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, symlinkSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
@@ -574,5 +576,20 @@ describe("runCli — playbook subcommands (Steps 3.3 / 4.5)", () => {
     assert.equal(JSON.parse(parsed.stdout).anchorRef, sampleInput().anchorRef);
     assert.equal(run(["bogus"]).status, 2);
     assert.equal(run(["build", "{nope"]).status, 1);
+  });
+
+  test("real entrypoint reached through a symlinked path still runs (not a silent no-op)", () => {
+    const script = fileURLToPath(new URL("../scripts/target/target-design-concept.ts", import.meta.url));
+    const dir = mkdtempSync(join(tmpdir(), "dc-symlink-"));
+    try {
+      const link = join(dir, "dc-link.ts");
+      symlinkSync(script, link);
+      const r = spawnSync(process.execPath, ["--experimental-strip-types", link, "build", JSON.stringify(sampleInput())], { encoding: "utf8" });
+      assert.equal(r.status, 0, r.stderr);
+      assert.notEqual(r.stdout.trim(), "", "symlinked invocation must emit an artifact");
+      assert.equal(spawnSync(process.execPath, ["--experimental-strip-types", link, "bogus"], { encoding: "utf8" }).status, 2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -472,9 +472,9 @@ Q&A loop, draft/approved/stale gate, or tier ladder. The pure
 builder/serializer lives in the gate
 mirror at `$HYDRA_GATE_DIR/scripts/target/target-design-concept.ts` (synced
 into the sibling scratch dir by Step 0.6); this step is
-the I/O wrapper. Import it by ABSOLUTE `file://` URL from `$HYDRA_GATE_DIR` —
-the mirror is a sibling of the worktree, so a cwd-relative import can no
-longer reach it — never from `~/hydra`.
+the I/O wrapper. Invoke its subcommands through the `$DC_CLI` path under
+`$HYDRA_GATE_DIR` (the mirror is a sibling of the worktree, so a cwd-relative
+path can no longer reach it) — never from `~/hydra`.
 
 **Gate on risk-critical first — safe-path builds skip this step entirely.**
 `shouldCaptureDesignConcept()` routes on the keystone classifier
@@ -747,9 +747,10 @@ TARGET_PROJECT_DIR="$TARGET_WT/$APP_SUBDIR" \
 ```
 
 Exit codes: 0 = pass (or skipped/neutral), 2 = kill-rate below the floor (block
-merge), 1 = usage/unexpected error. The floor
-(`TARGET_MUTATION_KILL_FLOOR`) and time budget (`MUTATION_TIME_BUDGET_MS`) defaults live in the
-header of `scripts/target/mutation-check.ts`. A `[quick-fix]` tag in `PR_BODY` writes a
+merge), 1 = usage/unexpected error. Tune the floor with
+`TARGET_MUTATION_KILL_FLOOR` (default 60 — higher than the Orchestrator base
+because every file the gate reaches is on the Target's declared risk surface) and the time budget
+with `MUTATION_TIME_BUDGET_MS`. A `[quick-fix]` tag in `PR_BODY` writes a
 neutral status and exits 0, mirroring the Orchestrator gate's exemption.
 
 ### 6.5. Glossary / ADR gate

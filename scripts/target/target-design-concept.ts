@@ -67,7 +67,7 @@
 
 import { classifyRisk, type RiskSurface } from "../../src/target/risk-critical.ts";
 import { loadRiskSurface } from "./target-risk-surface.ts";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -560,7 +560,19 @@ export function runCli(argv: string[], readStdin: () => string = () => readFileS
   }
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+/** True when this file is the process entrypoint; realpath both sides so a symlinked path still matches. */
+function isMain(): boolean {
+  const arg = process.argv[1];
+  if (!arg) return false;
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(resolve(arg));
+  } catch (err) {
+    console.error("target-design-concept: entrypoint check failed:", err);
+    return false;
+  }
+}
+
+if (isMain()) {
   const { out, code } = runCli(process.argv.slice(2));
   process.stdout.write(out);
   process.exit(code);
