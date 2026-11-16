@@ -48,6 +48,32 @@ const SOURCE_EXTS = [".ts", ".mts", ".js", ".mjs", ".sh", ".py", ".json"];
 const IMPORT_RE = /(?:from\s*|import\s*\(\s*|require\s*\(\s*|import\s+)["'`](\.{1,2}\/[^"'`]+)["'`]/g;
 const PATH_LITERAL_RE = /["'`]([A-Za-z0-9_./-]+\.(?:ts|mts|mjs|js|sh|py))["'`]/g;
 
+const JS_EXT_RE = /\.(?:m?[tj]s|cjs)$/;
+const HASH_EXT_RE = /\.(?:sh|py)$/;
+const BLOCK_COMMENT_RE = /^[ \t]*\/\*[\s\S]*?\*\//gm;
+const SLASH_COMMENT_RE = /^[ \t]*\/\/.*$/gm;
+const HASH_COMMENT_RE = /^[ \t]*#(?!!).*$/gm;
+const TYPE_ONLY_STMT_RE = /^[ \t]*(?:import|export)\s+type\b[^;=]*?\bfrom\s*["'][^"'\n]+["'];?/gm;
+
+/**
+ * Text the marker / dependency scans should judge (issue #5275). Conservative,
+ * line-anchored (INV-4): drops only whole-line `//` (ts/js) or `#` (sh/py, never
+ * the `#!` shebang) comments and block comments that open at the start of a
+ * line, plus whole `import type ... from` / `export type ... from` statements
+ * (erased by --experimental-strip-types, INV-5). A mid-line block opener never
+ * opens a block, so a runnable line is never removed.
+ */
+export function codeOnly(text, file = "x.ts") {
+  let out = text;
+  if (JS_EXT_RE.test(file)) {
+    out = out.replace(BLOCK_COMMENT_RE, "").replace(SLASH_COMMENT_RE, "");
+    out = out.replace(TYPE_ONLY_STMT_RE, "");
+  } else if (HASH_EXT_RE.test(file)) {
+    out = out.replace(HASH_COMMENT_RE, "");
+  }
+  return out;
+}
+
 function walk(dir, out) {
   let entries;
   try {
@@ -99,7 +125,7 @@ export function scanPools(root = REPO_ROOT) {
   const read = (f) => {
     if (!textCache.has(f)) {
       try {
-        textCache.set(f, readFileSync(f, "utf8"));
+        textCache.set(f, codeOnly(readFileSync(f, "utf8"), f));
       } catch {
         /* intentional: unreadable dependency is treated as empty; the test file itself is read below */
         textCache.set(f, "");
