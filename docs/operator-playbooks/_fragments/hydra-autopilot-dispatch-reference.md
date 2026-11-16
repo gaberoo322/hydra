@@ -22,7 +22,7 @@ The routing data (class to model) is the `model` column of
 `scripts/autopilot/classes.json`. This section is the reasoning behind it.
 
 Routing is right-sized by **stakes × frequency**: high-frequency non-authoring
-classes run under the frontier model, and behaviour-reshaping and money-critical
+classes run below the frontier model, and behaviour-reshaping and money-critical
 authoring classes run on Fable 5, the frontier model, when Fable is entitled.
 Verify entitlement with a throwaway `Agent(model="fable")` smoke test before
 re-promoting any class.
