@@ -23,7 +23,7 @@ cd ~/hydra && npx tsx scripts/ops-collect.ts --collectors cycles,cost-by-class,s
 git -C ~/hydra log --oneline --since="24 hours ago"
 ```
 
-Set `--window-hours` and `--since` to `$period` (`7d` is 168 hours) and raise `--count` for a longer period. The first command prints one JSON document with a result per collector; field meanings: `npx tsx scripts/ops-collect.ts --help`. `ops-collect unavailable` means the CLI crashed (the lines printed just before it are the cause): report it under Operator Actions Needed.
+Set `--window-hours` and `--since` to `$period` (`7d` is 168 hours); raise `--count` for longer. The first command prints one JSON document with a result per collector; field meanings: `npx tsx scripts/ops-collect.ts --help`. `ops-collect unavailable` is a crash (its cause prints just before): report it under Operator Actions Needed.
 
 - A result with `ok: false` has no data: print `n/a (<code>: <reason>)` for the rows it feeds and keep going. One missing collector never blanks the rest of the digest.
 - `target.resolved: false` is worth a line under Operator Actions Needed; the Target collectors are then `skipped`.
