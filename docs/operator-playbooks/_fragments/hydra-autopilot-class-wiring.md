@@ -48,10 +48,9 @@ prevent that gate-re-parsing round-trip:
   constant in `board-saturation.ts`. It is the anti-feedback-loop guard: a board
   that already holds enough proposal-grade architecture work suppresses the scan.
 - **`orch_backfill_idle`** is the "nothing else to do, go deepen" trigger,
-  shared with `discover_orch` (the `BACKFILL_SIGNAL_CLASSES` stagger in
-  `decide.py`). The Turn Snapshot's `foldBoardSignals`
+  shared with `discover_orch` (`BACKFILL_SIGNAL_CLASSES`). `foldBoardSignals`
   (`src/autopilot/turn-snapshot/board-saturation.ts`) sets it when
-  `readyForAgent`, `needsResearch` and `needsTriage` are all 0.
+  `readyForAgent`, `needsResearch`, `needsTriage` are 0.
 
 The per-class cooldown is the back-stop, honoured by the shared
 `signal_is_cooled` guard. The class's `scope` column is `orch` (it scans the

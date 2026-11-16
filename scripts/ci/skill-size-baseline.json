@@ -5,7 +5,7 @@
       "body": 104
     },
     "docs/operator-playbooks/_fragments/hydra-autopilot-class-wiring.md": {
-      "body": 1041
+      "body": 1031
     },
     "docs/operator-playbooks/_fragments/hydra-autopilot-dispatch-reference.md": {
       "body": 3871
@@ -174,7 +174,7 @@
       "description": 32
     },
     "docs/operator-playbooks/hydra-tool-scout.md": {
-      "body": 2706,
+      "body": 2697,
       "description": 36
     },
     "docs/operator-playbooks/hydra-wayfinder.md": {
