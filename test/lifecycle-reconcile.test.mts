@@ -349,13 +349,6 @@ describe("qa-passed exits (INV-3, INV-4, INV-13)", () => {
     assert.equal(resolveQaPr([], 50, [...prs, { number: 9, body: "Fixes #50" }]), null);
     assert.equal(resolveQaPr([], 51, prs), null);
     assert.equal(resolveQaPr([], 50, null), null);
-  });
-
-  test("resolveQaPr stays draft-agnostic (INV-3) while the PR-covered predicate drops drafts", () => {
-    const draft: OpenPrRef[] = [{ number: 7, body: "Closes #50", isDraft: true }];
-    assert.equal(resolveQaPr([], 50, draft), 7);
-    assert.equal(singleClosingPr(draft, 50), null);
-    assert.equal(resolveQaPr([], 50, [...draft, { number: 8, body: "Closes #50", isDraft: false }]), null);
 
     const { w, add } = world();
     add(50, ["qa-passed"]);
@@ -363,6 +356,13 @@ describe("qa-passed exits (INV-3, INV-4, INV-13)", () => {
     const report = await runReconcile(w.deps);
     assert.equal(report.qaExits.unresolved, 1);
     assert.equal(w.edits.length, 0);
+  });
+
+  test("resolveQaPr stays draft-agnostic (INV-3) while the PR-covered predicate drops drafts", () => {
+    const draft: OpenPrRef[] = [{ number: 7, body: "Closes #50", isDraft: true }];
+    assert.equal(resolveQaPr([], 50, draft), 7);
+    assert.equal(singleClosingPr(draft, 50), null);
+    assert.equal(resolveQaPr([], 50, [...draft, { number: 8, body: "Closes #50", isDraft: false }]), null);
   });
 
   test("INV-13: only the three qa-passed rows flip to the qa-exit gate; the three caller reconcile rows carry real gates; only needs-dev-resume -> ready-for-agent stays unimplemented", () => {
