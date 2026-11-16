@@ -16,7 +16,7 @@ import { pathToFileURL } from "node:url";
 import { loadManifest, REPO_ROOT, splitPools } from "./test-pools.mjs";
 
 /** Sum duration_ms per file and label each file's pool from the manifest. */
-export function aggregateDurations(rows, manifest) {
+export function aggregateDurations(rows, manifest, baselineFiles = []) {
   const sums = new Map();
   for (const r of rows) {
     if (!r || typeof r.file !== "string" || typeof r.duration_ms !== "number") continue;
@@ -33,7 +33,8 @@ export function aggregateDurations(rows, manifest) {
     totals[e.pool].files += 1;
     totals[e.pool].ms += e.ms;
   }
-  return { entries, totals };
+  const zeroRows = baselineFiles.filter((f) => !sums.has(f)).length;
+  return { entries, totals, zeroRows };
 }
 
 export function parseNdjson(text) {
@@ -49,7 +50,7 @@ export function parseNdjson(text) {
   return rows;
 }
 
-export function renderReport({ entries, totals }, { top = 25, pool = null } = {}) {
+export function renderReport({ entries, totals, zeroRows = 0 }, { top = 25, pool = null } = {}) {
   const shown = entries.filter((e) => pool === null || e.pool === pool).slice(0, top);
   const lines = [`Top ${shown.length} test files by wall time${pool ? ` (${pool} pool)` : ""}:`];
   for (const e of shown) lines.push(`${String(Math.round(e.ms)).padStart(8)} ms  ${e.pool.padEnd(8)}  ${e.file}`);
@@ -57,6 +58,7 @@ export function renderReport({ entries, totals }, { top = 25, pool = null } = {}
   for (const p of ["serial", "parallel"]) {
     lines.push(`${p.padEnd(8)} pool: ${totals[p].files} file(s), ${Math.round(totals[p].ms)} ms summed`);
   }
+  lines.push(`${zeroRows} baselined test file(s) with zero capture rows (not run, or truncated by --test-force-exit)`);
   return lines.join("\n") + "\n";
 }
 
@@ -69,11 +71,17 @@ if (isMain) {
   };
   const top = Number.parseInt(opt("--top") ?? "25", 10);
   const pool = opt("--pool") ?? null;
+  if (pool !== null && pool !== "serial" && pool !== "parallel") {
+    process.stderr.write(`[test-durations] --pool must be serial or parallel (got ${pool})\n`);
+    process.exit(2);
+  }
   const capture = opt("--capture") ?? join(REPO_ROOT, ".suite-count-capture.ndjson");
   if (!existsSync(capture)) {
     process.stdout.write(`[test-durations] no capture at ${capture}; run \`npm test\` first (nothing to report).\n`);
   } else {
-    const agg = aggregateDurations(parseNdjson(readFileSync(capture, "utf8")), loadManifest());
+    const baselinePath = join(REPO_ROOT, "test", "fixtures", "suite-count-baseline.json");
+    const baselineFiles = existsSync(baselinePath) ? Object.keys(JSON.parse(readFileSync(baselinePath, "utf8"))) : [];
+    const agg = aggregateDurations(parseNdjson(readFileSync(capture, "utf8")), loadManifest(), baselineFiles);
     process.stdout.write(renderReport(agg, { top: Number.isInteger(top) && top > 0 ? top : 25, pool }));
   }
 }

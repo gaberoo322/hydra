@@ -53,7 +53,7 @@ const HASH_EXT_RE = /\.(?:sh|py)$/;
 const BLOCK_COMMENT_RE = /^[ \t]*\/\*[\s\S]*?\*\//gm;
 const SLASH_COMMENT_RE = /^[ \t]*\/\/.*$/gm;
 const HASH_COMMENT_RE = /^[ \t]*#(?!!).*$/gm;
-const TYPE_ONLY_STMT_RE = /^[ \t]*(?:import|export)\s+type\b[^;=]*?\bfrom\s*["'][^"'\n]+["'];?/gm;
+const TYPE_ONLY_STMT_RE = /^[ \t]*(?:import|export)\s+type\b(?:(?!\b(?:import|export)\b)[^;=])*?\bfrom\s*["'][^"'\n]+["'];?/gm;
 
 /**
  * Text the marker / dependency scans should judge (issue #5275). Conservative,

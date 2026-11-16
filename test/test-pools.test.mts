@@ -8,6 +8,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -395,5 +396,47 @@ describe("test-durations — aggregateDurations (#5275)", () => {
       { file: "test/p.test.mts", pool: "parallel", ms: 5 },
     ]);
     assert.deepEqual(r.totals, { serial: { files: 1, ms: 40 }, parallel: { files: 1, ms: 5 } });
+  });
+});
+
+describe("test-durations — zero-row count and absent capture", () => {
+  test("zeroRows counts baselined files with no capture row and renderReport prints it", async () => {
+    const { aggregateDurations, renderReport } = await import("../scripts/test/test-durations.mjs");
+    const manifest = { parallel: [], serialPinned: {} };
+    const rows = [{ file: "test/a.test.mts", duration_ms: 5 }];
+    const agg = aggregateDurations(rows, manifest, ["test/a.test.mts", "test/b.test.mts", "test/c.test.mts"]);
+    assert.equal(agg.zeroRows, 2);
+    assert.match(renderReport(agg), /2 baselined test file\(s\) with zero capture rows/);
+    // sibling shape: every baselined file has rows -> zero
+    assert.equal(aggregateDurations(rows, manifest, ["test/a.test.mts"]).zeroRows, 0);
+  });
+
+  test("parseNdjson skips a torn trailing line", async () => {
+    const { parseNdjson } = await import("../scripts/test/test-durations.mjs");
+    assert.deepEqual(parseNdjson('{"file":"a","duration_ms":1}\n{"file":"b","dur'), [{ file: "a", duration_ms: 1 }]);
+  });
+
+  test("CLI with a nonexistent capture exits 0 with a message; an invalid --pool exits 2", () => {
+    const script = join(process.cwd(), "scripts", "test", "test-durations.mjs");
+    const ok = spawnSync(process.execPath, [script, "--capture", join(tmpdir(), "no-such-capture-5275.ndjson")], { encoding: "utf8" });
+    assert.equal(ok.status, 0);
+    assert.match(ok.stdout, /no capture at/);
+    const bad = spawnSync(process.execPath, [script, "--pool", "bogus"], { encoding: "utf8" });
+    assert.equal(bad.status, 2);
+  });
+});
+
+describe("test-pools — codeOnly edge arms (QA round 1)", () => {
+  test("a semicolon-less type-only export does not swallow a following real import", () => {
+    const out = codeOnly('export type { A }\nimport Redis from "ioredis"\nconst x = 1\n', "a.ts");
+    assert.match(out, /ioredis/);
+    // sibling shape: a real single type-only statement is still erased
+    assert.doesNotMatch(codeOnly('import type { A } from "ioredis"\nconst x = 1\n', "a.ts"), /ioredis/);
+    assert.doesNotMatch(codeOnly('export type { A } from "ioredis"\n', "a.ts"), /ioredis/);
+  });
+
+  test("code after a block comment closer on the same line is kept", () => {
+    assert.match(codeOnly("/* c */ new Redis()\n", "a.ts"), /new Redis\(\)/);
+    assert.match(codeOnly('/* x */ import Redis from "ioredis"\n', "a.ts"), /ioredis/);
   });
 });
