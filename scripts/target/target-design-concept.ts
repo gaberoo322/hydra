@@ -548,7 +548,7 @@ export function runCli(argv: string[], readStdin: () => string = () => readFileS
         return { out: serializeDesignConcept(buildDesignConcept(JSON.parse(rest[0]))), code: 0 };
       case "summarize": {
         const d = JSON.parse(readStdin());
-        return { out: `  scope: ${d.scope}\n  invariants: ${d.invariants.join("; ")}`, code: 0 };
+        return { out: `  scope: ${d.scope}\n  invariants: ${d.invariants.join("; ")}\n`, code: 0 };
       }
       default:
         console.error(`target-design-concept: unknown subcommand ${JSON.stringify(cmd)}`);

@@ -359,7 +359,7 @@ if [ -n "${ANCHOR_NUM:-}" ]; then
   if gh api --paginate "repos/$TARGET_GH_REPO/issues/$ANCHOR_NUM/comments" >"$OD_TMP" 2>/dev/null; then
     # --paginate concatenates pages as adjacent JSON arrays; jq -s add merges
     # them into one. The pure selector tolerates the raw REST objects as-is.
-    if jq -s 'add' "$OD_TMP" >"$OD_TMP.merged" 2>/dev/null && OD_OUT=$(node --experimental-strip-types "${HYDRA_GATE_DIR:?}/scripts/target/target-design-concept.ts" select-decision <"$OD_TMP.merged"); then
+    if jq -s 'add' "$OD_TMP" >"$OD_TMP.merged" 2>/dev/null && [ -f "${HYDRA_GATE_DIR:-}/scripts/target/target-design-concept.ts" ] && OD_OUT=$(node --experimental-strip-types "${HYDRA_GATE_DIR}/scripts/target/target-design-concept.ts" select-decision <"$OD_TMP.merged"); then
       OPERATOR_DECISION_JSON="$OD_OUT"
     else
       echo "hydra-target-build: WARN: operator-decision selection FAILED for ${ANCHOR_REF:-issue-$ANCHOR_NUM} (jq/node error after a successful read) — proceeding on the issue body alone (fail-open)" >&2
@@ -383,9 +383,9 @@ pinned by `test/target-design-concept.test.mts` only insofar as Step 3.3
 precedes 3.5 and streams via stdin. Risk-critical builds additionally get the
 verbatim `operatorDecision` field (Step 4.5), which IS tested.
 
-The selector import mirrors the Step 4.5 discipline: absolute `file://` URL
-from `$HYDRA_GATE_DIR` (set by Step 0.6) — never from `~/hydra`, never
-cwd-relative.
+The selector runs through the `target-design-concept.ts` CLI at an absolute
+path under `$HYDRA_GATE_DIR` (set by Step 0.6) — never from `~/hydra`, never
+cwd-relative. A missing mirror falls into the fail-open WARN arm above.
 
 A comment is a decision by **CONTENT MARKER, never by author**: its body
 contains "Operator decision" (case-insensitive — the hydra-review convention
@@ -490,8 +490,13 @@ diff against — proceed straight to Step 5.
 # space- or newline-separated; ANCHOR_REF is anchor.reference (e.g. "issue-1056").
 DC_KEY="hydra:target:design-concept:${ANCHOR_REF}"
 
-DC_CLI="${HYDRA_GATE_DIR:?}/scripts/target/target-design-concept.ts"
-CAPTURE=$(node --experimental-strip-types "$DC_CLI" should-capture $EXPECTED_PATHS)
+DC_CLI="${HYDRA_GATE_DIR:-}/scripts/target/target-design-concept.ts"
+if [ -f "$DC_CLI" ]; then
+  CAPTURE=$(node --experimental-strip-types "$DC_CLI" should-capture $EXPECTED_PATHS)
+else
+  echo "hydra-target-build: WARN: design-concept CLI missing at $DC_CLI — skipping artifact (fail-open)" >&2
+  CAPTURE="no"
+fi
 
 if [ "$CAPTURE" = "no" ]; then
   echo "safe-path build — skipping design-concept artifact"

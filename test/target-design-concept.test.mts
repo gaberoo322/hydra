@@ -543,6 +543,7 @@ describe("runCli — playbook subcommands (Steps 3.3 / 4.5)", () => {
     const summary = runCli(["summarize"], () => parsed.out);
     assert.match(summary.out, /^ {2}scope: /);
     assert.match(summary.out, /\n {2}invariants: /);
+    assert.ok(summary.out.endsWith("\n"), "summarize output ends with a newline like the old console.log");
   });
 
   test("parse of corrupt input prints empty and stale of a decision-less artifact is stale", () => {
@@ -556,6 +557,25 @@ describe("runCli — playbook subcommands (Steps 3.3 / 4.5)", () => {
     assert.equal(runCli(["bogus"], noStdin).code, 2);
     assert.equal(runCli(["build", "{nope"], noStdin).code, 1);
   });
+
+  test("should-capture yes for a risk-critical path, no for a safe one, multi-argv honoured (fixture manifest)", () => {
+    const prev = process.env.TARGET_MANIFEST_ROOT;
+    process.env.TARGET_MANIFEST_ROOT = fileURLToPath(new URL("./fixtures/target-manifest-fixture", import.meta.url));
+    try {
+      assert.equal(runCli(["should-capture", "web/src/lib/execution/runner.ts"], noStdin).out, "yes");
+      assert.equal(runCli(["should-capture", "docs/readme.md", "web/src/lib/execution/runner.ts"], noStdin).out, "yes");
+      assert.equal(runCli(["should-capture", "docs/readme.md", "web/src/ui/button.tsx"], noStdin).out, "no");
+    } finally {
+      if (prev === undefined) delete process.env.TARGET_MANIFEST_ROOT;
+      else process.env.TARGET_MANIFEST_ROOT = prev;
+    }
+  });
+
+  test("stale of a parseable artifact carrying the current operatorDecision is fresh", () => {
+    const built = runCli(["build", JSON.stringify(sampleInput({ operatorDecision: decision }))], noStdin);
+    assert.equal(runCli(["stale", built.out, JSON.stringify(decision)], noStdin).out, "fresh");
+  });
+
   test("fresh/stale and select-decision with bad JSON exit 1; stale of a malformed concept is fresh", () => {
     assert.equal(runCli(["stale", "{not json", "{nope"], noStdin).code, 1);
     assert.equal(runCli(["select-decision"], () => "{nope").code, 1);
