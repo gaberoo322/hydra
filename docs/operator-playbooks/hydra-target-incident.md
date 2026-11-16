@@ -1,6 +1,6 @@
 ---
 name: hydra-target-incident
-description: Automated incident response for the Target project — post-merge regressions, web-service crashes, and deploy failures. Single-realm to the target's app directory; investigates root cause, attempts fix or revert, files a post-mortem. Target sibling of hydra-incident (which is Orchestrator-only).
+description: Automated incident response for the Target project — post-merge regressions, web-service crashes, and deploy failures. Single-realm to the target's app directory; investigates root cause, attempts fix or revert, files a post-mortem.
 when_to_use: "When hydra-target-build's Step 8.6 post-merge health watcher alarms on a Target regression, the target's web service crashes, a Target deploy fails, or the user says 'target incident', 'what broke on the target', 'investigate the target failure'."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*)
 arguments: [context]
@@ -19,10 +19,10 @@ post-mortem.
 
 ## Realm scope — single-realm to the Target (ADR-0025, issue #2553)
 
-This skill operates **only** on the Target. It is the Target sibling of the
-Orchestrator-only `hydra-incident`. The two are deliberately single-realm:
-`hydra-incident` never touches the Target, and `hydra-target-incident` never
-touches `~/hydra` source. Target work, post-mortems included, files on the
+This skill operates **only** on the Target. It is the sole Operate-layer
+incident skill and is single-realm: it never touches `~/hydra` source (the
+Orchestrator realm has no incident skill; the watchdog, deploy-drift check,
+emergency brake and pause controls cover it). Target work, post-mortems included, files on the
 **Target board** (`$TARGET_GH_REPO`, ADR-0031 Decision 4) — never on the
 Orchestrator repo. There is no Target feedback-file loop (retired, #2962): the
 post-mortem issue is the durable record. Never write Orchestrator memory from

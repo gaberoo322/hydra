@@ -1,0 +1,1 @@
+- refactor: hydra-digest reads cycles, per-class cost, scheduler, board, alerts, the period's merges and issue counts, Target git, kill-chain and reframe-saves through one ops-collect call; the anchor-queue length reads are removed (#5567)

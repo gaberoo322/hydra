@@ -335,24 +335,4 @@ Without `--apply` print the plan and write the artifact only.
 - `src/redis/retro-seen.ts` — the seen-list + recurrence Redis seam
 - `src/redis/retro-artifacts.ts` — the persisted per-run retro-artifact Redis seam
 
-## Slot lifecycle events — PostToolUse hook (issue #671)
-
-Every tool call inside this skill emits a `subagent_tool_call` event onto the
-Redis stream `hydra:autopilot:slot-events`. The classification is done at
-emit-time so the /now-pixel dashboard can route on `category` without
-re-deriving it from the tool name:
-
-- `milestone` — Write, Edit, MultiEdit, NotebookEdit, MCP write surfaces, and
-  Bash matching `^(git commit|gh pr|npm test|npm run build|npm run typecheck)`
-- `io` — other Bash, WebFetch, WebSearch, MCP read surfaces
-- `background` — Read, Grep, Glob
-
-**Hook script:** `scripts/autopilot/hooks/on-subagent-tool-call.sh`
-**Hook registration:** this playbook has no sibling `<this-playbook>.settings.json`;
-the hook is registered project-wide in `~/hydra/.claude/settings.json`
-(`PostToolUse`), which covers every session started in the repo
-
-The hook MUST NEVER propagate errors back to this skill's session — a Redis
-outage, a malformed payload, or a missing `jq` all result in a stderr
-warning and `exit 0`. See `test/on-subagent-tool-call.test.mts` for the
-pinned behavior.
+@include _fragments/slot-lifecycle-hook.md

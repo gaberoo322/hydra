@@ -1,0 +1,32 @@
+# ast-grep rule — logger seam (STD-LOG-PINO-SEAM, issue #5435).
+#
+# All logging in `src/` goes through `logger` from `src/logger.ts` (ADR-0027) —
+# never `console.*`. Exempt by path: `scripts/**` and `test/**` (outside `files`),
+# `src/index.ts` (process bootstrap) and `src/logger.ts` itself.
+#
+# Enforcement: ADVISORY, changed files only (hydra-dev child-flow step 7a and the
+# advisory ast-grep scan step). ~150 ambient hits on master are not a blocker;
+# ADR-0027's one-file-per-PR migration is unchanged.
+#   npx tsx scripts/ast-search.ts --rule logger-seam --path <file>
+# Rule tests: src/ast-grep-rule-tests/logger-seam-test.yml
+
+id: logger-seam
+language: TypeScript
+severity: warning
+message: >-
+  import `logger` from `src/logger.ts` instead of calling console.* (STD-LOG-PINO-SEAM).
+note: >-
+  Advisory logger-seam lint (issue #5435). scripts/, test/ and src/index.ts are exempt.
+files:
+  - "src/**/*.ts"
+ignores:
+  - "src/logger.ts"
+  - "src/index.ts"
+rule:
+  any:
+    - pattern: console.log($$$)
+    - pattern: console.error($$$)
+    - pattern: console.warn($$$)
+    - pattern: console.info($$$)
+    - pattern: console.debug($$$)
+    - pattern: console.trace($$$)

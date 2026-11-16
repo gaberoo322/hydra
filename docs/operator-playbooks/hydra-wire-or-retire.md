@@ -8,20 +8,15 @@ allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*)
 # Hydra Wire-or-Retire (headless Target decision resolver)
 
 `hydra-wire-or-retire` is the **judgment counterpart** to `/hydra-target-cleanup`'s
-mechanical demote-only sweep. `/hydra-target-cleanup` files **`wire-or-retire`**-labelled,
-`needs-triage` Redis backlog items for Target modules that are past the
-45-day wiring grace with no runtime importer — modules Hydra built with intent that either
-stalled (wire it) or died (retire it). Those items are the **decision queue**; deciding which
-requires **recovering the intent**, which a static tool cannot do. This skill makes the call.
+mechanical demote-only sweep. `/hydra-target-cleanup` files an issue labelled
+**`wire-or-retire` + `needs-triage`** on the Target board (`$TARGET_GH_REPO`, ADR-0031) for each
+Target module past the 45-day wiring grace with no runtime importer — modules Hydra built with
+intent that either stalled (wire it) or died (retire it). Those issues are the **decision
+queue**; deciding which requires **recovering the intent**, which a static tool cannot do. This
+skill makes the call. Each issue body carries the resolver protocol.
 
-The prompt-shaped resolver protocol is drafted inside each item's body. Under ADR-0031 the
-Target decision queue is the **GitHub-Issues board on the Target repo** (`$TARGET_GH_REPO`): an
-open issue carrying **`wire-or-retire` + `needs-triage`**. The only exits are a WIRE/RETIRE
-`ready-for-agent` task (relabel) or a `ready-for-human` operator hand-off (relabel) — there is
-no destructive lane. (The retired Redis `moveItemToLane` `triage → backlog` guard of issue
-**#2721** is subsumed: on the label board there is no `backlog` lane to launder an item into,
-so the label-only exits are the whole state machine.) This skill is issue **#2722**: the class
-that *dispatches a resolver* so the queue actually drains.
+The exits are a WIRE/RETIRE `ready-for-agent` task (relabel), a `ready-for-human` operator
+hand-off (relabel), or a stale close — there is no destructive lane.
 
 ## Resolve the Target seam (run this first)
 
@@ -39,22 +34,19 @@ that *dispatches a resolver* so the queue actually drains.
 
 This skill **never edits the Target working tree** and **never deletes a module**. It only
 reads (`git log`, `rg`, config/direction, the board) and **rewrites the anchor issue** into the
-next actionable task via `gh issue edit` (body + labels) on `$TARGET_GH_REPO` — never
-the retired Redis `/backlog` API. The deletion, if any, happens later inside the
-`ready-for-agent` retirement task a human/agent picks up.
+next actionable task via `gh issue edit` (body + labels) on `$TARGET_GH_REPO`. The deletion,
+if any, happens later inside the `ready-for-agent` retirement task a human/agent picks up.
 
 ## Trigger
 
-Dispatched by the autopilot `wire_or_retire_target` signal class (issue #2722) when
-the Turn Snapshot emits **`wire_or_retire_target_available`** — true when ≥1 open issue
-carrying **`wire-or-retire` + `needs-triage`** sits on the Target board
-(`$TARGET_GH_REPO`). The class carries a
-**24h cooldown** (`SIGNAL_COOLDOWNS["wire_or_retire_target"]`, seeded in `bootstrap.sh`'s
-`signal_last_fired` so it survives the pace-gate relaunch — the #2575 cooldown-bootstrap bug
-class), and this skill **resolves at most 2 items per run**. The dispatch **omits the model
-param** so the resolver inherits the parent session's model (the #1093 fallback): this is
-judgment work, and the documented Haiku-premature-exit failure mode (a low-tier model narrates
-"standing by" and exits in seconds, files nothing) makes a low tier unsafe here.
+Dispatched by the autopilot `wire_or_retire_target` signal class when the Turn Snapshot emits
+**`wire_or_retire_target_available`** — true when ≥1 open issue carrying **`wire-or-retire` +
+`needs-triage`** sits on the Target board (`$TARGET_GH_REPO`). The class carries a **24h
+cooldown** (`scripts/autopilot/classes.json`; `bootstrap.sh` carries its `signal_last_fired`
+stamp across a pace-gate relaunch), and this skill **resolves at most 2 items per run** (the
+dispatch's `prompt_args.max_items`). The class model is `inherit`, so the resolver runs on the
+parent session's model: this is judgment work, and a low-tier model that narrates "standing by"
+and exits in seconds files nothing.
 
 ## The resolution loop
 
@@ -84,28 +76,27 @@ retirer of the pairing and stops it from re-selecting its own prior output.
 Before recovering intent, check the module path against **`prompt_args.risk_carveout`** — the
 list the autopilot dispatch stamped from `$TARGET_RISK_SURFACE_JSON` (the Target Manifest's
 `riskCritical.surface`, ADR-0026, resolved fresh every turn by
-`scripts/target/print-target-facts.ts`; issue #4411). A module path matches the carve-out when
+`scripts/target/print-target-facts.ts`). A module path matches the carve-out when
 it is prefixed by (or equals) any entry in the list. If it matches — or if `risk_carveout` is
-**missing or empty** (the dispatch's fail-closed default when the Target Manifest could not be
-resolved, issue #4411 Invariant 4) — relabel **`ready-for-human`** immediately
+**missing or empty** (the autopilot withholds the dispatch when the Target Manifest cannot be
+resolved, so a prompt without the list is not a valid dispatch) — relabel **`ready-for-human`** immediately
 (`gh issue edit $ANCHOR_NUM --repo $TARGET_GH_REPO --remove-label needs-triage --add-label ready-for-human`)
 and STOP for this item — do not attempt a wire-vs-retire verdict, do not queue a retirement.
 
 There is no hardcoded fallback list: an absent/empty `risk_carveout` is itself carve-out
 evidence (over-routing to a human is safe, under-routing is not), never a signal to fall through
-to intent-recovery. `classifyTargetRisk` (issue #2701) is exactly `riskCritical.surface`
-declared by the target's own manifest — the carve-out this skill matches against IS that surface,
-not a copy of it.
+to intent-recovery. The carve-out this skill matches against IS the manifest's
+`riskCritical.surface` (the same surface `classifyRisk` reads), not a copy of it.
 
 Rationale: retiring or rewiring a money-critical module is an operator-escalation-class
 decision (ADR-0005). Ambiguity here is not a judgment call — it is a fail-closed route to a
-human. (Target `CLAUDE.md` rule 6: ambiguity never resolves to deletion.)
+human: ambiguity never resolves to deletion.
 
 ### 3. Recover the intent
 
 - **`git log --follow`** the module in `$TARGET_WS`: who created it, in which cycle,
   alongside what feature. Read the commit messages of the introducing PR.
-- Cross-reference **`~/hydra/config/direction/`** (vision, priorities, roadmap, outcomes) AND
+- Cross-reference **`~/hydra/config/direction/`** (vision, priorities, outcomes) AND
   the target's own **`$TARGET_WS/CONTEXT.md`** / **`$TARGET_WS/direction/vision.md`** (the
   domain angles and feature history live there, not in this playbook): is
   the feature this module belongs to a **current** priority, a **superseded** one, or absent?
@@ -119,8 +110,7 @@ human. (Target `CLAUDE.md` rule 6: ambiguity never resolves to deletion.)
 
 ### 4. Decide — exactly one of
 
-All three exits are `gh issue edit` label + body edits on `$TARGET_GH_REPO` — never a
-Redis lane move. Drop **both** `needs-triage` and `wire-or-retire` on a WIRE/RETIRE resolution
+All three exits are `gh issue edit` label + body edits on `$TARGET_GH_REPO`. Drop **both** `needs-triage` and `wire-or-retire` on a WIRE/RETIRE resolution
 (the decision is made — the issue is now an actionable task, not a pending decision).
 
 - **(a) WIRE** — the intent is live (matches a current `config/direction` priority, or an
@@ -128,20 +118,20 @@ Redis lane move. Drop **both** `needs-triage` and `wire-or-retire` on a WIRE/RET
   task: name the entry point / route / runner to wire the module into, state the acceptance
   criteria ("module is imported from a runtime entry point; the target's test + typecheck
   commands (`$TARGET_WS/.hydra/manifest.json`'s `verify.test` / `verify.typecheck`) pass; the
-  wiring-status ledger no longer lists it"). Then:
+  wiring-status ledger does not list it"). Then:
   `gh issue edit $ANCHOR_NUM --repo $TARGET_GH_REPO --body-file <task> --remove-label needs-triage --remove-label wire-or-retire --add-label ready-for-agent`.
 - **(b) RETIRE** — the intent is gone (superseded, dropped, experiment concluded).
   **Rewrite the issue body** into a retirement task using the **standard RETIRE-task body template**
   below (delete the module AND its test files, sweep orphaned imports, run
   the target's deadcode-baseline update, verify with the target's real test suite + typecheck,
-  commit citing the scan per Target `CLAUDE.md` rule 3). Then:
+  commit citing the scan). Then:
   `gh issue edit $ANCHOR_NUM --repo $TARGET_GH_REPO --body-file <task> --remove-label needs-triage --remove-label wire-or-retire --add-label ready-for-agent`.
 - **(c) UNCLEAR** — the intent cannot be established either way. Relabel to **`ready-for-human`**
   (drop `needs-triage`; keep `wire-or-retire` so the operator sees the decision class):
   `gh issue edit $ANCHOR_NUM --repo $TARGET_GH_REPO --remove-label needs-triage --add-label ready-for-human`,
-  and STOP for this item. **Ambiguity never resolves to deletion** (Target `CLAUDE.md` rule 6, fail closed).
+  and STOP for this item. **Ambiguity never resolves to deletion** (fail closed).
 
-## Standard RETIRE-task body template (issue #2723)
+## Standard RETIRE-task body template
 
 When step 4(b) rewrites an item into a RETIRE task, use the template below verbatim as the
 item's description (substituting the bracketed values). It is the **only sanctioned deletion
@@ -164,7 +154,7 @@ Verdict from `/hydra-wire-or-retire` ([ISO date]): the intent behind this module
 ([one-line reason — cite the target's own ADR/vision history that superseded it]). Retire it.
 
 ### Preconditions (already checked by the resolver — do NOT re-decide)
-- NOT a risk-carve-out path (rule 1 carve-out passed): the module does not match any entry in
+- NOT a risk-carve-out path: the module does not match any entry in
   `prompt_args.risk_carveout` (the Target Manifest's `riskCritical.surface`).
   If your deletion would touch such a path, STOP and route ready-for-human — carve-out paths
   NEVER receive a RETIRE task.
@@ -179,21 +169,19 @@ Verdict from `/hydra-wire-or-retire` ([ISO date]): the intent behind this module
 2. **Sweep orphaned imports.** Deleting the module orphans every `import` of it. **Both `knip`
    and `tsc` miss these** — `knip` reports unused *exports/files*, not the dangling *import
    statements* left behind, and `tsc` with `noUnusedLocals` off does not flag a now-unused
-   import (documented lesson: cleanup-leaves-orphaned-imports / "Cleanup leaves orphaned
-   imports"). So sweep them by hand: `rg` the deleted module's import path across
+   import. So sweep them by hand: `rg` the deleted module's import path across
    `$TARGET_APP_DIR`, remove each dead `import` line, and remove any symbol that was only used
    to call into the deleted module.
 3. **Tighten the ratchet + regenerate the ledger.** Run the target's deadcode-baseline update
    command (per its own `docs/agents/domain.md` or `package.json` scripts). This tightens the
    baseline (it must end up strictly smaller — a retirement that does not shrink it did not
-   actually remove dead code) AND regenerates the wiring-status ledger so this module no longer
-   appears in the wire-or-retire queue.
+   actually remove dead code) AND regenerates the wiring-status ledger so this module leaves
+   the wire-or-retire queue.
 4. **Verify with the REAL suite + typecheck.** Run the target's manifest-declared `verify.test`
    and `verify.typecheck` commands (`$TARGET_WS/.hydra/manifest.json`) — read the manifest
-   rather than assuming a specific script name; some targets alias a `test` script to a count-gate
-   plus a handful of sentinels rather than the real suite (a documented failure mode on the prior
-   Target), so the manifest's declared command is the one that is actually the merge gate.
-5. **Commit citing the scan (Target `CLAUDE.md` rule 3).** The commit message MUST cite the
+   rather than assuming a script name: a `test` script can be a count-gate plus a handful of
+   sentinels, and the manifest's declared command is the merge gate.
+5. **Commit citing the scan.** The commit message MUST cite the
    deadcode scan that justified the deletion: the module path, the original scan date from this
    item's body ([ISO date]), and this RETIRE verdict. Example:
    `chore(deadcode): retire <path> — dead since <scan-date> scan, wire-or-retire RETIRE (item-<N>)`.
@@ -206,20 +194,15 @@ Verdict from `/hydra-wire-or-retire` ([ISO date]): the intent behind this module
 - [ ] The deadcode baseline is strictly smaller and the wiring ledger is regenerated —
       verified by: the baseline diff shows a net reduction.
 - [ ] The manifest's `verify.test` and `verify.typecheck` commands pass — verified by: both exit 0.
-- [ ] Commit message cites the scan (module path + scan date) per Target `CLAUDE.md` rule 3.
+- [ ] Commit message cites the scan (module path + scan date).
 ```
 
-**Why this is the only sanctioned deletion path (rule 1 restated).** Any path matching
+**Why this is the only sanctioned deletion path.** Any path matching
 `prompt_args.risk_carveout` **NEVER** receives a RETIRE
 task — a deletion touching such a path is an operator-escalation-class decision (ADR-0005),
 so those modules route `ready-for-human` at step 2 and this template is never emitted for them.
 The template's precondition block re-states that carve-out so the follow-up
 `hydra-target-build` dispatch fails closed if a deletion would stray into a carve-out path.
-
-> **Cross-ref follow-up (out of scope of issue #2723 — different repo).** The Target's own
-> `CLAUDE.md` should cross-reference this template as the only sanctioned
-> deletion path. That edit lives in the target repo and is intentionally NOT made in
-> this orchestrator PR. Tracked as a follow-up Target-repo change.
 
 ## The `gh`-write seam (ADR-0031)
 
@@ -247,8 +230,7 @@ gh issue close "$ANCHOR_NUM" --repo "$REPO" --reason completed \
 ```
 
 The only exits are a WIRE/RETIRE `ready-for-agent` task, a `ready-for-human` operator hand-off,
-or a stale close — enforced by the label vocabulary itself (there is no `backlog` lane to
-launder an item into, which is what the retired Redis lane guard #2721 protected against).
+or a stale close.
 
 ## Report
 
@@ -270,7 +252,7 @@ skipped: #<N> <carve-out path>  → CARVE-OUT → ready-for-human
 - **Risk / live-execution → ready-for-human, always.** The carve-out (`prompt_args.risk_carveout`,
   sourced from the Target Manifest's `riskCritical.surface`) is checked BEFORE intent
   recovery; missing/empty is itself carve-out evidence (fail closed).
-- **Ambiguity never resolves to deletion** (Target `CLAUDE.md` rule 6). UNCLEAR is
+- **Ambiguity never resolves to deletion.** UNCLEAR is
   `ready-for-human`, never a RETIRE task.
 - **Never touch the Target working tree.** This skill reads and relabels/rewrites board issues
   via `gh`; the module change happens in the follow-up `ready-for-agent` task.
@@ -288,10 +270,3 @@ into `ready-for-agent` WIRE/RETIRE tasks (or `ready-for-human` on UNCLEAR / carv
 the rest for the next 24h tick, and reports the verdicts. A board with no open `wire-or-retire`
 issues is a no-op (the `wire_or_retire_target_available` signal is false, so the autopilot never
 dispatches this in the first place).
-
-## Dispatch wiring
-
-Dispatched by the autopilot `wire_or_retire_target` signal class on the
-`wire_or_retire_target_available` signal, at a 24h cooldown. Tracked by issue
-#2722 under epic #2720. Issues are filed with `wire-or-retire` + `needs-triage` on the Target
-board by `/hydra-target-cleanup`; this skill resolves at most 2 per run.

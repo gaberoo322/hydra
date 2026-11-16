@@ -23,20 +23,8 @@
     "docs/operator-playbooks/_fragments/hydra-qa-reference.md": {
       "status": 6
     },
-    "docs/operator-playbooks/_fragments/thermo-nuclear-proposal-format.md": {
-      "status": 1,
-      "line-cite": 1
-    },
-    "docs/operator-playbooks/hydra-architect.md": {
-      "avoid-term": 2
-    },
     "docs/operator-playbooks/hydra-architecture-scan.md": {
-      "status": 4,
-      "line-cite": 1
-    },
-    "docs/operator-playbooks/hydra-auto-merge-window.md": {
-      "status": 2,
-      "avoid-term": 12
+      "status": 2
     },
     "docs/operator-playbooks/hydra-autopilot.md": {
       "status": 2,
@@ -45,14 +33,8 @@
     "docs/operator-playbooks/hydra-dev.md": {
       "status": 2
     },
-    "docs/operator-playbooks/hydra-discover.md": {
-      "avoid-term": 1
-    },
     "docs/operator-playbooks/hydra-grill.md": {
       "target": 7
-    },
-    "docs/operator-playbooks/hydra-incident.md": {
-      "target": 10
     },
     "docs/operator-playbooks/hydra-prd.md": {
       "status": 3,
@@ -63,8 +45,7 @@
       "line-cite": 1
     },
     "docs/operator-playbooks/hydra-research.md": {
-      "status": 2,
-      "avoid-term": 3
+      "status": 2
     },
     "docs/operator-playbooks/hydra-retro.md": {
       "status": 2
@@ -72,24 +53,8 @@
     "docs/operator-playbooks/hydra-review.md": {
       "status": 5
     },
-    "docs/operator-playbooks/hydra-skill-prune.md": {
-      "status": 2
-    },
-    "docs/operator-playbooks/hydra-sweep.md": {
-      "status": 1
-    },
-    "docs/operator-playbooks/hydra-tool-scout.md": {
-      "status": 3,
-      "avoid-term": 1
-    },
     "docs/operator-playbooks/hydra-wayfinder.md": {
       "status": 4
-    },
-    "docs/operator-playbooks/hydra-wire-or-retire.md": {
-      "status": 2
-    },
-    "docs/operator-playbooks/thermo-nuclear-code-quality-review.md": {
-      "status": 5
     }
   }
 }

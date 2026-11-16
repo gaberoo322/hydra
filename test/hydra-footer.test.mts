@@ -2,7 +2,7 @@
  * Regression tests for `scripts/hydra/footer.sh` (issue #2556).
  *
  * The `Source: <skill> | <ISO ts>` gh-issue provenance footer was hand-copied
- * across hydra-incident / hydra-research / hydra-discover (x3) /
+ * across hydra-target-incident / hydra-research / hydra-discover (x3) /
  * hydra-target-discover. Downstream parsers (classes.json provenance labels,
  * retro/reconciler footer matching) split on the exact `Source: <skill> |`
  * shape, so the extracted helper MUST emit a byte-identical line. These tests
@@ -30,12 +30,12 @@ function run(args: string[]): { code: number; out: string } {
 
 describe("footer.sh — plain form (incident/research/target-discover)", () => {
   test("emits 'Source: <skill> | <ISO ts>' with no parenthetical", () => {
-    const { code, out } = run(["hydra-incident"]);
+    const { code, out } = run(["hydra-target-incident"]);
     assert.equal(code, 0);
     const line = out.trimEnd();
     const m = line.match(/^Source: (\S+) \| (.+)$/);
     assert.ok(m, `unexpected footer shape: ${JSON.stringify(line)}`);
-    assert.equal(m![1], "hydra-incident");
+    assert.equal(m![1], "hydra-target-incident");
     assert.match(m![2], ISO_Z);
   });
 

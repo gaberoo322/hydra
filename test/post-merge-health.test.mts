@@ -6,7 +6,7 @@
  * three acceptance criteria:
  *   1. samples /api/health/full and derives execution-success + error-rate
  *      signals from the per-service status map;
- *   2. on regression past the configurable noise floor, dispatches hydra-incident
+ *   2. on regression past the configurable noise floor, dispatches hydra-target-incident
  *      (and ONLY dispatches — never reverts, never blocks);
  *   3. no-ops cleanly when the Target API is unreachable (logs, does NOT throw).
  *
@@ -27,7 +27,7 @@
  *
  * The #1817 recurrence adds the absolute-mode non-blocking fallback:
  *   7. with NO pre-merge baseline the absolute-threshold evaluator still runs,
- *      but a breach is reported `inconclusive` (logged, hydra-incident NEVER
+ *      but a breach is reported `inconclusive` (logged, hydra-target-incident NEVER
  *      dispatched) rather than alarming — post-merge health is a regression
  *      signal, meaningless without a baseline, and the Target's chronic-degraded
  *      floor breaches the absolute floors on every merge. Opt back into legacy
@@ -496,7 +496,7 @@ describe("post-merge-health: runWatch end-to-end (injected I/O)", () => {
       { fetchImpl: fakeFetchThrows("ECONNREFUSED"), spawnImpl: spawnSpy },
     );
     assert.equal(result.kind, "unreachable");
-    assert.equal(spawned, false, "must not dispatch hydra-incident when the Target is unreachable");
+    assert.equal(spawned, false, "must not dispatch hydra-target-incident when the Target is unreachable");
   });
 
   test("healthy Target => no dispatch", async () => {
@@ -518,7 +518,7 @@ describe("post-merge-health: runWatch end-to-end (injected I/O)", () => {
   // alarmWithoutBaseline: true keeps these two tests exercising the absolute-mode
   // alarm/dispatch MECHANICS (argv, dry-run gating) post-#1817-recurrence; the
   // default no-baseline behavior (inconclusive, no dispatch) is pinned separately.
-  test("regression + dispatch=true => spawns hydra-incident exactly once (alarm-only)", async () => {
+  test("regression + dispatch=true => spawns hydra-target-incident exactly once (alarm-only)", async () => {
     const calls: Array<{ cmd: string; args: string[] }> = [];
     const spawnSpy = ((cmd: string, args: string[]) => {
       calls.push({ cmd, args });
@@ -535,7 +535,7 @@ describe("post-merge-health: runWatch end-to-end (injected I/O)", () => {
     );
     assert.equal(result.kind, "alarm");
     if (result.kind === "alarm") assert.equal(result.dispatched, true);
-    assert.equal(calls.length, 1, "exactly one hydra-incident dispatch");
+    assert.equal(calls.length, 1, "exactly one hydra-target-incident dispatch");
     assert.equal(calls[0]!.cmd, "claude");
     const joined = calls[0]!.args.join(" ");
     assert.ok(
@@ -613,7 +613,7 @@ describe("post-merge-health: runWatch end-to-end (injected I/O)", () => {
     );
     assert.equal(post.kind, "healthy");
     if (post.kind === "healthy") assert.equal(post.mode, "delta");
-    assert.equal(spawned, false, "ambient degradation alone must never dispatch hydra-incident");
+    assert.equal(spawned, false, "ambient degradation alone must never dispatch hydra-target-incident");
   });
 
   test("--baseline + a NEW post-merge failure => alarm in delta mode with dispatch", async () => {
@@ -646,7 +646,7 @@ describe("post-merge-health: runWatch end-to-end (injected I/O)", () => {
       assert.equal(result.mode, "delta");
       assert.equal(result.dispatched, true);
     }
-    assert.equal(calls.length, 1, "exactly one hydra-incident dispatch");
+    assert.equal(calls.length, 1, "exactly one hydra-target-incident dispatch");
     const joined = calls[0]!.args.join(" ");
     assert.ok(joined.includes("baseline-delta"), "incident context names the comparison mode");
     assert.ok(joined.includes("deadbeef"));
@@ -677,7 +677,7 @@ describe("post-merge-health: runWatch end-to-end (injected I/O)", () => {
       assert.equal(result.verdict.regressed, true, "the underlying absolute breach is still computed (for diagnostics)");
       assert.ok(result.reason.includes("no pre-merge baseline"));
     }
-    assert.equal(spawned, false, "absolute-mode breach must NEVER dispatch hydra-incident without a baseline");
+    assert.equal(spawned, false, "absolute-mode breach must NEVER dispatch hydra-target-incident without a baseline");
   });
 
   test("HYDRA_PMH_ALARM_WITHOUT_BASELINE=1 restores legacy absolute-mode alarming", async () => {
@@ -704,7 +704,7 @@ describe("post-merge-health: runWatch end-to-end (injected I/O)", () => {
       assert.equal(result.mode, "absolute");
       assert.equal(result.dispatched, true);
     }
-    assert.equal(calls.length, 1, "exactly one hydra-incident dispatch when opted in");
+    assert.equal(calls.length, 1, "exactly one hydra-target-incident dispatch when opted in");
   });
 
   // The exact #1817 recurrence: NO baseline (Step-7 snapshot skipped / Target was
@@ -737,7 +737,7 @@ describe("post-merge-health: runWatch end-to-end (injected I/O)", () => {
       },
     );
     assert.equal(result.kind, "inconclusive", "the chronic-degraded floor is not a merge regression without a baseline");
-    assert.equal(spawned, false, "must never dispatch hydra-incident on the absolute-mode chronic floor");
+    assert.equal(spawned, false, "must never dispatch hydra-target-incident on the absolute-mode chronic floor");
   });
 
   test("--snapshot-out with an unreachable Target => clean no-op, no baseline file", async () => {
@@ -994,7 +994,7 @@ describe("post-merge-health: runWatch end-to-end freshness-flap (issue #1817)", 
     );
     assert.equal(result.kind, "healthy", "the scanner freshness flap must not alarm");
     if (result.kind === "healthy") assert.equal(result.mode, "delta");
-    assert.equal(spawned, false, "no hydra-incident dispatch on a freshness flap");
+    assert.equal(spawned, false, "no hydra-target-incident dispatch on a freshness flap");
   });
 
   // A REAL regression (scanner into error) still alarms + dispatches.
@@ -1020,7 +1020,7 @@ describe("post-merge-health: runWatch end-to-end freshness-flap (issue #1817)", 
     );
     assert.equal(result.kind, "alarm", "scanner into error is a real regression");
     if (result.kind === "alarm") assert.equal(result.dispatched, true);
-    assert.equal(calls.length, 1, "exactly one hydra-incident dispatch");
+    assert.equal(calls.length, 1, "exactly one hydra-target-incident dispatch");
   });
 });
 
