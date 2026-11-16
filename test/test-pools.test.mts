@@ -426,7 +426,7 @@ describe("test-durations — zero-row count and absent capture", () => {
   });
 });
 
-describe("test-pools — codeOnly edge arms (QA round 1)", () => {
+describe("test-pools — codeOnly edge arms", () => {
   test("a semicolon-less type-only export does not swallow a following real import", () => {
     const out = codeOnly('export type { A }\nimport Redis from "ioredis"\nconst x = 1\n', "a.ts");
     assert.match(out, /ioredis/);
