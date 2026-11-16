@@ -31,6 +31,7 @@ import {
   repoTimerUnits,
   skip,
   summariseTarget,
+  targetPaths,
   targetTimerPattern,
   type CollectorResult,
 } from "../scripts/ops-collect-logic.ts";
@@ -96,7 +97,7 @@ describe("collectCycles", () => {
       assert.equal(Object.hasOwn(counts, "research_orch"), false);
     }
     const text = renderText("cycles", result);
-    assert.match(text, /"classesNotRecorded":\["research_orch"\]/);
+    assert.match(text, /classes not recorded: research_orch/);
     assert.doesNotMatch(text, /research_orch"?\s*[:=]\s*0/);
     assert.equal(data(collectCycles({ trend: [{}] })).coverage, null);
   });
@@ -519,21 +520,53 @@ describe("reframe-saves, cost-by-class, today, architecture", () => {
         { prNumber: 1, title: "old", mergedAt: new Date(NOW - 30 * HOUR).toISOString() },
         { prNumber: 0, title: "undated" },
       ],
+      limit: 50,
     };
     const d = data(collectToday(summary, merges, { count: 3, truncated: false }, NOW, 24));
     assert.deepEqual(d.merges.map((m) => m.prNumber), [2]);
     assert.equal(d.issuesOpened, 4);
     assert.equal(d.issuesClosed, 3);
     assert.equal(d.issuesClosedNote, null);
+    assert.equal(d.mergesUnavailable, false);
+    assert.equal(d.mergesTruncated, false);
+    assert.equal(d.mergesNote, null);
   });
 
   test("today reports an unknown closed count as null, never as zero", () => {
-    const d = data(collectToday({ mergeCount: 0 }, null, { error: "gh-timeout" }, NOW, 24));
+    const d = data(collectToday({ mergeCount: 0 }, { error: "http-error" }, { error: "gh-timeout" }, NOW, 24));
     assert.equal(d.issuesClosed, null);
     assert.match(d.issuesClosedNote ?? "", /gh-timeout/);
     assert.deepEqual(d.merges, []);
-    assert.match(data(collectToday({}, null, { count: 200, truncated: true }, NOW, 24)).issuesClosedNote ?? "", /floor/);
-    assert.equal(failure(collectToday(null, null, { count: 0, truncated: false }, NOW, 24)).code, "bad-input");
+    const ok = { items: [], limit: 50 };
+    assert.match(data(collectToday({}, ok, { count: 200, truncated: true }, NOW, 24)).issuesClosedNote ?? "", /floor/);
+    assert.equal(failure(collectToday(null, ok, { count: 0, truncated: false }, NOW, 24)).code, "bad-input");
+  });
+
+  test("today tells a failed merges read from an empty one", () => {
+    const failed = data(collectToday({}, { error: "http-error" }, { count: 0, truncated: false }, NOW, 24));
+    assert.deepEqual(failed.merges, []);
+    assert.equal(failed.mergesUnavailable, true);
+    assert.equal(failed.mergesTruncated, false);
+    assert.match(failed.mergesNote ?? "", /http-error/);
+    const empty = data(collectToday({}, { items: [], limit: 50 }, { count: 0, truncated: false }, NOW, 24));
+    assert.equal(empty.mergesUnavailable, false);
+    assert.equal(empty.mergesNote, null);
+  });
+
+  test("today flags a truncated merge list only while the oldest fetched merge is still inside the window", () => {
+    const at = (hoursAgo: number, n: number) => ({ prNumber: n, mergedAt: new Date(NOW - hoursAgo * HOUR).toISOString() });
+    const inside = data(collectToday({}, { items: [at(1, 1), at(20, 2)], limit: 2 }, { count: 0, truncated: false }, NOW, 24));
+    assert.equal(inside.mergesTruncated, true);
+    assert.match(inside.mergesNote ?? "", /floor/);
+    // Order-independent: the oldest item is found wherever it sits.
+    const reversed = data(collectToday({}, { items: [at(20, 2), at(1, 1)], limit: 2 }, { count: 0, truncated: false }, NOW, 24));
+    assert.equal(reversed.mergesTruncated, true);
+    // The limit was hit but the oldest merge predates the window: the window is fully covered.
+    const covered = data(collectToday({}, { items: [at(1, 1), at(30, 2)], limit: 2 }, { count: 0, truncated: false }, NOW, 24));
+    assert.equal(covered.mergesTruncated, false);
+    assert.equal(covered.mergesNote, null);
+    const short = data(collectToday({}, { items: [at(1, 1)], limit: 2 }, { count: 0, truncated: false }, NOW, 24));
+    assert.equal(short.mergesTruncated, false);
   });
 
   test("architecture keeps the ten most-tangled modules", () => {
@@ -543,6 +576,99 @@ describe("reframe-saves, cost-by-class, today, architecture", () => {
     assert.equal(d.tangled.length, 10);
     assert.equal(d.tangled[0].id, "m0");
     assert.equal(failure(collectArchitecture({ moduleCount: 1 })).code, "bad-input");
+  });
+});
+
+describe("--text renderers for cycles, board and memory", () => {
+  /** One unindented summary line, then only two-space-indented rows. */
+  function assertShape(name: string, out: string) {
+    const lines = out.split("\n");
+    assert.match(lines[0], new RegExp(`^${name}: \\S`), out);
+    for (const l of lines.slice(1)) assert.match(l, /^ {2}\S/, `detail row of ${name}: ${l}`);
+    assert.doesNotMatch(out, /[{[]"/, "no raw JSON reaches --text");
+  }
+
+  test("cycles: one summary line, then anchors, repeated tasks, recent cycles and unrecorded classes", () => {
+    const metrics = collectCycles({
+      trend: [
+        { tasksMerged: 1, anchorType: "feature", taskTitle: "t1", totalDurationMs: 60000, costUsd: 2, testsAfter: 110 },
+        { tasksFailed: 1, anchorType: "feature", taskTitle: "t1", testsAfter: 100 },
+      ],
+      coverage: { recordedClasses: ["dev_orch"], classesNotRecorded: ["qa_orch"] },
+    });
+    const out = renderText("cycles", metrics);
+    assertShape("cycles", out);
+    const lines = out.split("\n");
+    assert.match(lines[0], /2 cycles, 1 merged \(50%\), 1 failed, 0 abandoned/);
+    assert.deepEqual(
+      lines.slice(1).map((l) => l.trim().split(":")[0].split(" ")[0]),
+      ["anchors", "repeated", "recent", "recent", "classes"],
+    );
+    assert.match(out, /classes not recorded: qa_orch/);
+  });
+
+  test("cycles: null durations and cost render as n/a, and a missing coverage block adds no row", () => {
+    const out = renderText("cycles", collectCycles({ trend: [{ tasksMerged: 1, taskTitle: "x" }] }));
+    assertShape("cycles", out);
+    assert.match(out, /n\/a/);
+    assert.doesNotMatch(out, /classes not recorded/);
+  });
+
+  test("board: one summary line, labels by count descending then name, a floor marker when truncated", () => {
+    const rows = [
+      { number: 1, title: "a", labels: ["zeta", "alpha"] },
+      { number: 2, title: "b", labels: ["alpha"] },
+      { number: 3, title: "c", labels: ["beta"] },
+    ];
+    const out = renderText("board", collectBoard(rows, 3));
+    assertShape("board", out);
+    const lines = out.split("\n");
+    assert.match(lines[0], /3 open/);
+    assert.match(lines[0], /at least/);
+    assert.deepEqual(
+      lines.slice(1).map((l) => l.trim().split(":")[0]),
+      ["alpha", "beta", "zeta"],
+    );
+    assert.doesNotMatch(renderText("board", collectBoard(rows, 200)), /at least/);
+  });
+
+  test("board: an empty board is one line with no detail rows", () => {
+    const out = renderText("board", collectBoard([], 200));
+    assertShape("board", out);
+    assert.equal(out.split("\n").length, 1);
+  });
+
+  test("memory: agents in read order, then FAILED rows, and null last-seen renders as n/a", () => {
+    const reads = [
+      { agent: "planner", raw: JSON.stringify([{ hitCount: 2, category: "a", lastSeen: "2026-06-01" }]) },
+      { agent: "coder", raw: JSON.stringify([{ category: "b" }]) },
+      { agent: "broken", error: "ECONNREFUSED" },
+    ];
+    const out = renderText("memory", collectMemory(reads));
+    assertShape("memory", out);
+    const lines = out.split("\n");
+    assert.match(lines[0], /2 agents read, 1 failed/);
+    assert.match(lines[1], /^ {2}planner:/);
+    assert.match(lines[2], /^ {2}coder: .*n\/a/);
+    assert.match(lines[3], /^ {2}FAILED broken: redis-error \(ECONNREFUSED\)/);
+  });
+
+  test("a renderer is total: a summary with null fields never throws", () => {
+    const board = { open: 0, truncated: false, byLabel: { x: 1 }, samples: {} };
+    assert.doesNotThrow(() => renderText("board", { ok: true, data: board }));
+    const cycles = { cycles: 0, merged: 0, failed: 0, abandoned: 0, mergeRatePct: 0, fixes: 0, features: 0, avgDurationSec: null, medianDurationSec: null, maxDurationSec: null, avgCostUsd: null, totalCostUsd: null, testsFirst: 0, testsLast: 0, testsDelta: 0, anchors: {}, repeatedTasks: [], recent: [], coverage: null };
+    assert.doesNotThrow(() => renderText("cycles", { ok: true, data: cycles }));
+  });
+});
+
+describe("targetPaths", () => {
+  test("reads workspace and app dir from Target facts, and returns null for anything unusable", () => {
+    assert.deepEqual(targetPaths({ workspace: "/w", manifest: { ok: true, appSubdir: "web" } }), { workspace: "/w", appDir: "/w/web" });
+    assert.deepEqual(targetPaths({ workspace: "/w", manifest: { ok: false } }), { workspace: "/w", appDir: "/w" });
+    assert.deepEqual(targetPaths({ workspace: "/w" }), { workspace: "/w", appDir: "/w" });
+    assert.equal(targetPaths({}), null);
+    assert.equal(targetPaths(null), null);
+    assert.equal(targetPaths("x"), null);
   });
 });
 
@@ -754,6 +880,17 @@ describe("ops-collect CLI, in process", () => {
     assert.equal(out.collectors.board.code, "gh-failed");
     assert.equal(out.collectors.today.data.mergeCount, 1);
     assert.equal(out.collectors.today.data.issuesClosed, null);
+    assert.equal(out.collectors.today.data.mergesUnavailable, true);
+    assert.match(out.collectors.today.data.mergesNote, /http-error/);
+  });
+
+  test("today flags a merge list that hit the request limit inside the window", async () => {
+    const items = Array.from({ length: 50 }, (_, i) => ({ prNumber: i, mergedAt: new Date(NOW - (i + 1) * 60_000).toISOString() }));
+    const out = await runJson(["--collectors", "today"], {
+      getJson: async (path) => (path.startsWith("/api/today/merges") ? { ok: true, data: { items } } : { ok: true, data: { mergeCount: 50 } }),
+    });
+    assert.equal(out.collectors.today.data.mergesTruncated, true);
+    assert.equal(out.collectors.today.data.mergesUnavailable, false);
   });
 
   test("a collector that never answers degrades to a timeout without holding up the others", async () => {
@@ -792,6 +929,7 @@ describe("ops-collect CLI, in process", () => {
   test("--help documents every collector and every flag", () => {
     const help = helpText();
     for (const name of Object.keys(COLLECTORS)) assert.ok(help.includes(`\n  ${name}\n`), `--help names ${name}`);
+    for (const field of ["mergesUnavailable", "mergesTruncated", "mergesNote"]) assert.ok(COLLECTORS.today.help.includes(field), field);
     for (const flag of ["--collectors", "--text", "--window-hours", "--count", "--help"]) assert.ok(help.includes(flag), flag);
   });
 });
@@ -820,6 +958,13 @@ describe("ops-collect CLI, spawned", () => {
     assert.equal(r.status, 0);
     assert.equal(r.stdout.trim(), helpText());
   });
+
+  test("stderr is empty on a normal run and on an API-unreachable run, so a playbook can keep it visible", () => {
+    assert.equal(spawn(["--help"]).stderr, "");
+    const down = spawn(["--collectors", "cycles,scheduler,today"]);
+    assert.equal(down.status, 0);
+    assert.equal(down.stderr, "");
+  });
 });
 
 /** Bodies of every fenced block of a markdown document. */
@@ -829,6 +974,18 @@ function fencedBlocks(markdown: string): string[] {
 
 describe("operator playbooks that read through ops-collect", () => {
   const playbooks = ["hydra-architect.md", "hydra-doctor.md"];
+
+  test("the doctor and digest command lines keep stderr visible and keep the unavailable fallback", () => {
+    for (const name of ["hydra-doctor.md", "hydra-digest.md"]) {
+      const body = readFileSync(new URL(`../docs/operator-playbooks/${name}`, import.meta.url), "utf8");
+      const cmds = body.split("\n").filter((l) => l.includes("scripts/ops-collect.ts") && l.startsWith("cd ~/hydra"));
+      assert.ok(cmds.length > 0, name);
+      for (const c of cmds) {
+        assert.doesNotMatch(c, /2>\s*\/dev\/null/, `${name} discards stderr`);
+        assert.ok(c.endsWith('|| echo "ops-collect unavailable"'), `${name} keeps the fallback token`);
+      }
+    }
+  });
 
   for (const name of playbooks) {
     const body = readFileSync(new URL(`../docs/operator-playbooks/${name}`, import.meta.url), "utf8");

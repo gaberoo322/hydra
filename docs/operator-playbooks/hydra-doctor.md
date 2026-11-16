@@ -20,9 +20,9 @@ Every block prints raw output; none of them parses anything.
 
 ### Collectors
 ```bash
-cd ~/hydra && npx tsx scripts/ops-collect.ts --collectors cycles,board,alerts,memory,redis-server,timers,redis-backup,journal-errors,target-git,kill-chain --text --count 20 2>/dev/null || echo "ops-collect unavailable"
+cd ~/hydra && npx tsx scripts/ops-collect.ts --collectors cycles,board,alerts,memory,redis-server,timers,redis-backup,journal-errors,target-git,kill-chain --text --count 20 || echo "ops-collect unavailable"
 ```
-One line per collector, detail rows indented; field meanings: `npx tsx scripts/ops-collect.ts --help`. A line reading `<collector>: <code> (<reason>)` means no data for that probe, so keep going; `ops-collect unavailable` means the CLI crashed: a finding.
+One line per collector, detail rows indented; field meanings: `npx tsx scripts/ops-collect.ts --help`. A line reading `<collector>: <code> (<reason>)` means no data for that probe, so keep going; `ops-collect unavailable` means the CLI crashed (the lines printed just before it are the cause): a finding.
 
 - The first line is `target:`. `<unresolved>` is a Target-config finding; the Target collectors then print `skipped (Target unresolved)` and the rest still run.
 - `cycles` carries `coverage.classesNotRecorded`: those classes write no cycle record, so their absence is not a zero.

@@ -93,6 +93,16 @@ export function summariseTarget(facts: unknown): TargetSummary {
   };
 }
 
+/** Workspace and app directory of resolved Target facts; null when the facts carry no workspace. */
+export function targetPaths(facts: unknown): { workspace: string; appDir: string } | null {
+  const f = obj(facts);
+  const workspace = f ? str(f.workspace) : "";
+  if (!f || !workspace) return null;
+  const manifest = obj(f.manifest);
+  const sub = manifest && manifest.ok === true ? str(manifest.appSubdir) : "";
+  return { workspace, appDir: sub ? `${workspace.replace(/\/+$/, "")}/${sub}` : workspace };
+}
+
 // ---------------------------------------------------------------------------
 // cycles
 // ---------------------------------------------------------------------------
@@ -824,10 +834,19 @@ export interface TodaySummary {
   issuesClosed: number | null;
   issuesClosedNote: string | null;
   merges: Array<{ prNumber: number; title: string; tier: string; classLabel: string; mergedAt: string }>;
+  /** True when the merges read failed: `merges: []` then means "could not read", not "none". */
+  mergesUnavailable: boolean;
+  /** True when the read hit its request limit and the oldest fetched merge is still inside the window. */
+  mergesTruncated: boolean;
+  /** Why the merge list is not the whole story; null for a complete read. */
+  mergesNote: string | null;
 }
 
 /** What the caller learned about issues closed in the window. */
 export type ClosedIssuesRead = { count: number; truncated: boolean } | { error: string };
+
+/** What the caller learned about the merged PRs: the fetched items and the limit asked for, or the failure code. */
+export type MergesRead = { items: unknown[]; limit: number } | { error: string };
 
 /**
  * Summarise `/api/today/summary` plus the merges of `/api/today/merges` that
@@ -835,7 +854,7 @@ export type ClosedIssuesRead = { count: number; truncated: boolean } | { error: 
  */
 export function collectToday(
   summaryRaw: unknown,
-  mergesRaw: unknown,
+  mergesRead: MergesRead,
   closed: ClosedIssuesRead,
   nowMs: number,
   windowHours: number,
@@ -843,7 +862,8 @@ export function collectToday(
   const s = obj(summaryRaw);
   if (!s) return fail("bad-input", "today summary is not an object");
   const sinceMs = nowMs - windowHours * HOUR_MS;
-  const merges = objects(obj(mergesRaw)?.items)
+  const fetched = "error" in mergesRead ? [] : objects(mergesRead.items);
+  const merges = fetched
     .filter((m) => {
       const ms = Date.parse(str(m.mergedAt));
       return Number.isFinite(ms) && ms >= sinceMs;
@@ -855,6 +875,16 @@ export function collectToday(
       classLabel: str(m.classLabel),
       mergedAt: str(m.mergedAt),
     }));
+  const mergesUnavailable = "error" in mergesRead;
+  // Truncated: the read hit its limit AND even its oldest merge is inside the window, so older in-window merges may be missing.
+  const stamps = fetched.map((m) => Date.parse(str(m.mergedAt))).filter(Number.isFinite);
+  const mergesTruncated =
+    !("error" in mergesRead) && mergesRead.items.length >= mergesRead.limit && stamps.length > 0 && Math.min(...stamps) >= sinceMs;
+  const mergesNote = "error" in mergesRead
+    ? `merges read failed (${mergesRead.error})`
+    : mergesTruncated
+      ? "merge list is a floor (read limit hit inside the window)"
+      : null;
   return {
     ok: true,
     data: {
@@ -867,6 +897,9 @@ export function collectToday(
       issuesClosed: "error" in closed ? null : closed.count,
       issuesClosedNote: "error" in closed ? `closed-issue read failed (${closed.error})` : closed.truncated ? "closed count is a floor (read limit hit)" : null,
       merges,
+      mergesUnavailable,
+      mergesTruncated,
+      mergesNote,
     },
   };
 }
@@ -912,13 +945,61 @@ export function collectArchitecture(raw: unknown): CollectorResult<ArchitectureS
 // text rendering
 // ---------------------------------------------------------------------------
 
+/** The data type each collector with a `--text` renderer produces. */
+interface TextData {
+  cycles: CycleSummary;
+  board: BoardSummary;
+  memory: MemoryReport;
+  alerts: AlertsSummary;
+  "redis-server": RedisServerSummary;
+  timers: TimersSummary;
+  "redis-backup": RedisBackupSummary;
+  "journal-errors": JournalErrorsSummary;
+  "target-git": TargetGitSummary;
+  "kill-chain": KillChainSummary;
+  "reframe-saves": ReframeSavesSummary;
+}
+
+const orNA = (v: string | number | null | undefined, unit = ""): string => (v === null || v === undefined ? "n/a" : `${v}${unit}`);
+
 /** Per-collector `--text` renderers; a collector without one prints its data as JSON. */
-const TEXT: Record<string, (data: any) => string> = {
-  alerts: (d: AlertsSummary) =>
+const TEXT: { [K in keyof TextData]: (data: TextData[K]) => string } = {
+  cycles: (d) => {
+    const signed = d.testsDelta > 0 ? `+${d.testsDelta}` : String(d.testsDelta);
+    const head = `${d.cycles} cycles, ${d.merged} merged (${d.mergeRatePct}%), ${d.failed} failed, ${d.abandoned} abandoned | ${d.fixes} fixes, ${d.features} features | duration avg=${orNA(d.avgDurationSec, "s")} median=${orNA(d.medianDurationSec, "s")} max=${orNA(d.maxDurationSec, "s")} | cost avg=${orNA(d.avgCostUsd)} total=${orNA(d.totalCostUsd)} USD | tests ${d.testsFirst}->${d.testsLast} (${signed})`;
+    const anchors = Object.entries(d.anchors).map(([k, n]) => `${k}=${n}`).join(" ");
+    return [
+      head,
+      ...(anchors ? [`  anchors: ${anchors}`] : []),
+      ...d.repeatedTasks.map((t) => `  repeated x${t.count}: ${t.title}`),
+      ...d.recent.map((r) => `  recent ${r.status}: ${r.title}`),
+      ...(d.coverage && d.coverage.classesNotRecorded.length ? [`  classes not recorded: ${d.coverage.classesNotRecorded.join(", ")}`] : []),
+    ].join("\n");
+  },
+  board: (d) => {
+    const labels = Object.entries(d.byLabel).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+    return [
+      `${d.truncated ? "at least " : ""}${d.open} open issues, ${labels.length} labels${d.truncated ? " (read limit hit, counts are a floor)" : ""}`,
+      ...labels.map(([label, n]) => {
+        const nums = (d.samples[label] ?? []).map((s) => `#${s.number}`).join(" ");
+        return `  ${label}: ${n}${nums ? ` (${nums})` : ""}`;
+      }),
+    ].join("\n");
+  },
+  memory: (d) =>
+    [
+      `${d.agents.length} agents read, ${d.failed.length} failed | ${d.agents.reduce((n, a) => n + a.patterns, 0)} patterns`,
+      ...d.agents.map(
+        (a) =>
+          `  ${a.agent}: patterns=${a.patterns} hits=${a.totalHits} bytes=${a.bytes} lastSeen=${orNA(a.lastSeen)} top=${a.topCategories.map((c) => `${c.category}(${c.hits})`).join(",") || "n/a"}`,
+      ),
+      ...d.failed.map((f) => `  FAILED ${f.agent}: ${f.code} (${f.reason})`),
+    ].join("\n"),
+  alerts: (d) =>
     d.active === 0
       ? `no active alerts (${d.scanned} scanned)`
       : [`${d.active} active ${JSON.stringify(d.bySeverity)}`, ...d.recent.map((a) => `  [${a.severity}] ${a.timestamp.slice(0, 16)} ${a.message}`)].join("\n"),
-  "redis-server": (d: RedisServerSummary) =>
+  "redis-server": (d) =>
     `used_memory=${d.usedMemoryHuman ?? "?"} maxmemory=${d.maxMemoryHuman ?? "?"} keys=${d.keys ?? "?"}`,
   timers: (d: TimersSummary) => {
     const head = d.findings.length ? d.findings.join("; ") : `${d.repo.length} repo timers enabled and scheduled`;
@@ -935,22 +1016,22 @@ const TEXT: Record<string, (data: any) => string> = {
     );
     return [`${head}${live} | ${target}`, ...rows].join("\n");
   },
-  "redis-backup": (d: RedisBackupSummary) =>
+  "redis-backup": (d) =>
     d.newest === null
       ? `NONE FOUND under ${d.dir} (a finding)`
       : `newest=${d.newest} age=${d.ageHours}h ${d.stale ? `STALE (past ${d.staleAfterHours}h)` : `fresh (stale past ${d.staleAfterHours}h)`}`,
-  "journal-errors": (d: JournalErrorsSummary) =>
+  "journal-errors": (d) =>
     [
       `${d.matched} error line(s) in ${d.unit} over ${d.windowHours}h${d.truncated ? " (journal truncated)" : ""}${d.timedOut ? " (journal read timed out)" : ""}`,
       ...d.lines.map((l) => `  ${l}`),
     ].join("\n"),
-  "target-git": (d: TargetGitSummary) =>
+  "target-git": (d) =>
     [
       `${d.dirtyFiles} dirty file(s), ${d.commits} commit(s) in ${d.windowHours}h`,
       ...d.dirtySample.map((l) => `  dirty ${l}`),
       ...d.commitSample.map((l) => `  ${l}`),
     ].join("\n"),
-  "kill-chain": (d: KillChainSummary) => {
+  "kill-chain": (d) => {
     const l = d.ledger;
     const head =
       d.verdict === "FLAG"
@@ -965,7 +1046,7 @@ const TEXT: Record<string, (data: any) => string> = {
       : `  deadcode-baseline: n/a (${d.baselineNote})`;
     return [head, ...(l ? l.breaches.map((x) => `  ${x.daysPastGrace}d past grace — ${x.path}`) : []), ledger, baseline].join("\n");
   },
-  "reframe-saves": (d: ReframeSavesSummary) =>
+  "reframe-saves": (d) =>
     [
       `${d.count} in ${d.windowHours}h (${d.undateable} undateable excluded, ${d.scanned} events scanned)`,
       ...d.sample.map((s) => `  ${s.timestamp.slice(0, 16)} ${s.anchorRef} — ${s.reason}`),
@@ -980,7 +1061,7 @@ export function renderText(name: string, result: CollectorResult<unknown>): stri
   if (result.ok === false) {
     return `${name}: ${result.skipped ? "skipped" : result.code} (${result.reason})`;
   }
-  const render = TEXT[name];
+  const render = Object.hasOwn(TEXT, name) ? (TEXT[name as keyof TextData] as (data: unknown) => string) : undefined;
   return `${name}: ${render ? render(result.data) : JSON.stringify(result.data)}`;
 }
 

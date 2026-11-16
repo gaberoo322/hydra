@@ -55,10 +55,12 @@ import {
   repoTimerUnits,
   skip,
   summariseTarget,
+  targetPaths,
   type AgentMemoryRead,
   type ClosedIssuesRead,
   type CollectorResult,
   type LiveTimer,
+  type MergesRead,
   type TargetSummary,
 } from "./ops-collect-logic.ts";
 
@@ -68,11 +70,19 @@ const HERE = fileURLToPath(new URL(".", import.meta.url));
 const ORCHESTRATOR_UNIT = "hydra-orchestrator.service";
 /** Row limit of the board and closed-issue reads. */
 const ISSUE_LIMIT = 200;
+/** Row limit of the `today` merged-PR read. */
+const MERGES_LIMIT = 50;
 /** Ceiling for one collector; a slower one degrades to `timeout`. */
 const COLLECTOR_TIMEOUT_MS = 12_000;
 const ADAPTER_TIMEOUT_MS = 10_000;
 
 type ReadFailure = { error: string };
+
+/** The `items` array of a `/api/today/merges` body; empty when the body has none. */
+function itemsOf(body: unknown): unknown[] {
+  const items = body !== null && typeof body === "object" ? (body as { items?: unknown }).items : undefined;
+  return Array.isArray(items) ? items : [];
+}
 
 /** Everything the collectors read from outside the process. Tests inject fakes. */
 export interface Adapters {
@@ -203,7 +213,7 @@ interface ResolvedTarget {
 }
 
 function resolveTarget(a: Adapters): ResolvedTarget {
-  let facts: any;
+  let facts: unknown;
   try {
     facts = a.targetFacts();
   } catch (err) {
@@ -215,9 +225,8 @@ function resolveTarget(a: Adapters): ResolvedTarget {
     };
   }
   const summary = summariseTarget(facts);
-  if (!summary.resolved) return { summary, workspace: null, appDir: null };
-  const sub = facts.manifest?.ok === true ? String(facts.manifest.appSubdir ?? "") : "";
-  return { summary, workspace: facts.workspace, appDir: sub ? join(facts.workspace, sub) : facts.workspace };
+  const paths = summary.resolved ? targetPaths(facts) : null;
+  return { summary, workspace: paths?.workspace ?? null, appDir: paths?.appDir ?? null };
 }
 
 interface Ctx {
@@ -394,19 +403,20 @@ export const COLLECTORS: Record<string, Collector> = {
     run: (ctx) => viaJson(ctx, "/api/metrics/cost-by-class", collectCostByClass),
   },
   today: {
-    help: "/api/today/summary + /api/today/merges + closed issues (window default 24h, 1-168). Fields: windowHours, mergeCount, runCount, costSpent, headroom, issuesOpened, issuesClosed (null when the read failed), issuesClosedNote, merges[{prNumber, title, tier, classLabel, mergedAt}].",
+    help: "/api/today/summary + /api/today/merges + closed issues (window default 24h, 1-168). Fields: windowHours, mergeCount, runCount, costSpent, headroom, issuesOpened, issuesClosed (null when the read failed), issuesClosedNote, merges[{prNumber, title, tier, classLabel, mergedAt}], mergesUnavailable (true when the merges read failed: merges [] then means could-not-read, not none), mergesTruncated (true when the read hit its limit of 50 with its oldest merge still inside the window: merges is a floor), mergesNote (why, else null).",
     run: async (ctx) => {
       const hours = Math.min(168, Math.max(1, Math.round(ctx.windowHours ?? 24)));
       const now = ctx.a.now();
       const [summary, merges, closed] = await Promise.all([
         ctx.a.getJson(`/api/today/summary?windowHours=${hours}`),
-        ctx.a.getJson("/api/today/merges?limit=50"),
+        ctx.a.getJson(`/api/today/merges?limit=${MERGES_LIMIT}`),
         ctx.a.closedIssuesSince(new Date(now - hours * 3_600_000).toISOString(), ISSUE_LIMIT),
       ]);
       if (summary.ok !== true) return summary;
+      const mergesRead: MergesRead = merges.ok === true ? { items: itemsOf(merges.data), limit: MERGES_LIMIT } : { error: merges.code };
       const closedRead: ClosedIssuesRead =
         "error" in closed ? { error: closed.error } : { count: closed.rows.length, truncated: closed.rows.length >= ISSUE_LIMIT };
-      return collectToday(summary.data, merges.ok === true ? merges.data : null, closedRead, now, hours);
+      return collectToday(summary.data, mergesRead, closedRead, now, hours);
     },
   },
   architecture: {

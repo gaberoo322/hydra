@@ -19,11 +19,11 @@ Concise summary of recent Hydra system activity. Aggregates cycle metrics, test 
 ### 1. Collect
 
 ```bash
-cd ~/hydra && npx tsx scripts/ops-collect.ts --collectors cycles,cost-by-class,scheduler,board,alerts,today,target-git,kill-chain,reframe-saves --window-hours 24 --count 50 2>/dev/null || echo "ops-collect unavailable"
+cd ~/hydra && npx tsx scripts/ops-collect.ts --collectors cycles,cost-by-class,scheduler,board,alerts,today,target-git,kill-chain,reframe-saves --window-hours 24 --count 50 || echo "ops-collect unavailable"
 git -C ~/hydra log --oneline --since="24 hours ago"
 ```
 
-Set `--window-hours` and `--since` to `$period` (`7d` is 168 hours) and raise `--count` for a longer period. The first command prints one JSON document with a result per collector; field meanings: `npx tsx scripts/ops-collect.ts --help`. `ops-collect unavailable` means the CLI crashed: report it under Operator Actions Needed.
+Set `--window-hours` and `--since` to `$period` (`7d` is 168 hours) and raise `--count` for a longer period. The first command prints one JSON document with a result per collector; field meanings: `npx tsx scripts/ops-collect.ts --help`. `ops-collect unavailable` means the CLI crashed (the lines printed just before it are the cause): report it under Operator Actions Needed.
 
 - A result with `ok: false` has no data: print `n/a (<code>: <reason>)` for the rows it feeds and keep going. One missing collector never blanks the rest of the digest.
 - `target.resolved: false` is worth a line under Operator Actions Needed; the Target collectors are then `skipped`.
