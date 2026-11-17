@@ -140,13 +140,13 @@ enforced-by: reviewer, scripts/ci/playbook-vocabulary-ratchet.ts
 
 Executable logic lives in a tested script. The playbook says when and why to run it.
 
-enforced-by: reviewer
+enforced-by: reviewer, scripts/ci/playbook-vocabulary-ratchet.ts
 
 ### STD-PLAYBOOK-CURRENT-BEHAVIOUR
 
 Describe only what happens now: no rollout phase, no status or history phrase, no retired glossary term, no "retired" note on a step that still runs. History belongs in git and the ADRs.
 
-enforced-by: scripts/ci/playbook-vocabulary-ratchet.ts
+enforced-by: reviewer, scripts/ci/playbook-vocabulary-ratchet.ts
 
 ### STD-PLAYBOOK-ONE-HOME
 
