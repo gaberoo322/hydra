@@ -133,6 +133,20 @@ export function scanPools(root = REPO_ROOT) {
     }
     return textCache.get(f);
   };
+  // HAZARDS judge the raw, uncommented text (INV-12): only the Redis marker and
+  // dependency edges use the comment-stripped view.
+  const rawCache = new Map();
+  const readRaw = (f) => {
+    if (!rawCache.has(f)) {
+      try {
+        rawCache.set(f, readFileSync(f, "utf8"));
+      } catch {
+        /* intentional: unreadable dependency is treated as empty */
+        rawCache.set(f, "");
+      }
+    }
+    return rawCache.get(f);
+  };
   const depsOf = (f) => {
     const text = read(f);
     const deps = new Set();
@@ -172,8 +186,9 @@ export function scanPools(root = REPO_ROOT) {
       seen.add(f);
       const text = read(f);
       if (REDIS_MARKERS.test(text)) return { redis: true, hazard: null };
-      hazard ??= HAZARDS.find(([re]) => re.test(text))?.[1] ?? null;
-      for (const m of text.matchAll(PATH_LITERAL_RE)) {
+      const raw = readRaw(f);
+      hazard ??= HAZARDS.find(([re]) => re.test(raw))?.[1] ?? null;
+      for (const m of raw.matchAll(PATH_LITERAL_RE)) {
         const lit = m[1];
         if (!/\.(sh|py|mjs)$/.test(lit)) continue;
         const known =

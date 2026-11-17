@@ -308,6 +308,20 @@ describe("test-pools — hazard scan is transitive (QA round 2)", () => {
     }
   });
 
+  test("a hazard mentioned only in a comment still pins serial; a hazard-free sibling stays parallel", () => {
+    const root = tree({
+      "test/a.test.mts": "// uses git worktree add and /tmp/shared-thing\nexport const x = 1;\n",
+      "test/b.test.mts": "export const y = 1;\n",
+    });
+    try {
+      const m = scanPools(root);
+      assert.ok("test/a.test.mts" in m.serialPinned);
+      assert.deepEqual(m.parallel, ["test/b.test.mts"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("a Redis marker reached through a slashless script literal keeps the test out of both lists", () => {
     const root = tree({
       "test/a.test.mts": 'spawn("db.mjs");\n',
