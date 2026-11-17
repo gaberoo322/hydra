@@ -33,6 +33,8 @@ const {
   writeJsonBaseline,
   diffBaselineGrowth,
   BaselineGrowthRefusedError,
+  formatGrowthAdvice,
+  formatStaleAdvice,
   writeBaselineOrRefuse,
   REPO_ROOT,
 } = await import("../scripts/ci/seam-check-lib.ts");

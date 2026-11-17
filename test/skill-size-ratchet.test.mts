@@ -224,15 +224,7 @@ describe("skill-size-ratchet: description cap with grandfathering", () => {
   });
 });
 
-describe("shared advice formatters + shrink hints (#5552)", () => {
-  test("formatGrowthAdvice / formatStaleAdvice satisfy INV-2 / INV-3", async () => {
-    const { formatGrowthAdvice, formatStaleAdvice } = await import("../scripts/ci/seam-check-lib.ts");
-    const g = formatGrowthAdvice({ cmd: "npm run x -- --write-baseline", baselineRel: "b.json", rowKey: "count", fixVerb: "fix it", current: 7 });
-    assertGrowthAdvice(g);
-    assert.match(g, /Baseline-raise: b\.json count/);
-    assertStaleAdvice(formatStaleAdvice({ baselineRel: "b.json", rowAction: "lower the row" }));
-  });
-
+describe("skill-size shrink hints (#5552)", () => {
   const shrunk = [
     { path: PB, current: 80, baseline: 100 },
     { path: FRAG, current: 5, baseline: 9 },
