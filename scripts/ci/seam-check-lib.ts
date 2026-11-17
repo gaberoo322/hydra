@@ -31,9 +31,11 @@
  * second consumer family — the size / coupling / typecheck / subject-map
  * ratchets — as I/O-ONLY consumers. They hand-rolled the same read/write
  * ritual with diverging fallback conventions; the primitives stay
- * payload-shape-agnostic and policy-ignorant (the same "engine knows nothing
- * per-check" discipline above), with each script's fallback mode and note
- * wording expressed at its own call site.
+ * payload-shape-agnostic (the same "engine knows nothing per-check"
+ * discipline above), with each script's fallback mode and note wording
+ * expressed at its own call site. The ONE shared policy is the growth gate
+ * (#5551): `writeJsonBaseline` refuses to write a payload that grows the
+ * existing baseline unless `--allow-grow` is on process.argv.
  */
 
 import { readFile, writeFile } from "node:fs/promises";
