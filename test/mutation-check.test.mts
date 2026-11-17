@@ -25,11 +25,14 @@ import {
   buildRelatedTestCommand,
   isGateBlocking,
   resolveKillRateVerdict,
+  resolveMaxMutants,
+  resolveSampleSeed,
+  DEFAULT_MAX_MUTANTS,
 } from "../scripts/ci/mutation-check.ts";
 // Issue #4346: classifyTimedOut moved to the shared leaf imported by both
 // gates — retarget this import, assertions unchanged.
 import { classifyTimedOut } from "../src/mutation-gate-inputs.ts";
-import { conclusiveMutants, type MutationTestReport } from "../src/mutation.ts";
+import { conclusiveMutants, selectMutationSample, type MutationTestReport } from "../src/mutation.ts";
 
 /**
  * Build a MutationTestReport for the classifyNoSignal tests. Only the four
@@ -583,5 +586,68 @@ describe("non-blocking rollout switch + conclusive kill rate (issue #4504)", () 
       classifyNoSignal(makeReport({ totalMutants: 5, killed: 1, noCoverage: 4, candidatesGenerated: 5 }), 3),
       null,
     );
+  });
+});
+
+describe("deterministic mutant sampling + complete-vs-timed-out split (issue #5583)", () => {
+  const mk = (file: string, line: number) => ({
+    file,
+    line,
+    original: "a === b",
+    mutated: `a !== b /* ${line} */`,
+    type: "swap-comparison",
+  });
+  const pool = [
+    ...Array.from({ length: 40 }, (_, i) => mk("/p/src/a.ts", i + 1)),
+    ...Array.from({ length: 5 }, (_, i) => mk("/p/src/b.ts", i + 1)),
+    mk("/p/src/c.ts", 1),
+  ];
+
+  test("same seed gives the same sample regardless of emission order", () => {
+    const one = selectMutationSample(pool, "sha-1", 12);
+    const two = selectMutationSample([...pool].reverse(), "sha-1", 12);
+    assert.equal(one.length, 12);
+    assert.deepEqual(two, one);
+  });
+
+  test("a different seed gives a different sample", () => {
+    const one = selectMutationSample(pool, "sha-1", 12);
+    const other = selectMutationSample(pool, "sha-2", 12);
+    assert.notDeepEqual(other, one);
+  });
+
+  test("cap >= file count keeps every file represented (round-robin)", () => {
+    const sample = selectMutationSample(pool, "sha-1", 3);
+    assert.deepEqual(new Set(sample.map((m) => m.file)), new Set(["/p/src/a.ts", "/p/src/b.ts", "/p/src/c.ts"]));
+  });
+
+  test("cap above pool size returns the whole pool", () => {
+    assert.equal(selectMutationSample(pool, "s", 1000).length, pool.length);
+  });
+
+  test("resolveMaxMutants: unset/garbled -> 32, 0 -> uncapped, N -> N", () => {
+    assert.equal(DEFAULT_MAX_MUTANTS, 32);
+    assert.equal(resolveMaxMutants(undefined), 32);
+    assert.equal(resolveMaxMutants(""), 32);
+    assert.equal(resolveMaxMutants("abc"), 32);
+    assert.equal(resolveMaxMutants("0"), undefined);
+    assert.equal(resolveMaxMutants("10"), 10);
+  });
+
+  test("resolveSampleSeed precedence: MUTATION_SAMPLE_SEED > GITHUB_SHA > unseeded", () => {
+    assert.equal(resolveSampleSeed({ MUTATION_SAMPLE_SEED: "x", GITHUB_SHA: "y" }), "x");
+    assert.equal(resolveSampleSeed({ GITHUB_SHA: "y" }), "y");
+    assert.equal(resolveSampleSeed({}), "unseeded");
+  });
+
+  test("a complete sampled report is not timed out; a timed-out one names the sample", () => {
+    const done = makeReport({ totalMutants: 32, killed: 30, candidatesGenerated: 79, timedOut: false });
+    assert.equal(classifyTimedOut({ ...done, candidatesSampled: 32 }), null);
+    const cut = classifyTimedOut({
+      ...makeReport({ totalMutants: 20, killed: 15, candidatesGenerated: 79, timedOut: true }),
+      candidatesSampled: 32,
+    });
+    assert.ok(cut);
+    assert.match(cut.reason, /20 of 32 sampled candidate mutant\(s\)/);
   });
 });

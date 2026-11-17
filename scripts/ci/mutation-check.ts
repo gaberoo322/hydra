@@ -36,7 +36,11 @@
  *                                 authority). tier>=3 selects the T3 floor.
  *   MUTATION_TIME_BUDGET_MS     — overall time budget (default 540_000 = 9m,
  *                                 leaves 60s buffer under the 10m CI step timeout)
- *   MUTATION_MAX_MUTANTS        — optional cap on candidate mutants
+ *   MUTATION_MAX_MUTANTS        — cap on candidate mutants (issue #5583:
+ *                                 defaults to 32 when unset/non-numeric; 0 =
+ *                                 uncapped escape hatch)
+ *   MUTATION_SAMPLE_SEED        — seed for the deterministic sample; falls back
+ *                                 to GITHUB_SHA, then the literal 'unseeded'
  *
  * Quick-fix bypass: if the PR body contains "[quick-fix]" (via PR_BODY env)
  * the gate writes a "neutral" status and exits 0. Mirrors the in-cycle
@@ -124,6 +128,25 @@ import {
   parseIntEnv,
   readChangedFiles,
 } from "../../src/mutation-gate-inputs.ts";
+
+/** Issue #5583: default per-PR candidate cap so a typical PR finishes in budget. */
+export const DEFAULT_MAX_MUTANTS = 32;
+
+/**
+ * Issue #5583: resolve the candidate cap. Unset / non-numeric -> default 32;
+ * an explicit `0` (or negative) is the uncapped escape hatch (`undefined`,
+ * which the runner treats as Infinity).
+ */
+export function resolveMaxMutants(raw: string | undefined): number | undefined {
+  const n = raw === undefined || raw.trim() === "" ? NaN : Number(raw);
+  if (!Number.isInteger(n)) return DEFAULT_MAX_MUTANTS;
+  return n <= 0 ? undefined : n;
+}
+
+/** Issue #5583: MUTATION_SAMPLE_SEED > GITHUB_SHA > 'unseeded' (spawn-free). */
+export function resolveSampleSeed(env: Record<string, string | undefined>): string {
+  return env.MUTATION_SAMPLE_SEED || env.GITHUB_SHA || "unseeded";
+}
 
 /**
  * Filter a list of changed paths down to the files the mutation gate
@@ -483,8 +506,8 @@ async function main(): Promise<number> {
   const tier = parseIntEnv("PR_TIER", 3); // missing/garbled tier → conservative T3 band
   const killFloor = selectKillFloor(tier, baseFloor, t3Floor);
   const timeBudgetMs = parseIntEnv("MUTATION_TIME_BUDGET_MS", DEFAULT_TIME_BUDGET_MS);
-  const maxMutantsRaw = process.env.MUTATION_MAX_MUTANTS;
-  const maxMutants = maxMutantsRaw ? parseInt(maxMutantsRaw, 10) : undefined;
+  const maxMutants = resolveMaxMutants(process.env.MUTATION_MAX_MUTANTS);
+  const sampleSeed = resolveSampleSeed(process.env);
   const testTimeoutMs = parseIntEnv("MUTATION_TEST_TIMEOUT_MS", DEFAULT_TEST_TIMEOUT_MS);
   const maxRelatedTests = parseIntEnv("MUTATION_MAX_RELATED_TESTS", DEFAULT_MAX_RELATED_TESTS);
   const blocking = isGateBlocking(process.env.MUTATION_GATE_BLOCKING);
@@ -520,6 +543,7 @@ async function main(): Promise<number> {
   const report = await runMutationTests(projectDir, inspectable, {
     timeBudgetMs,
     maxMutants,
+    sampleSeed,
     testTimeoutMs,
     timeoutIsInconclusive: true,
     verifyBaseline: true,
@@ -529,6 +553,8 @@ async function main(): Promise<number> {
   });
 
   const testable = conclusiveMutants(report);
+  const candidatesSampled = report.candidatesSampled ?? report.candidatesGenerated;
+  const sampledMeta = { sampled: candidatesSampled < report.candidatesGenerated, candidatesSampled };
 
   // No-signal case (issue #1120): the diff produced ZERO testable mutants — the
   // gate cannot conclude. The pre-#1120 code fabricated `killRate = 100` here,
@@ -598,6 +624,9 @@ async function main(): Promise<number> {
         skipped: report.skipped,
         skippedUnparseable: report.skippedUnparseable ?? 0,
         candidatesGenerated: report.candidatesGenerated,
+        sampled: sampledMeta.sampled,
+        candidatesSampled: sampledMeta.candidatesSampled,
+        sampleSeed,
         durationMs: report.durationMs,
         inspectable: inspectable.length,
         relatedTests,
@@ -629,6 +658,9 @@ async function main(): Promise<number> {
     skipped: report.skipped,
     skippedUnparseable: report.skippedUnparseable ?? 0,
     candidatesGenerated: report.candidatesGenerated,
+    sampled: sampledMeta.sampled,
+    candidatesSampled: sampledMeta.candidatesSampled,
+    sampleSeed,
     timedOut: report.timedOut,
     durationMs: report.durationMs,
     relatedTests,

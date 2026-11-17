@@ -1,0 +1,1 @@
+- fix: cap and deterministically sample mutation-gate candidates so PR runs finish in budget (#5583)
