@@ -99,7 +99,7 @@ describe("playbook-vocabulary-ratchet: each banned shape is detected", () => {
 
 describe("playbook-vocabulary-ratchet: the Historical: exemption", () => {
   test("a line marked Historical: is exempt from every shape", () => {
-    const body = "not yet at src/gate.ts:42 in hydra-betting, the Untouchable Core, see #1945, kept for legacy";
+    const body = "not yet at src/gate.ts:42 in hydra-betting, the Untouchable Core, see #1945, kept for legacy, EMIT_CAP";
     assert.deepEqual(
       new Set(findHits(PB, body, AVOID).map((h: { shape: string }) => h.shape)),
       new Set(SHAPES.filter((s: string) => s !== "shell-lines")),
@@ -259,7 +259,7 @@ describe("playbook-vocabulary-ratchet: issue-cite, back-compat and shell-lines s
 
   test("new shapes sit after the original four so existing hit order is unchanged", () => {
     assert.deepEqual(SHAPES.slice(0, 4), ["status", "line-cite", "target", "avoid-term"]);
-    assert.deepEqual(SHAPES.slice(4), ["issue-cite", "back-compat", "shell-lines"]);
+    assert.deepEqual(SHAPES.slice(4), ["issue-cite", "back-compat", "shell-lines", "symbol-cite"]);
   });
 
   test("a shape count above its baseline fails like the original shapes", () => {
@@ -295,6 +295,49 @@ describe("playbook-vocabulary-ratchet: issue-cite, back-compat and shell-lines s
     assert.equal(resolveShapeFilter(["--write-baseline"]), undefined);
     assert.equal(resolveShapeFilter([]), undefined);
     assert.deepEqual(resolveShapeFilter(["--write-baseline", "--shape", "issue-cite"]), ["issue-cite"]);
+  });
+});
+
+describe("playbook-vocabulary-ratchet: the symbol-cite shape", () => {
+  const sym = (text: string): string[] => hits(text, "symbol-cite");
+
+  test("counts a constant, a camelCase call and a dotted field path, in prose or code spans", () => {
+    assert.deepEqual(sym("The cap is EMIT_CAP and `childLabels()` reads .pr.headSha.\nAlso `SYMBOLS_PER_BATCH`."), [
+      "1 symbol-cite EMIT_CAP",
+      "1 symbol-cite childLabels()",
+      "1 symbol-cite .pr.headSha",
+      "2 symbol-cite SYMBOLS_PER_BATCH",
+    ]);
+  });
+
+  test("a bare camelCase word, a one-segment field and a plain constant are not hits", () => {
+    assert.deepEqual(sym("Call childLabels then read .headSha on the HTTP OK path."), []);
+  });
+
+  test("a $VAR or ${VAR} shell read is exempt, the same name without its sigil is a hit", () => {
+    assert.deepEqual(sym("Read $TARGET_WS and ${TARGET_GH_REPO:?unset} here."), []);
+    assert.deepEqual(sym("Read TARGET_WS here."), ["1 symbol-cite TARGET_WS"]);
+  });
+
+  test("filenames, extensions and globs are not hits", () => {
+    assert.deepEqual(sym("See CODING_STANDARDS.md, *.test.mts, .d.ts, foo.test.mts and HYDRA_TARGET_*."), []);
+  });
+
+  test("a symbol tied to its file by an attribution phrase is exempt", () => {
+    assert.deepEqual(sym("`EMIT_CAP` in `scripts/ci/x.ts` bounds it."), []);
+    assert.deepEqual(sym("`scripts/ci/x.ts`'s `childLabels()` renders it."), []);
+    assert.deepEqual(sym("`EMIT_CAP` and `OTHER_CAP` in `scripts/ci/x.ts`."), ["1 symbol-cite EMIT_CAP"]);
+  });
+
+  test("fenced blocks and a Historical: line are skipped", () => {
+    assert.deepEqual(sym(["```text", "EMIT_CAP childLabels() .a.b", "```"].join("\n")), []);
+    assert.deepEqual(sym("Historical: EMIT_CAP was here."), []);
+  });
+
+  test("a symbol-cite overrun adds the shape-specific fix line", () => {
+    const found = { [PB]: findHits(PB, "EMIT_CAP", AVOID) };
+    const report = formatReport(compareAgainstBaseline(found, { note: "", files: {} }));
+    assert.match(report, /symbol-cite fix: attribute the symbol/);
   });
 });
 
