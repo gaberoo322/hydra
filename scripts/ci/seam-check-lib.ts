@@ -347,6 +347,41 @@ export function diffBaselineGrowth(prev: unknown, next: unknown): GrowthRow[] {
   return rows;
 }
 
+/**
+ * Growth-path advice shared by every ratchet (STD-BASELINE-EDIT-ROWS). Pure
+ * string builder: fix the code first; reviewed growth ONLY sets exactly that
+ * row to the printed value, and the PR body carries a `Baseline-raise:` line.
+ */
+export function formatGrowthAdvice(opts: {
+  cmd: string;
+  baselineRel: string;
+  rowKey: string;
+  fixVerb: string;
+  current: number | string;
+}): string {
+  return (
+    `Fix the code first: ${opts.fixVerb}. For reviewed growth ONLY, set exactly the ` +
+    `\`${opts.rowKey}\` row in ${opts.baselineRel} to ${opts.current} (hand-edit, or ` +
+    `\`${opts.cmd} --allow-grow\` when it moves no other row) AND add a PR-body line ` +
+    `\`Baseline-raise: ${opts.baselineRel} ${opts.rowKey} — <reason>\` ` +
+    `(STD-BASELINE-EDIT-ROWS in CODING_STANDARDS.md).`
+  );
+}
+
+/**
+ * Stale-path advice shared by every ratchet: hand-edit only the listed rows,
+ * never regenerate the baseline. Names no writer command.
+ */
+export function formatStaleAdvice(opts: {
+  baselineRel: string;
+  rowAction: string;
+}): string {
+  return (
+    `In ${opts.baselineRel}, ${opts.rowAction} by hand — only the listed rows. ` +
+    `Do not regenerate the whole baseline file (STD-BASELINE-EDIT-ROWS in CODING_STANDARDS.md).`
+  );
+}
+
 /** Thrown by writeJsonBaseline when the payload would grow the on-disk baseline. */
 export class BaselineGrowthRefusedError extends Error {
   readonly code = "baseline-growth-refused" as const;
@@ -525,7 +560,12 @@ export async function runSeamCheck(config: SeamCheckConfig): Promise<number> {
     console.error(`[${config.name}] Baseline is stale — these files no longer violate:`);
     for (const c of fixedCallers) console.error(`  - ${c}`);
     console.error("");
-    console.error("Re-run with --write-baseline and commit the shrunk baseline.");
+    console.error(
+      formatStaleAdvice({
+        baselineRel: relative(REPO_ROOT, config.baselinePath),
+        rowAction: "delete the listed rows (the files no longer violate)",
+      }),
+    );
     return 1;
   }
 
