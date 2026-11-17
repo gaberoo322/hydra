@@ -154,7 +154,7 @@
     },
     "docs/operator-playbooks/hydra-target-build.md": {
       "issue-cite": 8,
-      "shell-lines": 346
+      "shell-lines": 328
     },
     "docs/operator-playbooks/hydra-target-cleanup.md": {
       "issue-cite": 16,
