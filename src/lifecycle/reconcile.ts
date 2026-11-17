@@ -207,7 +207,7 @@ export function closingPrs(openPrs: readonly OpenPrRef[], issue: number, include
 }
 
 /** The newest written entry that carries a destination state, or null. */
-function lastWrittenTransition(entries: readonly LifecycleJournalEntry[]): LifecycleJournalEntry | null {
+export function lastWrittenTransition(entries: readonly LifecycleJournalEntry[]): LifecycleJournalEntry | null {
   for (let i = entries.length - 1; i >= 0; i--) {
     if (entries[i].written && entries[i].to !== null) return entries[i];
   }

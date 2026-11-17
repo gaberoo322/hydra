@@ -316,7 +316,7 @@
   "test/lifecycle-caps.test.mts": 10,
   "test/lifecycle-dispatch-adoption.test.mts": 4,
   "test/lifecycle-dispatch-claim.test.mts": 7,
-  "test/lifecycle-gates.test.mts": 16,
+  "test/lifecycle-gates.test.mts": 17,
   "test/lifecycle-journal.test.mts": 3,
   "test/lifecycle-qa-verdict.test.mts": 8,
   "test/lifecycle-reconcile.test.mts": 9,

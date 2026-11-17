@@ -33,6 +33,34 @@ export interface PrRecord {
   body: string;
 }
 
+/**
+ * True when a `gh issue view` row's `url` points at a pull request. GitHub serves a PR
+ * through the issue endpoints, so a PR number "re-reads" as an issue row; the lifecycle
+ * seam refuses `not-an-issue` rather than journal a state for it (#5584 INV-4).
+ */
+export function isPullRequestUrl(url: string): boolean {
+  return /\/pull\/\d+$/.test(url);
+}
+
+/**
+ * Fold a `gh pr view` / REST `/pulls/<n>` record into a {@link PrRecord}. REST reports a
+ * merged PR as `state: "closed"` with a non-empty `mergedAt`; without this fold the
+ * `pr-not-merged` gate could never pass for a merged PR (#5584 INV-5).
+ */
+export function prRecordFromView(view: {
+  number: number;
+  state?: string | null;
+  body?: string | null;
+  mergedAt?: string | null;
+}): PrRecord {
+  const merged = typeof view.mergedAt === "string" && view.mergedAt !== "";
+  return {
+    number: view.number,
+    state: merged ? "MERGED" : String(view.state ?? "").toUpperCase(),
+    body: view.body ?? "",
+  };
+}
+
 /** A GitHub issue comment, bound to its repo + issue via the REST `issue_url`. */
 export interface CommentRecord {
   id: number;
