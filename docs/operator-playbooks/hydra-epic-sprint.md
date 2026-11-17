@@ -53,8 +53,29 @@ curl -s localhost:4000/api/autopilot/paused
   - `git push https://github.com/gaberoo322/hydra.git HEAD:<branch>`
   - `git fetch https://github.com/gaberoo322/hydra.git +refs/heads/master:refs/remotes/origin/master`
 - Read the epic's ADR and every sub-issue (`## Files in scope`, `Blocked by`, acceptance criteria).
-- **Pause the autopilot for the sprint** (`curl -s -X POST localhost:4000/api/autopilot/paused -H 'content-type: application/json' -d '{"paused":true}'`), unless the operator chooses to keep it live. Claiming a slice with `in-progress` doesn't keep the autopilot off it. `board-state` treats an `in-progress` issue with no open PR as stale after 90 minutes, and `recover-stale.sh` puts it back to `ready-for-agent`, so `dev_orch` would double-dispatch a slice that is waiting its turn. If the autopilot stays live, claim a slice only when its build agent is dispatched, leave `blocked` labels alone, and accept that 90-minute window.
+- **Pause the autopilot for the sprint** (`curl -s -X POST localhost:4000/api/autopilot/paused -H 'content-type: application/json' -d '{"paused":true}'`), unless the operator chooses to keep it live. A held dispatch claim already refuses a second `dispatch` of the same slice, but it doesn't keep the autopilot off the epic: a live `qa_orch` would review `needs-qa` sprint issues (a FAIL disarms the auto-merge), and the 90-minute stale re-queue in `recover-stale.sh` only honours the claim once the seam is in `enforce`. If the autopilot stays live, dispatch a slice only when its build agent is launched, leave `blocked` labels alone, and accept those windows.
 - `~/hydra` must be on `master` (`git -C ~/hydra rev-parse --abbrev-ref HEAD`), because the QA-Override recipe loads the merge guard and line renderer from that checkout. If it isn't, run the recipe from a fresh `origin/master` worktree.
+
+## Lifecycle moves (the seam)
+
+Every lifecycle state write in this sprint is one of the calls below, run by the **parent operator session only** (ADR-0047). Never write a state label directly, and never follow a refused call with a direct label write. All calls carry `--actor epic-sprint`.
+
+| Moment | Call |
+|--------|------|
+| Birth of a sprint-created issue | `gh issue create` with flag labels only (never a state label), then `npx tsx scripts/lifecycle.ts advance <N> needs-triage --actor epic-sprint` |
+| Sub-slice to be built in this sprint | `npx tsx scripts/lifecycle.ts advance <N> ready-for-agent --reason scoped --rationale "<epic> slice <i>" --actor epic-sprint` (needs a `## Files in scope` section in the body) |
+| Slice still `blocked`, built stacked on an unmerged sibling | `curl -s -X POST localhost:4000/api/autopilot/board/relabel -H 'content-type: application/json' -d '{"issue":<N>,"label":"ready-for-agent"}'` (the Step 1 plan approval is the authorisation), then dispatch |
+| Before launching the build agent | `npx tsx scripts/lifecycle.ts dispatch <N> --dispatch epic-sprint-<EPIC>-<N>-<unix ts> --class dev_orch --run epic-sprint-<EPIC> --purpose fresh` (`--purpose resume` from `needs-dev-resume`). Keep the dispatch id |
+| The PR whose body says `Closes #N` opens | `npx tsx scripts/lifecycle.ts advance <N> needs-qa --evidence pr=<PR> --actor epic-sprint`, then `npx tsx scripts/lifecycle.ts release <N> --dispatch <id> --outcome pr-opened --actor epic-sprint` |
+| Sprint abandons a slice | `npx tsx scripts/lifecycle.ts release <N> --dispatch <id> --outcome no-pr --actor epic-sprint`, then `advance <N> ready-for-agent --actor epic-sprint` |
+
+Rules:
+- `--reason` takes an enum member from `src/lifecycle/reasons.ts` (`scoped`, `unblocked`, ...). Prose goes in `--rationale`, never in `--reason`.
+- One claim per slice, held across every PR of the slice and released once. Never re-queue to `ready-for-agent` between PRs of a slice: that is the `requeue` cap edge (limit 2) and would park a three-PR slice. A `Part of #N` PR fires no state write; only the closing PR moves the slice to `needs-qa`.
+- A dead build agent is replaced under the same claim, with no state write.
+- Never write `blocked` for build sequencing; merge order lives in the Step 1 plan.
+- A reviewer FAIL writes no state: the findings go back to the same build agent via `SendMessage`, and the issue stays where it is. Never bounce to `needs-dev-resume` and never post a synthetic `QA-Verdict:` trailer.
+- A non-zero exit is final. `claim-held` means another dispatch owns the slice: stop work on it and report. `parked:<arm>` means stop and show the operator. Any other refusal is logged with its JSON line and reported in Step 7.
 
 ## Step 1 — Map the epic, then confirm once
 
@@ -93,17 +114,17 @@ Write one rules file to the scratchpad. Every build agent reads it first, which 
   - `scope-justification:` lines and a `Decisions taken` section;
   - ends with the Claude Code footer.
 - **Verification, all in the foreground:** touched tests, full `npm test`, `typecheck`, `typecheck:test`, and the fail-loud lint.
-- **Rules for the agent:** no merging, no CI polling, no relabelling, no nested sub-agents. Report the PR URL, head SHA, verification results and decisions.
+- **Rules for the agent:** no merging, no CI polling, no relabelling, no `scripts/lifecycle.ts` calls, no nested sub-agents. Report the PR URL, head SHA, verification results and decisions.
 
 ## Step 3 — Dispatch build agents
 
-Launch one `Agent` (general-purpose, background) per ready slice, in a single message so they run concurrently. The prompt is: the rules file path, the slice issue number, the base branch, and anything slice-specific (stacking, seam owner). Keep each agent's ID: fixes and reconciles go back to the **same** agent via `SendMessage`, so its context is reused.
+Launch one `Agent` (general-purpose, background) per ready slice, in a single message so they run concurrently. The prompt is: the rules file path, the slice issue number, the base branch, and anything slice-specific (stacking, seam owner). Run the `dispatch` call from the Lifecycle moves table for each slice immediately before launching its agent. Keep each agent's ID: fixes and reconciles go back to the **same** agent via `SendMessage`, so its context is reused.
 
 ## Step 4 — Independent review per PR
 
-When a build agent reports, launch a separate read-only reviewer agent. Its prompt template:
+When a build agent reports and its closing PR is open, run the `needs-qa` advance and `release` from the Lifecycle moves table, then launch a separate read-only reviewer agent. Its prompt template:
 
-> Independent READ-ONLY reviewer for PR #N (<title>, implements #I under ADR-X). No `gh pr checkout`, no pushes, edits, comments or sub-agents. Inspect with `gh pr view/diff` and the slice's worktree; run tests and scripts only into scratch, and never dispatch, un-pause or POST to the live service.
+> Independent READ-ONLY reviewer for PR #N (<title>, implements #I under ADR-X). No `gh pr checkout`, no pushes, edits, comments, `scripts/lifecycle.ts` calls or sub-agents. Inspect with `gh pr view/diff` and the slice's worktree; run tests and scripts only into scratch, and never dispatch, un-pause or POST to the live service.
 >
 > SPEC: re-verify the evidence yourself rather than trusting the PR body: replay goldens or parity against the OLD code, run mutation checks, and walk 2–3 nontrivial pieces line by line against what they replace. Judge each `Decisions taken` item.
 >
@@ -152,7 +173,7 @@ Then start a background watcher. It checks every 90s and exits on `MERGED`, `DIR
 
 1. After the last merge settles, check `curl -s localhost:4000/api/health` for `deployedSha` vs `originMasterSha`. If they still differ once CI is idle, run `bash scripts/deploy.sh` once.
 2. Live-check the shipped behaviour on the deployed code, read-only or plan-only.
-3. File follow-ups for every deferred low or newly found bug (`needs-triage`, with a `## Files in scope` section).
+3. File follow-ups for every deferred low or newly found bug: `gh issue create` with a `## Files in scope` section and no state label, then `advance <N> needs-triage --actor epic-sprint` (Lifecycle moves table).
 4. Close the epic with a comment mapping each slice to its PR, the outcome and the follow-ups.
 5. Remove the merged sprint worktrees (only clean ones), stop the watchers, and resume the autopilot if Step 0 paused it (`-d '{"paused":false}'`).
 6. Report to the operator: merged PRs, what changed, what cost time, the follow-ups, and anything that needs them.
