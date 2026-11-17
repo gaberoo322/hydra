@@ -4,6 +4,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { lastWrittenTransition } from "../src/lifecycle/reconcile.ts";
 import {
   advance,
   journalEntry,
@@ -1059,7 +1060,7 @@ describe("self-move no-op, PR guard and merged-PR fold (#5584)", () => {
     });
   }
 
-  test("a human-hold self-move is a no-op, not a human-hold-exit, and is not a hold exit", async () => {
+  test("a human-hold self-move is a no-op and is not journaled as a hold exit", async () => {
     const h = harness(["hitl-grill"], "enforce");
     const res = await advance({ issue: 10, to: "hitl-grill" }, h.deps);
     assert.equal(res.ok && res.noop, true);
@@ -1122,5 +1123,23 @@ describe("self-move no-op, PR guard and merged-PR fold (#5584)", () => {
     assert.equal(f({ state: "closed", mergedAt: null }), "CLOSED");
     assert.equal(f({ state: "open" }), "OPEN");
     assert.equal(f({ state: "MERGED" }), "MERGED");
+  });
+
+  test("a noop journal row never changes lastWrittenTransition's pick (#5584 INV-7)", () => {
+    const base = { v: 1, repo: "o/r", issue: 10, actor: "x", source: "cli", evidence: {} } as any;
+    const written = { ...base, ts: 1, kind: "transition", from: "needs-qa", to: "ready-for-agent", result: "ok", written: true };
+    const noop = { ...base, ts: 2, kind: "transition", from: "needs-qa", to: "needs-qa", result: "noop", written: false };
+    assert.equal(lastWrittenTransition([written, noop]), written);
+    // sibling shape: a WRITTEN row after it still wins
+    const writtenSelf = { ...noop, written: true };
+    assert.equal(lastWrittenTransition([written, writtenSelf]), writtenSelf);
+  });
+
+  test("gateClose passes on a folded merged REST record and still refuses an unmerged one (#5584 INV-5)", () => {
+    const input = gi({ to: "closed", closeReason: "completed", evidence: { pr: "55" }, issue: 10 });
+    const merged = prRecordFromView({ number: 55, state: "closed", mergedAt: "2026-11-07T05:28:01Z", body: "Closes #10" });
+    assert.equal(gateClose(input, { pr: { ok: true, value: merged } }).ok, true);
+    const unmerged = prRecordFromView({ number: 55, state: "closed", mergedAt: null, body: "Closes #10" });
+    assert.equal(gateClose(input, { pr: { ok: true, value: unmerged } }).code, "pr-not-merged");
   });
 });
