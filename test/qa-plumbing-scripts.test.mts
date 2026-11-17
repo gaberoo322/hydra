@@ -1491,7 +1491,7 @@ describe("spawned CLIs (production adapter, fake gh on PATH)", () => {
 // Route: reviewer commit class A wired into the executed path (issue #5415)
 // ---------------------------------------------------------------------------
 
-describe("route: reviewer commit class A (issue #5415, executed-path order pins)", () => {
+describe("route: reviewer commit class A and class B (issue #5415, executed-path order pins)", () => {
   const NEW_HEAD = "f".repeat(40);
   const NEW12 = "f".repeat(12);
   const FAIL_CANNED: Canned = {
@@ -1705,6 +1705,25 @@ describe("route: reviewer commit class A (issue #5415, executed-path order pins)
       assert.match(argAfter(w[0] as string[], "--body") as string, /QA-Verdict-Error: pr=77 reason=reviewer-fixed-unverified/, name);
       assert.equal(h.advances.length, 0, `${name}: needs-qa untouched`);
     }
+  });
+
+  test("class B only: a commit-b plan over a lone QA-Fix: B commit reaches the trailer with that one sha12; a QA-Fix: A commit under it stops before the trailer (sibling)", async () => {
+    const COMMIT_B = { ...COMMIT_A, action: "commit-b", reason: "class-b-fixable", blockingPaths: [], blockingTestPaths: ["test/widget.test.mts"] };
+    const rec = recording({ ...FAIL_CANNED, reviewerCommit: COMMIT_B });
+    const h = harness({ ghHandler: rcGh(NEW_HEAD, HEAD, "test: tighten\n\nQA-Fix: B"), phase: rec.phase });
+    const r = await runRoute({ ...ROUTE_OPTS, reviewerFixed: NEW_HEAD }, readyPre(), h.ports, realDeps());
+    assert.equal(r.verdict, "PASS-pending-CI");
+    assert.deepEqual(rec.order, ["fold", "reviewer-commit", "trailer", "round-action"]);
+    assert.deepEqual(rec.inputs.trailer?.[0], { pr: 77, verdict: "PASS-pending-CI", blockers: 0, maxSeverity: "none", headSha: NEW_HEAD, qaFixes: [NEW12] });
+    // Sibling: the same plan over a QA-Fix: A trailer is refused before the trailer phase.
+    const wrong = recording({ ...FAIL_CANNED, reviewerCommit: COMMIT_B });
+    const hw = harness({ ghHandler: rcGh(NEW_HEAD, HEAD, "test: tighten\n\nQA-Fix: A"), phase: wrong.phase });
+    await assert.rejects(runRoute({ ...ROUTE_OPTS, reviewerFixed: NEW_HEAD }, readyPre(), hw.ports, realDeps()), /not verified/);
+    assert.ok(!wrong.order.includes("trailer"));
+    assert.deepEqual(wrong.order, ["fold", "reviewer-commit"]);
+    assert.equal(hw.writes().length, 1);
+    assert.match(argAfter(hw.writes()[0] as string[], "--body") as string, /QA-Verdict-Error: pr=77 reason=reviewer-fixed-unverified/);
+    assert.equal(hw.advances.length, 0);
   });
 
   test("pass 2a without a fresh commit-a decision (or on a PASS fold) is a pre-verdict exit", async () => {

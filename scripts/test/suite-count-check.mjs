@@ -123,6 +123,10 @@ export default async function* reporter(source) {
       // A failing top-level `todo` exits 0 under node:test; mark it so the
       // launcher does not treat it as a failure (issue #5335).
       if (evt.data.todo) row.todo = true;
+      // Per-file wall time for scripts/test/test-durations.mjs (issue #5275);
+      // additive: compareCapture reads only `file`.
+      const dur = evt.data.details?.duration_ms;
+      if (typeof dur === "number") row.duration_ms = dur;
       yield JSON.stringify(row) + "\n";
     }
   }

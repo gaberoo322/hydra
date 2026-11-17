@@ -159,3 +159,11 @@ enforced-by: reviewer
 Never assume the Target's name, checkout path or service. Read them from the Target facts seam.
 
 enforced-by: scripts/ci/playbook-vocabulary-ratchet.ts
+
+## Baselines
+
+### STD-BASELINE-EDIT-ROWS
+
+Move only the baseline rows for files the PR changes. Lower a row for a file you shrank. Never commit a blanket writer's output. A raised row needs a PR-body line `Baseline-raise: <fixture-path> <row-key> — <reason>`. An undisclosed raise, or a row moved for a file outside the diff, is a medium finding, reviewer-fixable as ADR-0046 class A.
+
+enforced-by: reviewer
