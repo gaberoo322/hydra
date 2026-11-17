@@ -123,7 +123,7 @@ Run these numbered steps.
 9b. **MANDATORY — run the pre-PR mechanical gate BEFORE `gh pr create`**
    Write the PR body to a file first, then run all four checks
    under "Pre-PR mechanical gate" below — reconcile dry-run against that body
-   file, baseline regeneration, foreground `npm test` + `npm run typecheck:test`,
+   file, baseline row edits, foreground `npm test` + `npm run typecheck:test`,
    and the `Merge danger:` field check (Gate 4).
    Do NOT open the PR while any of them is red; open it with
    `gh pr create --body-file <that same file>` so the checked body is the
@@ -321,24 +321,32 @@ npx tsx scripts/ci/design-concept-reconcile-run.ts \
   body file and re-run until it exits 0. `--anchor` also fails when the
   body's `Closes #N` does not name your anchor (CI binds to that ref).
 
-### Gate 2 — regenerate the ratchet baselines
+### Gate 2 — edit baseline rows, never regenerate
+
+The rule is `STD-BASELINE-EDIT-ROWS` in `CODING_STANDARDS.md`: move only the rows
+for files your PR changes, lower a row for a file you shrank, and never commit a
+blanket writer's output. A raised row needs a PR-body line
+`Baseline-raise: <fixture-path> <row-key> — <reason>`.
 
 - Added, removed, or renamed a `test/*.test.mts` file? The suite-count
   FILE-SET verdict hard-fails the required `test` job until the baseline
-  matches:
+  matches. Scope the writer to your files:
   ```bash
   node scripts/test/suite-count-check.mjs --update-baseline --only <your test files>
   ```
-  (`--only` scopes the rewrite to your files; without it the whole baseline is
-  rewritten — CLAUDE.md "SUITE-COUNT GATE".)
 - Added a test file that resolves to a new or already-baselined **subject**
   (`test/test-file-sprawl-guard.test.mts` fails)? First prefer extending the
   subject's existing test file — sprawl is what the ratchet exists to stop.
-  Only when a new file is justified, regenerate and say why in the PR body:
+  Only when a new file is justified, use the writer as a number source, revert
+  its fixture, and set the single new row by hand so the provenance note
+  survives; say why in the PR body:
   ```bash
   npx tsx scripts/ci/test-subject-map.ts --update-baseline
+  git checkout -- <fixture>
   ```
-- Commit the regenerated `test/fixtures/*-baseline.json` in the SAME PR.
+- Any other ratchet baseline (word counts, skill size): edit only your files'
+  rows by hand; run no unscoped writer.
+- Commit the edited `test/fixtures/*-baseline.json` rows in the SAME PR.
 
 ### Gate 3 — suite + test typecheck green, in the foreground
 

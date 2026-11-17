@@ -8,10 +8,12 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   buildPoolInvocations,
+  codeOnly,
   joinTap,
   runPools,
   DEFAULT_PARALLEL_CONCURRENCY,
@@ -33,9 +35,9 @@ describe("test-pools — manifest drift guard (INV-3)", () => {
     );
   });
 
-  test("no parallel-listed file mentions a Redis marker directly", () => {
+  test("no parallel-listed file mentions a Redis marker in its code (comments and type-only imports excluded)", () => {
     for (const f of loadManifest().parallel) {
-      assert.equal(REDIS_MARKERS.test(readFileSync(f, "utf8")), false, `${f} reaches Redis`);
+      assert.equal(REDIS_MARKERS.test(codeOnly(readFileSync(f, "utf8"), f)), false, `${f} reaches Redis`);
     }
   });
 
@@ -306,6 +308,20 @@ describe("test-pools — hazard scan is transitive (QA round 2)", () => {
     }
   });
 
+  test("a hazard mentioned only in a comment still pins serial; a hazard-free sibling stays parallel", () => {
+    const root = tree({
+      "test/a.test.mts": "// uses git worktree add and /tmp/shared-thing\nexport const x = 1;\n",
+      "test/b.test.mts": "export const y = 1;\n",
+    });
+    try {
+      const m = scanPools(root);
+      assert.ok("test/a.test.mts" in m.serialPinned);
+      assert.deepEqual(m.parallel, ["test/b.test.mts"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("a Redis marker reached through a slashless script literal keeps the test out of both lists", () => {
     const root = tree({
       "test/a.test.mts": 'spawn("db.mjs");\n',
@@ -318,5 +334,123 @@ describe("test-pools — hazard scan is transitive (QA round 2)", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("test-pools — narrowed scan (#5275, INV-2/4/5)", () => {
+  function tree(files: Record<string, string>) {
+    const root = mkdtempSync(join(tmpdir(), "pools-narrow-"));
+    for (const [rel, body] of Object.entries(files)) {
+      mkdirSync(dirname(join(root, rel)), { recursive: true });
+      writeFileSync(join(root, rel), body);
+    }
+    return root;
+  }
+  function scan(files: Record<string, string>) {
+    const root = tree(files);
+    try {
+      return scanPools(root);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  test("real Redis reach still classes serial: direct ioredis, transitive ioredis, spawned redis-cli", () => {
+    const m = scan({
+      "test/a.test.mts": 'import Redis from "ioredis";\n',
+      "test/b.test.mts": 'import "../src/mid.ts";\n',
+      "src/mid.ts": 'import Redis from "ioredis";\nexport const r = Redis;\n',
+      "test/c.test.mts": 'spawn("probe.sh");\n',
+      "scripts/probe.sh": "#!/bin/bash\nredis-cli ping\n",
+    });
+    assert.deepEqual(m.parallel, []);
+    assert.deepEqual(m.serialPinned, {});
+  });
+
+  test("a marker only in a comment, or in a whole import-type statement, classes parallel", () => {
+    const m = scan({
+      "test/a.test.mts": "/**\n * mentions new Redis() and ioredis\n */\nexport const x = 1;\n",
+      "test/b.test.mts": 'import type { X } from "../src/redis/foo.ts";\nexport const y = 1;\n',
+      "test/c.test.mts": "// ioredis redis-cli\nexport const z = 1;\n",
+    });
+    assert.deepEqual(m.parallel, ["test/a.test.mts", "test/b.test.mts", "test/c.test.mts"]);
+  });
+
+  test("an inline-type import is still followed (Node evaluates the module)", () => {
+    const m = scan({
+      "test/a.test.mts": 'import { type A, b } from "../src/redis/foo.ts";\n',
+      "src/redis/foo.ts": "export const b = 1;\n",
+    });
+    assert.deepEqual(m.parallel, []);
+  });
+
+  test("codeOnly is line-anchored: a mid-line block opener never hides code, #! is kept", () => {
+    assert.match(codeOnly('const g = "test/*.test.mts";\nnew Redis();\n/* x */\n', "a.ts"), /new Redis\(\)/);
+    assert.doesNotMatch(codeOnly("/**\n * new Redis()\n */\nok();\n", "a.ts"), /Redis/);
+    assert.match(codeOnly("#!/bin/bash\n# redis-cli note\nredis-cli ping\n", "a.sh"), /^#!\/bin\/bash\n\s*redis-cli ping/);
+    assert.doesNotMatch(codeOnly("# redis-cli note\nok\n", "a.sh"), /note/);
+  });
+});
+
+describe("test-durations — aggregateDurations (#5275)", () => {
+  test("sums per file, sorts descending, labels pools from the manifest", async () => {
+    const { aggregateDurations } = await import("../scripts/test/test-durations.mjs");
+    const manifest = { parallel: ["test/p.test.mts"], serialPinned: {} };
+    const r = aggregateDurations(
+      [
+        { file: "test/s.test.mts", name: "a", ok: true, duration_ms: 10 },
+        { file: "test/p.test.mts", name: "a", ok: true, duration_ms: 5 },
+        { file: "test/s.test.mts", name: "b", ok: true, duration_ms: 30 },
+        { file: "test/s.test.mts", name: "no-dur", ok: true },
+      ],
+      manifest,
+    );
+    assert.deepEqual(r.entries, [
+      { file: "test/s.test.mts", pool: "serial", ms: 40 },
+      { file: "test/p.test.mts", pool: "parallel", ms: 5 },
+    ]);
+    assert.deepEqual(r.totals, { serial: { files: 1, ms: 40 }, parallel: { files: 1, ms: 5 } });
+  });
+});
+
+describe("test-durations — zero-row count and absent capture", () => {
+  test("zeroRows counts baselined files with no capture row and renderReport prints it", async () => {
+    const { aggregateDurations, renderReport } = await import("../scripts/test/test-durations.mjs");
+    const manifest = { parallel: [], serialPinned: {} };
+    const rows = [{ file: "test/a.test.mts", duration_ms: 5 }];
+    const agg = aggregateDurations(rows, manifest, ["test/a.test.mts", "test/b.test.mts", "test/c.test.mts"]);
+    assert.equal(agg.zeroRows, 2);
+    assert.match(renderReport(agg), /2 baselined test file\(s\) with zero capture rows/);
+    // sibling shape: every baselined file has rows -> zero
+    assert.equal(aggregateDurations(rows, manifest, ["test/a.test.mts"]).zeroRows, 0);
+  });
+
+  test("parseNdjson skips a torn trailing line", async () => {
+    const { parseNdjson } = await import("../scripts/test/test-durations.mjs");
+    assert.deepEqual(parseNdjson('{"file":"a","duration_ms":1}\n{"file":"b","dur'), [{ file: "a", duration_ms: 1 }]);
+  });
+
+  test("CLI with a nonexistent capture exits 0 with a message; an invalid --pool exits 2", () => {
+    const script = join(process.cwd(), "scripts", "test", "test-durations.mjs");
+    const ok = spawnSync(process.execPath, [script, "--capture", join(tmpdir(), "no-such-capture-5275.ndjson")], { encoding: "utf8" });
+    assert.equal(ok.status, 0);
+    assert.match(ok.stdout, /no capture at/);
+    const bad = spawnSync(process.execPath, [script, "--pool", "bogus"], { encoding: "utf8" });
+    assert.equal(bad.status, 2);
+  });
+});
+
+describe("test-pools — codeOnly edge arms", () => {
+  test("a semicolon-less type-only export does not swallow a following real import", () => {
+    const out = codeOnly('export type { A }\nimport Redis from "ioredis"\nconst x = 1\n', "a.ts");
+    assert.match(out, /ioredis/);
+    // sibling shape: a real single type-only statement is still erased
+    assert.doesNotMatch(codeOnly('import type { A } from "ioredis"\nconst x = 1\n', "a.ts"), /ioredis/);
+    assert.doesNotMatch(codeOnly('export type { A } from "ioredis"\n', "a.ts"), /ioredis/);
+  });
+
+  test("code after a block comment closer on the same line is kept", () => {
+    assert.match(codeOnly("/* c */ new Redis()\n", "a.ts"), /new Redis\(\)/);
+    assert.match(codeOnly('/* x */ import Redis from "ioredis"\n', "a.ts"), /ioredis/);
   });
 });

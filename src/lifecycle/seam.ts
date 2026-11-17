@@ -59,6 +59,8 @@ import {
 import { getDesignConceptHash } from "../redis/design-concept.ts";
 import {
   evaluateGate,
+  isPullRequestUrl,
+  prRecordFromView,
   parseCommentEvidence,
   parsePrEvidence,
   recordsNeeded,
@@ -433,15 +435,12 @@ export function defaultSeamDeps(repoRoot: string): SeamDeps {
       },
       pr: async (prNumber) => {
         try {
-          const pr = await viewPr<{ number?: number; state?: string; body?: string }>(
+          const pr = await viewPr<{ number?: number; state?: string; body?: string; mergedAt?: string | null }>(
             prNumber,
-            "number,state,body",
+            "number,state,body,mergedAt",
           );
           if (pr === null || typeof pr.number !== "number") return { ok: false };
-          return {
-            ok: true,
-            value: { number: pr.number, state: String(pr.state ?? "").toUpperCase(), body: pr.body ?? "" },
-          };
+          return { ok: true, value: prRecordFromView({ ...pr, number: pr.number }) };
         } catch (err) {
           logger.error({ err, prNumber }, "[lifecycle] pr fetch failed");
           return { ok: false };
@@ -680,6 +679,8 @@ export type AdvanceResult =
       observed: { state: string; labels: string[] };
       /** Set in shadow when a cap check would have parked the issue in enforce. */
       wouldPark?: string;
+      /** Set when the issue already sat in `to`: nothing was written (#5584 INV-1). */
+      noop?: true;
     }
   | { ok: false; issue: number; code: string; mode: LifecycleMode | null; written: boolean };
 
@@ -740,6 +741,12 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
     return { ok: false, issue, code: "fetch-failed", mode, written: false };
   }
 
+  // 1a. a PR number re-reads as an issue row: refuse before any write or journal append (#5584 INV-4).
+  if (isPullRequestUrl(before.row.url)) {
+    logger.warn({ issue }, "[lifecycle] advance refused: not an issue (pull request)");
+    return { ok: false, issue, code: "not-an-issue", mode, written: false };
+  }
+
   // 2. derive state
   const isClosed = before.row.state === "CLOSED";
   const stateLabels = stateLabelsOf(before.row.labels);
@@ -749,6 +756,14 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
     : stateLabels.length === 1
       ? stateLabels[0]
       : null;
+
+  // 2a. idempotent self-move: the issue already sits in `to`. Nothing to gate or write, in BOTH
+  //     modes; a `--from` that disagrees still refuses below, and a self-move is not a hold exit
+  //     (#5584 INV-1/INV-2). A seam rule, not a table edge (INV-3).
+  if (!isClosed && stateLabels.length === 1 && from === to && (input.from === undefined || input.from === from)) {
+    await jr(entry(deps, { kind: "transition", from, result: "noop", written: false }, input));
+    return { ok: true, issue, from, to, mode, noop: true, observed: observedOf(before) };
+  }
 
   // 3. human-hold exit: refused in BOTH modes, before the mode branch.
   if (!isClosed && stateLabels.some((s) => isHumanHold(s))) {
@@ -964,6 +979,10 @@ export async function operatorAdvance(input: OperatorAdvanceInput, deps: SeamDep
 
   const before = await deps.view(issue);
   if (before.ok === false) return refuse("fetch-failed", mode, null);
+  if (isPullRequestUrl(before.row.url)) {
+    logger.warn({ issue }, "[lifecycle] operatorAdvance refused: not an issue (pull request)");
+    return { ok: false, issue, code: "not-an-issue", mode, written: false };
+  }
   if (before.row.state === "CLOSED") {
     // Closing an already-closed issue stays idempotent (the pre-seam spine
     // accepted it): ok with the observed state, no write, no journal.
