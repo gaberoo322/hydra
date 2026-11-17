@@ -150,7 +150,13 @@ export function matchesScopeList(target: string, list: readonly string[]): boole
   return list.some((s) => target.startsWith(s) || s.startsWith(target) || target.endsWith(s));
 }
 
-/** True when `path` is a gate-regenerated companion (see MECHANICAL_COMPANIONS). */
+/**
+ * True when `path` is a gate-regenerated companion (see MECHANICAL_COMPANIONS).
+ * Deliberately STRICTER than `matchesScopeList`: exact equality for file
+ * entries, `startsWith` only for entries ending in `/` — no endsWith or
+ * reverse-prefix arms, so `x/scripts/ci/skill-size-baseline.json` and
+ * `test/fixtures/test-pools.json.bak` are not companions.
+ */
 export function isMechanicalCompanion(path: string): boolean {
-  return matchesScopeList(path, MECHANICAL_COMPANIONS);
+  return MECHANICAL_COMPANIONS.some((e) => (e.endsWith("/") ? path.startsWith(e) : path === e));
 }

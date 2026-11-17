@@ -219,7 +219,7 @@ out-of-scope files. Thresholds match the historical in-cycle gate
 `src/scope-enforcement.ts` was removed by issue #476 and the CI script is
 now the single source of truth.
 
-**Always in scope.** `MECHANICAL_COMPANIONS` (`src/scope-section.ts`, re-exported
+**Always in scope.** `MECHANICAL_COMPANIONS` (`src/scope-section.ts`, imported
 by `scripts/ci/scope-check.ts`) is unioned into the in-scope set: a path is listed
 iff a repo script generates it from other tracked files AND a CI drift guard
 forces its regeneration into the same PR (`.changelog/`, `docs/generated/`, the

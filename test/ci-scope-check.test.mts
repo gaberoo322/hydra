@@ -442,6 +442,13 @@ describe("MECHANICAL_COMPANIONS", () => {
     assert.equal(isMechanicalCompanion("test/fixtures/qa-cohort-baseline.json"), false);
   });
 
+  test("isMechanicalCompanion is strict: no suffix, extension, or reverse-prefix matches", () => {
+    assert.equal(isMechanicalCompanion("x/scripts/ci/skill-size-baseline.json"), false);
+    assert.equal(isMechanicalCompanion("test/fixtures/test-pools.json.bak"), false);
+    assert.equal(isMechanicalCompanion("docs/"), false);
+    assert.equal(isMechanicalCompanion("scripts/ci/skill-size-baseline.json"), true);
+  });
+
   test("every entry is a root-relative dir prefix ending in / or a full file path, never a suffix", () => {
     for (const e of MECHANICAL_COMPANIONS) {
       assert.ok(!e.startsWith("/") && !e.startsWith("./"), `${e} must be repo-root-relative`);
