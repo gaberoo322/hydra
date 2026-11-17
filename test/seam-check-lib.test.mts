@@ -31,6 +31,9 @@ const {
   stripComments,
   loadJsonBaseline,
   writeJsonBaseline,
+  diffBaselineGrowth,
+  BaselineGrowthRefusedError,
+  writeBaselineOrRefuse,
   REPO_ROOT,
 } = await import("../scripts/ci/seam-check-lib.ts");
 
@@ -230,5 +233,136 @@ describe("seam-check-lib: isCliEntrypoint guard", () => {
       isCliEntrypoint("file:///some/other/scripts/ci/redis-seam-check.ts"),
       false,
     );
+  });
+});
+
+describe("seam-check-lib: writeJsonBaseline growth refusal (chokepoint for every ratchet writer)", () => {
+  const shapes: Array<[string, unknown, unknown, unknown, string]> = [
+    ["files map", { files: { "a.ts": 2, "b.ts": 1 } }, { files: { "a.ts": 3, "b.ts": 1 } }, { files: { "a.ts": 1 } }, "raised"],
+    ["callers array", { callers: ["x", "y"], note: "n" }, { callers: ["x", "y", "z"], note: "n" }, { callers: ["x"], note: "n2" }, "added-element"],
+    ["hits array", { hits: ["h1"] }, { hits: ["h1", "h2"] }, { hits: [] }, "added-element"],
+    ["count", { count: 5 }, { count: 6 }, { count: 4 }, "raised"],
+  ];
+
+  async function withFile(prior: unknown, fn: (path: string) => Promise<void>): Promise<void> {
+    const dir = await mkdtemp(join(tmpdir(), "growth-"));
+    try {
+      const path = join(dir, "b.json");
+      await writeFile(path, JSON.stringify(prior, null, 2) + "\n", "utf8");
+      await fn(path);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  for (const [name, prior, grown, shrunk, kind] of shapes) {
+    test(`${name}: growth is refused, names the row, leaves the file untouched`, async () => {
+      await withFile(prior, async (path) => {
+        const before = await readFile(path, "utf8");
+        await assert.rejects(
+          () => writeJsonBaseline(path, grown, { allowGrow: false }),
+          (err: any) => {
+            assert.ok(err instanceof BaselineGrowthRefusedError);
+            assert.equal(err.code, "baseline-growth-refused");
+            assert.equal(err.rows[0].kind, kind);
+            assert.match(err.message, /re-run with --allow-grow/);
+            return true;
+          },
+        );
+        assert.equal(await readFile(path, "utf8"), before);
+      });
+    });
+    test(`${name}: allowGrow permits the growth`, async () => {
+      await withFile(prior, async (path) => {
+        await writeJsonBaseline(path, grown, { allowGrow: true });
+        assert.deepEqual(JSON.parse(await readFile(path, "utf8")), grown);
+      });
+    });
+    test(`${name}: shrink writes freely`, async () => {
+      await withFile(prior, async (path) => {
+        await writeJsonBaseline(path, shrunk, { allowGrow: false });
+        assert.deepEqual(JSON.parse(await readFile(path, "utf8")), shrunk);
+      });
+    });
+    test(`${name}: unchanged payload writes freely`, async () => {
+      await withFile(prior, async (path) => {
+        await writeJsonBaseline(path, prior, { allowGrow: false });
+        assert.deepEqual(JSON.parse(await readFile(path, "utf8")), prior);
+      });
+    });
+  }
+
+  test("added object key and JSON type change are refused", () => {
+    assert.deepEqual(diffBaselineGrowth({ a: 1 }, { a: 1, b: 1 }).map((r: any) => [r.path, r.kind]), [["b", "added-key"]]);
+    assert.deepEqual(diffBaselineGrowth({ a: [] }, { a: 3 }).map((r: any) => r.kind), ["shape-changed"]);
+    assert.deepEqual(diffBaselineGrowth({ a: { b: 1 } }, { a: { b: 2 } }).map((r: any) => r.path), ["a/b"]);
+  });
+
+  test("string-only differences (timestamped note) are not growth", () => {
+    assert.deepEqual(diffBaselineGrowth({ note: "old", n: 1 }, { note: "new", n: 1 }), []);
+  });
+
+  test("missing file is a seed, not growth", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "growth-"));
+    try {
+      const path = join(dir, "new.json");
+      await writeJsonBaseline(path, { count: 99 }, { allowGrow: false });
+      assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { count: 99 });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("duplicate element (multiset growth) is refused; same multiset is not growth", async () => {
+    assert.deepEqual(diffBaselineGrowth({ hits: ["a", "b"] }, { hits: ["a", "a", "b"] }).map((r: any) => r.kind), ["added-element"]);
+    assert.deepEqual(diffBaselineGrowth({ hits: ["a", "a", "b"] }, { hits: ["b", "a", "a"] }), []);
+    assert.deepEqual(diffBaselineGrowth({ hits: ["a", "a"] }, { hits: ["a"] }), []);
+    await withFile({ hits: ["a", "b"] }, async (path) => {
+      await assert.rejects(() => writeJsonBaseline(path, { hits: ["a", "a", "b"] }, { allowGrow: false }), (err: any) => err.code === "baseline-growth-refused");
+    });
+  });
+
+  test("inherited keys do not mask an added key", () => {
+    assert.deepEqual(diffBaselineGrowth({}, { constructor: 1 }).map((r: any) => r.kind), ["added-key"]);
+  });
+
+  test("an unparseable prior baseline does not bypass the gate", async () => {
+    await withFile({}, async (path) => {
+      await writeFile(path, "{not json", "utf8");
+      await assert.rejects(() => writeJsonBaseline(path, { count: 9 }, { allowGrow: false }));
+      assert.equal(await readFile(path, "utf8"), "{not json");
+    });
+  });
+
+  test("writeBaselineOrRefuse (shared CLI handler): refusal returns 1 and calls onRefusal; shrink returns 0", async () => {
+    await withFile({ hits: ["a", "b"] }, async (path) => {
+      let called = 0;
+      assert.equal(await writeBaselineOrRefuse(path, { hits: ["a", "b", "c"] }, { allowGrow: false, onRefusal: () => { called++; } }), 1);
+      assert.equal(called, 1);
+      assert.equal(await writeBaselineOrRefuse(path, { hits: ["a"] }, { allowGrow: false }), 0);
+      assert.equal(await writeBaselineOrRefuse(path, { hits: ["a", "z"] }, { allowGrow: true }), 0);
+    });
+  });
+
+  test("no writeJsonBaseline caller bypasses the chokepoint with its own writeFile", async () => {
+    const { execFileSync } = await import("node:child_process");
+    const files = execFileSync("git", ["grep", "-l", "writeJsonBaseline(", "--", "scripts/ci/*.ts"], { cwd: REPO_ROOT, encoding: "utf8" })
+      .split("\n").filter(Boolean).filter((f: string) => !f.endsWith("seam-check-lib.ts"));
+    assert.ok(files.length >= 8);
+    for (const f of files) {
+      const src = await readFile(join(REPO_ROOT, f), "utf8");
+      assert.doesNotMatch(src, /\bwriteFile(Sync)?\(\s*[^)]*baseline/i, `${f} writes a baseline without the chokepoint`);
+    }
+  });
+
+  test("growth is refused and the file stays byte-identical", async () => {
+    await withFile({ count: 1, hits: ["a"] }, async (path) => {
+      const before = await readFile(path, "utf8");
+      await assert.rejects(
+        () => writeJsonBaseline(path, { count: 2, hits: ["a", "b"] }, { allowGrow: false }),
+        (err: any) => err.code === "baseline-growth-refused" && err.rows.length === 2,
+      );
+      assert.equal(await readFile(path, "utf8"), before);
+    });
   });
 });

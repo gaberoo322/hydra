@@ -237,3 +237,101 @@ describe("runMutationTests — honest verdict opt-ins (issue #4504)", () => {
     }
   });
 });
+
+describe("runMutationTests — deterministic sample accounting (issue #5583)", () => {
+  function multiLineProject(): { dir: string; srcFile: string } {
+    const dir = mkdtempSync(join(tmpdir(), "mutation-sample-"));
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "fixture" }));
+    const srcFile = join(dir, "target.ts");
+    writeFileSync(
+      srcFile,
+      ["export const a = () => {", "  return true;", "};", "export const b = () => {", "  return true;", "};", ""].join("\n"),
+    );
+    return { dir, srcFile };
+  }
+
+  test("sampleSeed + maxMutants caps the run and reports candidatesSampled < candidatesGenerated", async () => {
+    const { dir, srcFile } = multiLineProject();
+    try {
+      const report = await runMutationTests(dir, [srcFile], {
+        testCommand: "/bin/sh -c 'exit 1'",
+        timeBudgetMs: 30_000,
+        maxMutants: 1,
+        sampleSeed: "sha-x",
+      });
+      assert.ok(report.candidatesGenerated >= 2, "fixture must yield >= 2 candidates");
+      assert.equal(report.candidatesSampled, 1);
+      assert.equal(report.totalMutants, 1);
+      assert.equal(report.timedOut, false, "a capped run that finishes is a complete verdict");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("sibling shape: no sampleSeed leaves candidatesSampled undefined (legacy / Target gate)", async () => {
+    const { dir, srcFile } = multiLineProject();
+    try {
+      const report = await runMutationTests(dir, [srcFile], {
+        testCommand: "/bin/sh -c 'exit 1'",
+        timeBudgetMs: 30_000,
+        maxMutants: 1,
+      });
+      assert.equal(report.candidatesSampled, undefined);
+      assert.equal("candidatesSampled" in report, false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("seeded + uncapped still orders deterministically (not generation order) and repeats across runs", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mutation-sample-order-"));
+    try {
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "fixture" }));
+      const srcFile = join(dir, "target.ts");
+      const lines: string[] = [];
+      for (let i = 0; i < 8; i++) lines.push(`export const f${i} = () => {`, "  return true;", "};");
+      writeFileSync(srcFile, lines.join("\n") + "\n");
+      const log = join(dir, "order.log");
+      const cmd = `/bin/sh -c 'grep -n "return false" ${srcFile} | cut -d: -f1 >> ${log}; exit 1'`;
+      const run = async () => {
+        rmSync(log, { force: true });
+        await runMutationTests(dir, [srcFile], {
+          testCommand: cmd,
+          timeBudgetMs: 60_000,
+          sampleSeed: "seed-1",
+          maxMutants: 0,
+        });
+        return readFileSync(log, "utf-8").trim().split("\n").join(",");
+      };
+      const first = await run();
+      const second = await run();
+      assert.equal(first, second, "same seed => same order");
+      assert.notEqual(first, "2,5,8,11,14,17,20,23", "must not be raw generation order");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("unparseable mutants never consume a sample slot", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mutation-sample-unparse-"));
+    try {
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "fixture" }));
+      const srcFile = join(dir, "target.ts");
+      writeFileSync(
+        srcFile,
+        ["export const m: Map<string, number> = new Map();", "export const a = () => {", "  return true;", "};", ""].join("\n"),
+      );
+      const report = await runMutationTests(dir, [srcFile], {
+        testCommand: "/bin/sh -c 'exit 1'",
+        timeBudgetMs: 30_000,
+        maxMutants: 1,
+        sampleSeed: "sha-y",
+      });
+      assert.ok((report.skippedUnparseable ?? 0) >= 1, "fixture must yield an unparseable mutant");
+      assert.equal(report.candidatesSampled, 1);
+      assert.equal(report.killed + report.survived, 1, "the one slot ran a real mutant");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

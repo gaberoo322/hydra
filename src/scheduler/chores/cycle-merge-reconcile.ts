@@ -168,7 +168,7 @@ interface ReconcilePrView {
  * throws.
  *
  * Issue #3604: `headRefName` rides along on the SAME view — a plain scalar field
- * carried inline on both transports, so it adds no extra call. It is the second
+ * carried inline on both transports (REST maps it from `head.ref`), so it adds no extra call. It is the second
  * anchorType decode source the enrichment-path heal needs: a bare-UUID
  * `completed` cycle (which reaches THIS backstop, never the merge-watch path) can
  * only recover its dispatch class from the merged PR's fenced head branch

@@ -23,7 +23,7 @@
  *   npx tsx scripts/ci/test-title-provenance-scan.ts                  # report
  *   npx tsx scripts/ci/test-title-provenance-scan.ts --files <paths>  # new keys among those files only
  *   npx tsx scripts/ci/test-title-provenance-scan.ts --write-baseline # shrink the baseline
- *   npx tsx scripts/ci/test-title-provenance-scan.ts --init           # one-shot seed, may grow
+ *   npx tsx scripts/ci/test-title-provenance-scan.ts --init           # alias of --write-baseline (seed); growth needs --allow-grow
  */
 
 import { readFile } from "node:fs/promises";
@@ -33,7 +33,7 @@ import {
   isCliEntrypoint,
   listTrackedFiles,
   loadJsonBaseline,
-  writeJsonBaseline,
+  writeBaselineOrRefuse,
 } from "./seam-check-lib.ts";
 import { stripComments } from "./test-subject-map.ts";
 
@@ -193,8 +193,7 @@ export function formatFailure(diff: RatchetDiff): string {
 
 async function main(): Promise<number> {
   const args = process.argv.slice(2);
-  const init = args.includes("--init");
-  const write = args.includes("--write-baseline") || init;
+  const write = args.includes("--write-baseline") || args.includes("--init");
   const fi = args.indexOf("--files");
   const only = fi >= 0 ? args.slice(fi + 1).filter((a) => !a.startsWith("--")) : undefined;
   const scan = await scanTestFiles(only);
@@ -208,15 +207,20 @@ async function main(): Promise<number> {
     : baseline.hits;
   const diff = diffKeys(scan.keys, relevant);
   if (write && !only) {
-    if (!init && diff.newKeys.length > 0) {
-      console.error(formatFailure(diff));
-      console.error("test-title-provenance: refusing to grow the baseline (use --init only to seed).");
-      return 1;
-    }
-    await writeJsonBaseline(join(REPO_ROOT, PROVENANCE_BASELINE_REL), {
-      note: `Shrink-only STD-TEST-OWN-FEATURE baseline (issue #5511). Regenerate with: ${PROVENANCE_WRITE_COMMAND}`,
-      hits: [...scan.keys].sort(),
-    });
+    const code = await writeBaselineOrRefuse(
+      join(REPO_ROOT, PROVENANCE_BASELINE_REL),
+      {
+        note: `Shrink-only STD-TEST-OWN-FEATURE baseline (issue #5511). Regenerate with: ${PROVENANCE_WRITE_COMMAND}`,
+        hits: [...scan.keys].sort(),
+      },
+      {
+        allowGrow: args.includes("--allow-grow") || undefined,
+        onRefusal: () => {
+          if (diff.newKeys.length > 0) console.error(formatFailure(diff));
+        },
+      },
+    );
+    if (code !== 0) return code;
     console.log(`test-title-provenance: wrote ${scan.keys.length} baseline hit(s).`);
     return 0;
   }

@@ -42,6 +42,8 @@ export {
   gateClaimReleased,
   gateUnblocked,
   gateClose,
+  isPullRequestUrl,
+  prRecordFromView,
   gateDispatch,
   gateJudgment,
   gatePrOpen,
