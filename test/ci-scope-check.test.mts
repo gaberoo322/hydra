@@ -476,7 +476,7 @@ describe("MECHANICAL_COMPANIONS", () => {
   });
 
   test("a companions-only diff is in scope with an empty scope section", () => {
-    const inScope = [...MECHANICAL_COMPANIONS];
+    const inScope: string[] = [];
     const changed = [
       ".changelog/5528-a.md",
       "docs/generated/adrs.json",
@@ -489,15 +489,21 @@ describe("MECHANICAL_COMPANIONS", () => {
     assert.deepEqual(result.outOfScope, []);
   });
 
-  test("a companion listed out-of-scope is reconciled in-scope-wins (#1872)", () => {
-    const result = classifyScope(["docs/generated/adrs.json"], [...MECHANICAL_COMPANIONS], {
+  test("the gate applies the strict companion predicate: nested or suffixed lookalikes stay out of scope", () => {
+    const lookalikes = ["x/scripts/ci/skill-size-baseline.json", "test/fixtures/test-pools.json.bak"];
+    const result = classifyScope(lookalikes, []);
+    assert.deepEqual(result.outOfScope.sort(), [...lookalikes].sort());
+  });
+
+  test("a companion listed out-of-scope is reconciled in-scope-wins", () => {
+    const result = classifyScope(["docs/generated/adrs.json"], [], {
       outOfScopeDeclared: ["docs/generated/adrs.json"],
     });
     assert.deepEqual(result.outOfScope, []);
   });
 
   test("a non-companion doc and the excluded ledger still trip as out of scope", () => {
-    const inScope = [...MECHANICAL_COMPANIONS];
+    const inScope: string[] = [];
     const result = classifyScope(
       ["docs/quality-gates.md", "test/fixtures/qa-cohort-baseline.json", "src/a.ts", "src/b.ts", "src/c.ts"],
       inScope,

@@ -142,7 +142,8 @@ export const MECHANICAL_COMPANIONS: readonly string[] = [
 /**
  * The scope gate's path matcher: exact, prefix either way, or suffix match
  * against any entry of `list`. Shared by `classifyScope` (scripts/ci/scope-check.ts)
- * and the QA packet so the gate and the packet cannot disagree (issue #5528).
+ * (issue #5528). Companion admission does NOT go through this loose matcher:
+ * both the gate and the QA packet use the strict `isMechanicalCompanion`.
  */
 export function matchesScopeList(target: string, list: readonly string[]): boolean {
   if (list.length === 0) return false;

@@ -74,7 +74,7 @@ const DEFAULT_MIN_COUNT = 3;
 // stay imported here for the sibling extractors below.
 import {
   extractScopeFromBody,
-  MECHANICAL_COMPANIONS,
+  isMechanicalCompanion,
   matchesScopeList,
   extractSection,
   looksLikePath,
@@ -85,8 +85,10 @@ export { extractScopeFromBody };
 
 // Issue #3678 / #5528: paths always in scope (`.changelog/` fragments plus the
 // gate-regenerated companions) live in `MECHANICAL_COMPANIONS`
-// (src/scope-section.ts), unioned into the in-scope set in main(); in-scope-wins
-// (#1872) reconciles any incidental out-of-scope listing of them.
+// (src/scope-section.ts) and are admitted inside classifyScope through the strict
+// `isMechanicalCompanion` predicate (the same one the QA packet uses, so gate and
+// packet agree); in-scope-wins (#1872) reconciles any incidental out-of-scope
+// listing of them.
 
 /**
  * Issue #396: explicit "Files out of scope" block. Any changed file matching
@@ -200,6 +202,7 @@ export function classifyScope(
   const outDeclaredNormalised = outOfScopeDeclared.map(normalisePath).filter((s) => s.length > 0);
 
   const matches = matchesScopeList;
+  const inScopeOrCompanion = (n: string): boolean => isMechanicalCompanion(n) || matches(n, scopeNormalised);
 
   // In-scope wins (issue #1872): drop from the declared out-of-scope set any
   // entry that also matches the in-scope set under the same matcher. A file the
@@ -216,7 +219,7 @@ export function classifyScope(
   // entry OR vice-versa under the same matcher (matches() only walks one
   // direction's startsWith/endsWith, so a single call misses the suffix case).
   const overlapsInScope = (o: string): boolean =>
-    matches(o, scopeNormalised) || scopeNormalised.some((s) => matches(s, [o]));
+    isMechanicalCompanion(o) || matches(o, scopeNormalised) || scopeNormalised.some((s) => matches(s, [o]));
   const outNormalised = outDeclaredNormalised.filter((o) => !overlapsInScope(o));
 
   const justifiedTouched = changed.filter((f) => matches(normalisePath(f), justified));
@@ -234,7 +237,7 @@ export function classifyScope(
   const outOfScope = changed.filter((f) => {
     const n = normalisePath(f);
     if (matches(n, justified)) return false;
-    if (matches(n, scopeNormalised)) return false;
+    if (inScopeOrCompanion(n)) return false;
     return true;
   });
 
@@ -389,7 +392,6 @@ function main(): number {
   // the report). Filtering here is the gate-side backstop for already-filed
   // issues; hydra-prd-render.ts now partitions them at generation time.
   const inScope = Array.from(new Set([
-    ...MECHANICAL_COMPANIONS,
     ...extractScopeFromBody(prBody),
     ...extractScopeFromBody(issueBody),
   ])).filter((p) => !isTargetRepoPath(p));

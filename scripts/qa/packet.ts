@@ -147,8 +147,8 @@ export async function runPacket(
   }
 
   // 7.0c mechanical companions (#5528): gate-forced regenerations are never scope
-  // creep. Filters the changed-file list read in 7.0 through the scope gate's own
-  // matcher (classifyScope), so the gate and this packet cannot disagree.
+  // creep. Filters the changed-file list read in 7.0 through `isMechanicalCompanion`,
+  // the same strict predicate the scope gate's classifyScope applies to companions.
   const changedNames = names.stdout.split("\n").filter((l) => l !== "");
   const hits = changedNames.filter(isMechanicalCompanion);
   const companionPaths = hits.length > 0 ? hits.join(", ") : "none";
