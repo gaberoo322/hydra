@@ -119,8 +119,7 @@ OPEN_PRS=$(gh pr list --repo gaberoo322/hydra --state open \
 # For a candidate issue #N about to be promoted to ready-for-agent:
 #   referencing OPEN PR #M found?  -> DIVERT: no ready-for-agent write; report
 #     `has-open-pr: PR #M` (the PR arms own the PR; the sweep writes neither
-#     needs-qa nor ready-for-human for it; a `ready-for-agent` issue
-#     with an open closing PR takes the develop-lane route instead)
+#     needs-qa nor ready-for-human for it; ready-for-agent issues: see develop lane)
 #   no referencing OPEN PR  -> PROMOTE
 ```
 
@@ -142,7 +141,7 @@ Process all QA before new dev.
 
 Skip tracking parents: apply the stuck-ness gate above instead.
 
-Before `/hydra-dev $number`, check `OPEN_PRS` (the once-per-sweep read above) for open, non-draft PRs whose BODY carries `closes|fixes|resolves #$number`; a title match or a bare `#$number` mention does not qualify.
+Before `/hydra-dev $number`, check the open-PR list (the once-per-sweep read above) for open, non-draft PRs whose BODY carries `closes|fixes|resolves #$number`; a title match or a bare `#$number` mention does not qualify.
 
 - Exactly one such PR `<M>`: write `npx tsx scripts/lifecycle.ts advance $number needs-qa --from ready-for-agent --evidence pr=<M> --rationale "<one line>" --actor hydra-sweep`, skip `/hydra-dev`, and run QA below in the same pass. `--from ready-for-agent` makes the write compare-and-set: `from-mismatch` means another actor moved the issue first, so report it and do not retry. Any other exit 1 (`pr-not-open`, `pr-does-not-close-issue`, `record-binding-mismatch`, `evidence-required:pr`) is final: report the code and leave the label.
 - Two or more open closing PRs: no write and no `/hydra-dev`; report `has-open-pr: ambiguous PR #A #B` under Needs operator attention.
