@@ -322,4 +322,15 @@ describe("seam-check-lib: writeJsonBaseline growth refusal (chokepoint for every
       assert.doesNotMatch(src, /\bwriteFile(Sync)?\(\s*[^)]*baseline/i, `${f} writes a baseline without the chokepoint`);
     }
   });
+
+  test("growth is refused and the file stays byte-identical", async () => {
+    await withFile({ count: 1, hits: ["a"] }, async (path) => {
+      const before = await readFile(path, "utf8");
+      await assert.rejects(
+        () => writeJsonBaseline(path, { count: 2, hits: ["a", "b"] }, { allowGrow: false }),
+        (err: any) => err.code === "baseline-growth-refused" && err.rows.length === 2,
+      );
+      assert.equal(await readFile(path, "utf8"), before);
+    });
+  });
 });
