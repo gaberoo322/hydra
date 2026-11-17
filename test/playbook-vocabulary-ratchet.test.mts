@@ -24,6 +24,8 @@ const {
   countByShape,
   compareAgainstBaseline,
   buildBaseline,
+  mergeBaselineForShapes,
+  parseShapeArg,
   formatReport,
   scanRepo,
   loadBaseline,
@@ -59,6 +61,7 @@ describe("playbook-vocabulary-ratchet: each banned shape is detected", () => {
         "3 status no longer",
         "4 status used to",
         "5 status until #1234 lands",
+        "5 issue-cite #1234",
         "6 status shadow mode",
         "6 status rollout",
       ],
@@ -95,8 +98,11 @@ describe("playbook-vocabulary-ratchet: each banned shape is detected", () => {
 
 describe("playbook-vocabulary-ratchet: the Historical: exemption", () => {
   test("a line marked Historical: is exempt from every shape", () => {
-    const body = "not yet at src/gate.ts:42 in hydra-betting, the Untouchable Core";
-    assert.deepEqual(new Set(findHits(PB, body, AVOID).map((h: { shape: string }) => h.shape)), new Set(SHAPES));
+    const body = "not yet at src/gate.ts:42 in hydra-betting, the Untouchable Core, see #1945, kept for legacy";
+    assert.deepEqual(
+      new Set(findHits(PB, body, AVOID).map((h: { shape: string }) => h.shape)),
+      new Set(SHAPES.filter((s: string) => s !== "shell-lines")),
+    );
     assert.deepEqual(hits(`Historical: ${body}`), []);
   });
 
@@ -182,6 +188,97 @@ describe("playbook-vocabulary-ratchet: shrink-only per-file baseline", () => {
     const baseline = buildBaseline({ "b.md": found[PB], "a.md": [] });
     assert.deepEqual(baseline.files, { "b.md": { status: 2, "line-cite": 1 } });
     assert.doesNotMatch(baseline.note, /\d{4}-\d{2}-\d{2}/);
+  });
+});
+
+describe("playbook-vocabulary-ratchet: issue-cite, back-compat and shell-lines shapes", () => {
+  const F = "```";
+
+  test("a bare issue or PR number in prose is an issue-cite; placeholders are not", () => {
+    assert.deepEqual(hits("per #1945 and issue #4118, see PR #4090. Use #N, #<N>, #$ANCHOR_NUM, #12345678.", "issue-cite"), [
+      "1 issue-cite per #1945",
+      "1 issue-cite issue #4118",
+      "1 issue-cite PR #4090",
+    ]);
+  });
+
+  test("a template token is exempt by token while another cite on the same line still counts", () => {
+    assert.deepEqual(hits("Body ends Closes #1234, Part of #5678 and Blocked by #4321; see #1945.", "issue-cite"), [
+      "1 issue-cite #1945",
+    ]);
+    assert.deepEqual(hits("Refs: #1234 and Parent #5678", "issue-cite"), []);
+  });
+
+  test("issue-cite and back-compat skip fenced blocks and Historical: lines", () => {
+    const text = ["```text", "see #1945 and legacy path", "```", "Historical: #1945 kept for legacy", "see #1946, legacy"].join("\n");
+    assert.deepEqual(hits(text, "issue-cite"), ["5 issue-cite #1946"]);
+    assert.deepEqual(hits(text, "back-compat"), ["5 back-compat legacy"]);
+  });
+
+  test("back-compat is the closed phrase list", () => {
+    assert.deepEqual(
+      hits("Kept for readers; a legacy title, retained rows, previously seen, back-compat, back-compatible, Phase B.", "back-compat"),
+      [
+        "1 back-compat Kept for",
+        "1 back-compat legacy",
+        "1 back-compat retained",
+        "1 back-compat previously",
+        "1 back-compat back-compat",
+        "1 back-compat back-compatible",
+        "1 back-compat Phase B",
+      ],
+    );
+    assert.deepEqual(hits("The phase is over. Phase out the legacies; phase a rollout is not a letter.", "back-compat"), []);
+  });
+
+  test("shell-lines emits one hit per shell block with its size and ignores other fences", () => {
+    const text = [
+      `${F}bash`, "a", "b", F,
+      `${F}json`, "{}", F,
+      F, "x", F,
+      `~~~~Sh title`, "c", F, "~~~~",
+      `${F}python`, "print(1)", F,
+    ].join("\n");
+    assert.deepEqual(hits(text, "shell-lines"), ["1 shell-lines bash fence, 2 lines", "11 shell-lines sh fence, 2 lines"]);
+    assert.deepEqual(countByShape(findHits(PB, text, AVOID)), { "shell-lines": 4 });
+  });
+
+  test("a longer fence nests a shorter one and a blockquote prefix does not hide the fence", () => {
+    const text = ["````bash", `${F}`, "inner", `${F}`, "````", "> ```zsh", "> ls", "> ```", "```bash", "tail"].join("\n");
+    assert.deepEqual(hits(text, "shell-lines"), [
+      "1 shell-lines bash fence, 3 lines",
+      "6 shell-lines zsh fence, 1 lines",
+      "9 shell-lines bash fence, 1 lines",
+    ]);
+  });
+
+  test("the Historical: exemption does not apply to a shell block", () => {
+    assert.deepEqual(hits(["```bash", "Historical: echo hi", "```"].join("\n"), "shell-lines"), ["1 shell-lines bash fence, 1 lines"]);
+  });
+
+  test("new shapes sit after the original four so existing hit order is unchanged", () => {
+    assert.deepEqual(SHAPES.slice(0, 4), ["status", "line-cite", "target", "avoid-term"]);
+    assert.deepEqual(SHAPES.slice(4), ["issue-cite", "back-compat", "shell-lines"]);
+  });
+
+  test("a shape count above its baseline fails like the original shapes", () => {
+    const found = { [PB]: findHits(PB, "see #1945\nsee #1946", AVOID) };
+    const cmp = compareAgainstBaseline(found, { note: "", files: { [PB]: { "issue-cite": 1 } } });
+    assert.deepEqual(cmp.exceeded.map((d: { shape: string }) => d.shape), ["issue-cite"]);
+  });
+
+  test("--shape re-seeds only the named shapes and leaves every other row and the note", () => {
+    const found = { "a.md": findHits(PB, "see #1945\nIt currently runs.", AVOID), "c.md": findHits(PB, "see #1946", AVOID) };
+    const existing = { note: "keep me", files: { "a.md": { status: 9, "issue-cite": 7 }, "b.md": { "issue-cite": 2 } } };
+    assert.deepEqual(mergeBaselineForShapes(existing, found, ["issue-cite"]), {
+      note: "keep me",
+      files: { "a.md": { status: 9, "issue-cite": 1 }, "c.md": { "issue-cite": 1 } },
+    });
+  });
+
+  test("parseShapeArg accepts known shapes and rejects an unknown one", () => {
+    assert.deepEqual(parseShapeArg("issue-cite, shell-lines"), ["issue-cite", "shell-lines"]);
+    assert.throws(() => parseShapeArg("bogus"), /unknown shape "bogus"/);
   });
 });
 
