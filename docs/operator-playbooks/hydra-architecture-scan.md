@@ -111,11 +111,11 @@ Drop or re-route a candidate before it becomes an issue when ANY of:
   # (architecture-scan + needs-triage + cleanup-scan + enhancement) plus
   # recently-closed — so we see what hydra-discover / cleanup_orch just filed
   # this same idle window, not only our own architecture-scan issues.
-  # Temp-file form, not process substitution: the worktree-isolation Bash guard
+  # Temp-file form (no process substitution): worktree guard
   # refuses `mapfile -t X < <(...)`. See "Guard-compatible shell forms" in
   # _fragments/hydra-dev-parent-flow.md.
   BASELINE_TMP=$(mktemp)
-  bash scripts/ci/backfill-dedup-baseline.sh > "$BASELINE_TMP"
+  bash scripts/ci/backfill-dedup-baseline.sh > "$BASELINE_TMP" || exit
   mapfile -t BASELINE_TITLES < "$BASELINE_TMP"
   rm -f "$BASELINE_TMP"
 

@@ -84,11 +84,11 @@ the title list once, then call the deterministic helper per candidate instead
 of eyeballing ">50% overlap":
 
 ```bash
-# Temp-file form, not process substitution: the worktree-isolation Bash guard
+# Temp-file form (no process substitution): worktree guard
 # refuses `mapfile -t X < <(...)`. See "Guard-compatible shell forms" in
 # _fragments/hydra-dev-parent-flow.md.
 BASELINE_TMP=$(mktemp)
-bash scripts/ci/backfill-dedup-baseline.sh > "$BASELINE_TMP"
+bash scripts/ci/backfill-dedup-baseline.sh > "$BASELINE_TMP" || exit
 mapfile -t BASELINE_TITLES < "$BASELINE_TMP"
 rm -f "$BASELINE_TMP"
 
