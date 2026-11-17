@@ -1,0 +1,1 @@
+- docs: autopilot surface-pr row parks the closing issue through the lifecycle seam, never the PR number (#5594)
