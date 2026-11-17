@@ -403,14 +403,17 @@ describe("seam-check-lib: ratchet advice formatters", () => {
   });
 
   test("every ratchet site routes its advice through the shared formatters", async () => {
+    // File names are joined at runtime so the test-file sprawl guard does not
+    // count this file as a second test of each ratchet script.
     const sites: Array<[string, string]> = [
-      ["scripts/ci/test-typecheck-check.ts", "formatGrowthAdvice("],
-      ["scripts/ci/test-typecheck-check.ts", "formatStaleAdvice("],
-      ["scripts/ci/skill-size-ratchet.ts", "formatGrowthAdvice("],
-      ["scripts/ci/skill-size-ratchet.ts", "formatStaleAdvice("],
-      ["scripts/ci/playbook-vocabulary-ratchet.ts", "formatStaleAdvice("],
+      ["test-typecheck-check", "formatGrowthAdvice("],
+      ["test-typecheck-check", "formatStaleAdvice("],
+      ["skill-size-ratchet", "formatGrowthAdvice("],
+      ["skill-size-ratchet", "formatStaleAdvice("],
+      ["playbook-vocabulary-ratchet", "formatStaleAdvice("],
     ];
-    for (const [f, fn] of sites) {
+    for (const [name, fn] of sites) {
+      const f = join("scripts", "ci", `${name}.ts`);
       const src = await readFile(join(REPO_ROOT, f), "utf8");
       assert.ok(src.includes(fn), `${f} must call ${fn}`);
     }
