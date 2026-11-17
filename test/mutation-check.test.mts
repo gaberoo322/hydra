@@ -27,6 +27,7 @@ import {
   resolveKillRateVerdict,
   resolveMaxMutants,
   resolveSampleSeed,
+  buildSampleMeta,
   DEFAULT_MAX_MUTANTS,
 } from "../scripts/ci/mutation-check.ts";
 // Issue #4346: classifyTimedOut moved to the shared leaf imported by both
@@ -664,11 +665,34 @@ describe("deterministic mutant sampling + complete-vs-timed-out split (issue #55
     assert.ok([...picked].some((f) => f >= "/p/src/f3.ts"));
   });
 
-  test("unseeded classifyTimedOut reason text is unchanged (INV-6 sibling pin)", () => {
+  test("unseeded classifyTimedOut reason text omits the sample denominator", () => {
     const cut = classifyTimedOut(
       makeReport({ totalMutants: 20, killed: 15, candidatesGenerated: 79, timedOut: true }),
     );
     assert.ok(cut);
     assert.match(cut.reason, /20 of 79 candidate mutant\(s\) run/);
+  });
+});
+
+describe("buildSampleMeta — summary sample accounting (issue #5583)", () => {
+  test("capped complete run: sampled true, candidatesSampled is the sample size, seed echoed", () => {
+    assert.deepEqual(
+      buildSampleMeta({ candidatesGenerated: 80, candidatesSampled: 32 }, "abc"),
+      { sampled: true, candidatesSampled: 32, sampleSeed: "abc" },
+    );
+  });
+
+  test("uncapped run (candidatesSampled == generated): sampled false", () => {
+    assert.equal(
+      buildSampleMeta({ candidatesGenerated: 10, candidatesSampled: 10 }, "abc").sampled,
+      false,
+    );
+  });
+
+  test("no sample accounting (unseeded): falls back to candidatesGenerated, sampled false", () => {
+    assert.deepEqual(
+      buildSampleMeta({ candidatesGenerated: 7 }, "unseeded"),
+      { sampled: false, candidatesSampled: 7, sampleSeed: "unseeded" },
+    );
   });
 });

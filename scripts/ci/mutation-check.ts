@@ -143,6 +143,24 @@ export function resolveMaxMutants(raw: string | undefined): number | undefined {
   return n <= 0 ? undefined : n;
 }
 
+/**
+ * Issue #5583: the sample-accounting fields every summary payload carries.
+ * `sampled` is true only when the run iterated fewer candidates than were
+ * generated (a capped sample); `candidatesSampled` falls back to
+ * `candidatesGenerated` for unseeded runs. Pure.
+ */
+export function buildSampleMeta(
+  report: { candidatesGenerated: number; candidatesSampled?: number },
+  sampleSeed: string,
+): { sampled: boolean; candidatesSampled: number; sampleSeed: string } {
+  const candidatesSampled = report.candidatesSampled ?? report.candidatesGenerated;
+  return {
+    sampled: candidatesSampled < report.candidatesGenerated,
+    candidatesSampled,
+    sampleSeed,
+  };
+}
+
 /** Issue #5583: MUTATION_SAMPLE_SEED > GITHUB_SHA > 'unseeded' (spawn-free). */
 export function resolveSampleSeed(env: Record<string, string | undefined>): string {
   return env.MUTATION_SAMPLE_SEED || env.GITHUB_SHA || "unseeded";
@@ -553,8 +571,7 @@ async function main(): Promise<number> {
   });
 
   const testable = conclusiveMutants(report);
-  const candidatesSampled = report.candidatesSampled ?? report.candidatesGenerated;
-  const sampledMeta = { sampled: candidatesSampled < report.candidatesGenerated, candidatesSampled };
+  const sampleMeta = buildSampleMeta(report, sampleSeed);
 
   // No-signal case (issue #1120): the diff produced ZERO testable mutants — the
   // gate cannot conclude. The pre-#1120 code fabricated `killRate = 100` here,
@@ -574,9 +591,7 @@ async function main(): Promise<number> {
         killRate: noSignal.killRate,
         tier,
         candidatesGenerated: report.candidatesGenerated,
-        sampled: sampledMeta.sampled,
-        candidatesSampled: sampledMeta.candidatesSampled,
-        sampleSeed,
+        ...sampleMeta,
         timedOut: report.timedOut,
         totalMutants: report.totalMutants,
         skipped: report.skipped,
@@ -628,9 +643,7 @@ async function main(): Promise<number> {
         skipped: report.skipped,
         skippedUnparseable: report.skippedUnparseable ?? 0,
         candidatesGenerated: report.candidatesGenerated,
-        sampled: sampledMeta.sampled,
-        candidatesSampled: sampledMeta.candidatesSampled,
-        sampleSeed,
+        ...sampleMeta,
         durationMs: report.durationMs,
         inspectable: inspectable.length,
         relatedTests,
@@ -662,9 +675,7 @@ async function main(): Promise<number> {
     skipped: report.skipped,
     skippedUnparseable: report.skippedUnparseable ?? 0,
     candidatesGenerated: report.candidatesGenerated,
-    sampled: sampledMeta.sampled,
-    candidatesSampled: sampledMeta.candidatesSampled,
-    sampleSeed,
+    ...sampleMeta,
     timedOut: report.timedOut,
     durationMs: report.durationMs,
     relatedTests,

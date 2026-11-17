@@ -282,4 +282,56 @@ describe("runMutationTests — deterministic sample accounting (issue #5583)", (
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test("seeded + uncapped still orders deterministically (not generation order) and repeats across runs", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mutation-sample-order-"));
+    try {
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "fixture" }));
+      const srcFile = join(dir, "target.ts");
+      const lines: string[] = [];
+      for (let i = 0; i < 8; i++) lines.push(`export const f${i} = () => {`, "  return true;", "};");
+      writeFileSync(srcFile, lines.join("\n") + "\n");
+      const log = join(dir, "order.log");
+      const cmd = `/bin/sh -c 'grep -n "return false" ${srcFile} | cut -d: -f1 >> ${log}; exit 1'`;
+      const run = async () => {
+        rmSync(log, { force: true });
+        await runMutationTests(dir, [srcFile], {
+          testCommand: cmd,
+          timeBudgetMs: 60_000,
+          sampleSeed: "seed-1",
+          maxMutants: 0,
+        });
+        return readFileSync(log, "utf-8").trim().split("\n").join(",");
+      };
+      const first = await run();
+      const second = await run();
+      assert.equal(first, second, "same seed => same order");
+      assert.notEqual(first, "2,5,8,11,14,17,20,23", "must not be raw generation order");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("unparseable mutants never consume a sample slot", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mutation-sample-unparse-"));
+    try {
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "fixture" }));
+      const srcFile = join(dir, "target.ts");
+      writeFileSync(
+        srcFile,
+        ["export const m: Map<string, number> = new Map();", "export const a = () => {", "  return true;", "};", ""].join("\n"),
+      );
+      const report = await runMutationTests(dir, [srcFile], {
+        testCommand: "/bin/sh -c 'exit 1'",
+        timeBudgetMs: 30_000,
+        maxMutants: 1,
+        sampleSeed: "sha-y",
+      });
+      assert.ok((report.skippedUnparseable ?? 0) >= 1, "fixture must yield an unparseable mutant");
+      assert.equal(report.candidatesSampled, 1);
+      assert.equal(report.killed + report.survived, 1, "the one slot ran a real mutant");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

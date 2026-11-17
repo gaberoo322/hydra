@@ -121,8 +121,9 @@ export type MutationTestReport = {
   // never consume a maxMutants slot or time budget. Optional so report literals
   // that predate the counter stay valid; absent means 0.
   skippedUnparseable?: number;
-  // Issue #5583: size of the deterministic sample the run iterated (post-cap,
-  // pre-parse; always <= `candidatesGenerated`). Set ONLY when the caller
+  // Issue #5583: size of the deterministic sample the run iterated (post-cap;
+  // unparseable mutants are partitioned out at generation, before the cap, so
+  // they never count here; always <= `candidatesGenerated`). Set ONLY when the caller
   // supplied `sampleSeed`; absent means "no sample accounting" (unseeded /
   // Target-gate runs) and readers fall back to `candidatesGenerated`.
   candidatesSampled?: number;
@@ -475,10 +476,16 @@ export async function runMutationTests(
   // Issue #272: cap candidate list so quick-fix runs stay cheap. Unseeded: applied
   // AFTER the shuffle so the sample is representative. Seeded (#5583): chosen by
   // the deterministic selectMutationSample (no shuffle happened).
-  const candidates = !Number.isFinite(maxMutants)
-    ? allMutations
-    : seeded
-      ? selectMutationSample(allMutations, opts.sampleSeed as string, maxMutants)
+  // A seeded UNCAPPED run still orders via selectMutationSample (cap = pool
+  // size) so a time-budget-truncated run is not biased toward early files.
+  const candidates = seeded
+    ? selectMutationSample(
+        allMutations,
+        opts.sampleSeed as string,
+        Number.isFinite(maxMutants) ? maxMutants : allMutations.length,
+      )
+    : !Number.isFinite(maxMutants)
+      ? allMutations
       : allMutations.slice(0, maxMutants);
   // Issue #300: record the pre-cap candidate count so the gate can distinguish
   // "nothing to mutate" (legitimate no-mutants) from "we capped a larger pool"
