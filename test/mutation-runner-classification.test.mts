@@ -237,3 +237,49 @@ describe("runMutationTests — honest verdict opt-ins (issue #4504)", () => {
     }
   });
 });
+
+describe("runMutationTests — deterministic sample accounting (issue #5583)", () => {
+  function multiLineProject(): { dir: string; srcFile: string } {
+    const dir = mkdtempSync(join(tmpdir(), "mutation-sample-"));
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "fixture" }));
+    const srcFile = join(dir, "target.ts");
+    writeFileSync(
+      srcFile,
+      ["export const a = () => {", "  return true;", "};", "export const b = () => {", "  return true;", "};", ""].join("\n"),
+    );
+    return { dir, srcFile };
+  }
+
+  test("sampleSeed + maxMutants caps the run and reports candidatesSampled < candidatesGenerated", async () => {
+    const { dir, srcFile } = multiLineProject();
+    try {
+      const report = await runMutationTests(dir, [srcFile], {
+        testCommand: "/bin/sh -c 'exit 1'",
+        timeBudgetMs: 30_000,
+        maxMutants: 1,
+        sampleSeed: "sha-x",
+      });
+      assert.ok(report.candidatesGenerated >= 2, "fixture must yield >= 2 candidates");
+      assert.equal(report.candidatesSampled, 1);
+      assert.equal(report.totalMutants, 1);
+      assert.equal(report.timedOut, false, "a capped run that finishes is a complete verdict");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("sibling shape: no sampleSeed leaves candidatesSampled undefined (legacy / Target gate)", async () => {
+    const { dir, srcFile } = multiLineProject();
+    try {
+      const report = await runMutationTests(dir, [srcFile], {
+        testCommand: "/bin/sh -c 'exit 1'",
+        timeBudgetMs: 30_000,
+        maxMutants: 1,
+      });
+      assert.equal(report.candidatesSampled, undefined);
+      assert.equal("candidatesSampled" in report, false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

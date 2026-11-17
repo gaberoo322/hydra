@@ -100,6 +100,13 @@ monotonic ladder (T4 inherits T3's verification depth). The base `30`
 still matches the pre-cut-over in-cycle gate
 (`DEFAULT_STANDARD_KILL_THRESHOLD = 30` in `src/mutation.ts`).
 
+**Sampling (issue #5583).** The gate caps candidates at `MUTATION_MAX_MUTANTS`
+(default `32`; `0` = uncapped) and picks them with a deterministic per-file
+round-robin seeded by `MUTATION_SAMPLE_SEED` (falls back to `GITHUB_SHA`), so a
+re-run of the same head SHA gets the same verdict. The summary JSON reports
+`sampled`, `candidatesSampled`, `candidatesGenerated` and `sampleSeed`; a
+finished sampled run is a complete verdict, distinct from `timedOut`.
+
 Floor selection is pure and deterministic from the tier integer — there is
 **no per-path hardcoding** in the gate. Both floors are repo-variable
 configurable, not buried magic numbers; if `PR_TIER` is missing or garbled

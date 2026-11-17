@@ -121,10 +121,10 @@ export type MutationTestReport = {
   // never consume a maxMutants slot or time budget. Optional so report literals
   // that predate the counter stay valid; absent means 0.
   skippedUnparseable?: number;
-  // Issue #5583: number of PARSEABLE candidates left after the maxMutants cap
-  // (the sample the run actually iterated). Optional like `skippedUnparseable`
-  // so report literals that predate it stay valid; absent means "no sample
-  // accounting" and readers fall back to `candidatesGenerated`.
+  // Issue #5583: size of the deterministic sample the run iterated (post-cap,
+  // pre-parse; always <= `candidatesGenerated`). Set ONLY when the caller
+  // supplied `sampleSeed`; absent means "no sample accounting" (unseeded /
+  // Target-gate runs) and readers fall back to `candidatesGenerated`.
   candidatesSampled?: number;
 };
 
@@ -323,10 +323,12 @@ export function generateMutations(
  *
  * Pure function of (seed, mutant.file, mutant.line, mutant.type, mutant.mutated):
  * the same seed over the same candidate set yields the same sample in the same
- * order, independent of Math.random and of generator emission order. Selection
- * is per-file round-robin (groups ordered by sha256 key, groups interleaved in
- * path order) so that when `cap` >= the number of files with a candidate, every
- * such file contributes at least one mutant.
+ * order, independent of Math.random and of generator emission order. Mutants
+ * are grouped per file (files in path order, rotated by a seed-derived offset so
+ * that when `cap` < file count the starved files vary with the seed instead of
+ * always being the late-sorting ones); within a file they are ordered by their
+ * sha256 key. Groups are then interleaved round-robin, so when `cap` >= the
+ * number of files with a candidate every such file contributes at least one.
  */
 export function selectMutationSample(
   mutations: Mutation[],
@@ -345,8 +347,11 @@ export function selectMutationSample(
     if (g) g.push(k);
     else groups.set(k.m.file, [k]);
   }
-  const ordered = [...groups.keys()]
-    .sort()
+  const files = [...groups.keys()].sort();
+  const offset = files.length
+    ? parseInt(createHash("sha256").update(seed).digest("hex").slice(0, 8), 16) % files.length
+    : 0;
+  const ordered = [...files.slice(offset), ...files.slice(0, offset)]
     .map((f) => groups.get(f)!.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)));
   const out: Mutation[] = [];
   for (let round = 0; out.length < cap; round++) {
@@ -467,9 +472,9 @@ export async function runMutationTests(
     }
   }
 
-  // Issue #272: cap candidate list so quick-fix runs stay cheap. Applied
-  // AFTER the shuffle so the sample is representative, not biased toward
-  // the first files in the diff.
+  // Issue #272: cap candidate list so quick-fix runs stay cheap. Unseeded: applied
+  // AFTER the shuffle so the sample is representative. Seeded (#5583): chosen by
+  // the deterministic selectMutationSample (no shuffle happened).
   const candidates = !Number.isFinite(maxMutants)
     ? allMutations
     : seeded
@@ -612,6 +617,6 @@ export async function runMutationTests(
     inconclusive,
     noCoverage,
     skippedUnparseable: unparseableResults.length,
-    candidatesSampled: candidates.length,
+    ...(seeded ? { candidatesSampled: candidates.length } : {}),
   };
 }

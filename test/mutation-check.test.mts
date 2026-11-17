@@ -650,4 +650,25 @@ describe("deterministic mutant sampling + complete-vs-timed-out split (issue #55
     assert.ok(cut);
     assert.match(cut.reason, /20 of 32 sampled candidate mutant\(s\)/);
   });
+
+  test("cap < file count: the starved files rotate with the seed, not always the late-sorting ones", () => {
+    const many = Array.from({ length: 10 }, (_, i) => mk(`/p/src/f${i}.ts`, 1));
+    const picked = new Set<string>();
+    for (let n = 0; n < 20; n++) {
+      const s = selectMutationSample(many, `seed-${n}`, 3);
+      assert.equal(s.length, 3);
+      for (const m of s) picked.add(m.file);
+    }
+    // Without rotation only f0..f2 would ever be picked.
+    assert.ok(picked.size > 3, `expected rotation across seeds, got ${[...picked].join(",")}`);
+    assert.ok([...picked].some((f) => f >= "/p/src/f3.ts"));
+  });
+
+  test("unseeded classifyTimedOut reason text is unchanged (INV-6 sibling pin)", () => {
+    const cut = classifyTimedOut(
+      makeReport({ totalMutants: 20, killed: 15, candidatesGenerated: 79, timedOut: true }),
+    );
+    assert.ok(cut);
+    assert.match(cut.reason, /20 of 79 candidate mutant\(s\) run/);
+  });
 });
