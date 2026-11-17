@@ -95,7 +95,7 @@
       "description": 42
     },
     "docs/operator-playbooks/hydra-grill.md": {
-      "body": 3046,
+      "body": 3240,
       "description": 34
     },
     "docs/operator-playbooks/hydra-issue-research.md": {
@@ -131,7 +131,7 @@
       "description": 49
     },
     "docs/operator-playbooks/hydra-sweep.md": {
-      "body": 1849,
+      "body": 2154,
       "description": 30
     },
     "docs/operator-playbooks/hydra-target-build.md": {
@@ -167,7 +167,7 @@
       "description": 28
     },
     "docs/operator-playbooks/hydra-tickets.md": {
-      "body": 873,
+      "body": 962,
       "description": 32
     },
     "docs/operator-playbooks/hydra-tool-scout.md": {

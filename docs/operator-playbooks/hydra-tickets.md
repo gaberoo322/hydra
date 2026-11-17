@@ -71,6 +71,7 @@ deterministic and unit-tested (`test/hydra-prd-template.test.mts`).
    final; never a direct state-label write (ADR-0047 D3/D4).
 5. **Stamp the tier** — `Expected tier: N` per child from `GET /api/tier`, the
    single tier authority. Never self-classify by path.
+6. **Retire the source issue** — only when the epic was filed from a `needs-tickets` source issue #S: `npx tsx scripts/lifecycle.ts advance <S> closed --close-reason "not planned" --evidence superseded-by=#<epic> --actor hydra-tickets` (`--reason` is not close evidence). A refusal is final: report the code and stop, with no retry, no `gh issue close`, no label write. Any other source state is report-only. If the source is only possibly covered by an existing issue, use `advance <S> parked --reason duplicate-candidate --rationale "<candidate #M, what is unverified>"` instead of guessing a close.
 
 The parent body must stay parseable by `hydra-epic-close`, which sweeps an epic
 closed once every referenced child is CLOSED — keep the `## Sub-issues` checklist
