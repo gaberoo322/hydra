@@ -48,9 +48,9 @@ enforced-by: src/ast-grep-rules/typed-error-throw.yml (advisory), reviewer
 
 ### STD-CATCH-FAIL-LOUD
 
-Every `catch` either logs with context, rethrows, or carries an `/* intentional: <reason> */` annotation. A silent catch is a finding; in a changed catch it is a blocker.
+Every `catch`, `except` and `>/dev/null` discard logs with context, rethrows (`from err`) or carries an `intentional: <reason>` annotation, heredoc Python included. Silent is a finding; changed, a blocker.
 
-enforced-by: src/ast-grep-rules/fail-loud-catch.yml, src/ast-grep-rules/fail-loud-catch-src.yml, src/ast-grep-rules/fail-loud-except-py.yml, src/ast-grep-rules/fail-loud-devnull-sh.yml, scripts/ci/fail-loud-ratchet.ts
+enforced-by: src/ast-grep-rules/fail-loud-catch.yml, src/ast-grep-rules/fail-loud-catch-src.yml, src/ast-grep-rules/fail-loud-except-py.yml, src/ast-grep-rules/fail-loud-devnull-sh.yml, scripts/ci/fail-loud-ratchet.ts, reviewer
 
 ### STD-LOG-PINO-SEAM
 
