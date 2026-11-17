@@ -494,8 +494,11 @@ DC_CLI="${HYDRA_GATE_DIR:-}/scripts/target/target-design-concept.ts"
 if [ -f "$DC_CLI" ]; then
   CAPTURE=$(node --experimental-strip-types "$DC_CLI" should-capture $EXPECTED_PATHS)
 else
-  echo "hydra-target-build: WARN: design-concept CLI missing at $DC_CLI — skipping artifact (fail-open)" >&2
-  CAPTURE="no"
+  # Fail CLOSED: this step only runs for risk-critical builds, so a missing
+  # mirror must not silently skip the artifact. Treat as capture-required and
+  # let the persist step below surface the failure loudly.
+  echo "hydra-target-build: ERROR: design-concept CLI missing at $DC_CLI — failing closed (capture required)" >&2
+  CAPTURE="yes"
 fi
 
 if [ "$CAPTURE" = "no" ]; then
