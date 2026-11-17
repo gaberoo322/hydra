@@ -38,7 +38,7 @@ Every ISSUE state change in this playbook is exactly one command, run from `~/hy
 npx tsx scripts/lifecycle.ts advance <N> <to> --reason <enum> --rationale "<one line>" --actor hydra-sweep
 ```
 
-Exit `0` = written (report any `wouldRefuse:<code>` in the run summary, never retry); `1` = refused or failed (leave the label as is, report the code, NEVER fall back to `gh issue edit` / `gh api .../labels`); `2` = playbook bug. `--reason` is a closed enum from `src/lifecycle/reasons.ts` (`ready-for-agent` <- `scoped` | `unblocked`; `blocked` <- `blocked-by-issue`; `needs-triage` <- `rerouted`; `parked` <- `off-list-escalation`); `-> needs-triage` from a zero-state issue is gate-free and takes no reason; `closed` takes `--evidence pr=<MERGED PR>`. Flag labels (`needs-design-concept`, `enhancement`, `bug`, `sentry`) stay plain `gh` writes. The sweep never writes `ready-for-human` and never exits a human-hold state (`needs-info`, `ready-for-human`, `hitl-grill`, `parked`) - those are report-only here; the operator exits them via `/hydra-review`.
+Exit `0` = written (report any `wouldRefuse:<code>` in the run summary, never retry); `1` = refused or failed (leave the label as is, report the code, NEVER fall back to `gh issue edit` / `gh api .../labels`); `2` = playbook bug. `--reason` is a closed enum from `src/lifecycle/reasons.ts` (`ready-for-agent` <- `scoped` | `unblocked`; `blocked` <- `blocked-by-issue`; `needs-triage` <- `rerouted`; `parked` <- `off-list-escalation`); `-> needs-triage` from a zero-state issue is gate-free and takes no reason; `closed` takes `--evidence pr=<MERGED PR>`; `needs-qa` takes `--evidence pr=<OPEN PR whose body closes it>` and no `--reason`. Flag labels (`needs-design-concept`, `enhancement`, `bug`, `sentry`) stay plain `gh` writes. The sweep never writes `ready-for-human` and never exits a human-hold state (`needs-info`, `ready-for-human`, `hitl-grill`, `parked`) - those are report-only here; the operator exits them via `/hydra-review`.
 
 ## Process
 
@@ -119,7 +119,8 @@ OPEN_PRS=$(gh pr list --repo gaberoo322/hydra --state open \
 # For a candidate issue #N about to be promoted to ready-for-agent:
 #   referencing OPEN PR #M found?  -> DIVERT: no ready-for-agent write; report
 #     `has-open-pr: PR #M` (the PR arms own the PR; the sweep writes neither
-#     needs-qa nor ready-for-human for it)
+#     needs-qa nor ready-for-human for it; a `ready-for-agent` issue
+#     with an open closing PR takes the develop-lane route instead)
 #   no referencing OPEN PR  -> PROMOTE
 ```
 
@@ -140,6 +141,13 @@ Process all QA before new dev.
 #### `ready-for-agent` — develop
 
 Skip tracking parents: apply the stuck-ness gate above instead.
+
+Before `/hydra-dev $number`, check `OPEN_PRS` (the once-per-sweep read above) for open, non-draft PRs whose BODY carries `closes|fixes|resolves #$number`; a title match or a bare `#$number` mention does not qualify.
+
+- Exactly one such PR `<M>`: write `npx tsx scripts/lifecycle.ts advance $number needs-qa --from ready-for-agent --evidence pr=<M> --rationale "<one line>" --actor hydra-sweep`, skip `/hydra-dev`, and run QA below in the same pass. `--from ready-for-agent` makes the write compare-and-set: `from-mismatch` means another actor moved the issue first, so report it and do not retry. Any other exit 1 (`pr-not-open`, `pr-does-not-close-issue`, `record-binding-mismatch`, `evidence-required:pr`) is final: report the code and leave the label.
+- Two or more open closing PRs: no write and no `/hydra-dev`; report `has-open-pr: ambiguous PR #A #B` under Needs operator attention.
+- Only draft closing PRs: no write and no `/hydra-dev`; report `has-open-pr: draft PR #M` under Needs operator attention.
+- None: continue below.
 
 Pick by that score; invoke `/hydra-dev $number`, one at a time.
 
