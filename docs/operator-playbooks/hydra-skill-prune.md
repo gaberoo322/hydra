@@ -48,11 +48,7 @@ worth re-running). Runnable by hand: `/hydra-skill-prune [apply]`.
 Selection is **largest-over-baseline first, else round-robin**, computed by
 `scripts/skill-prune/select-skill.ts` (no hand-rolled pick):
 
-```bash
-npx tsx scripts/skill-prune/select-skill.ts select   # prints the playbook name
-# ... after the run (PR opened or downgrade issue filed):
-npx tsx scripts/skill-prune/select-skill.ts stamp <playbook-name>
-```
+Run `npx tsx scripts/skill-prune/select-skill.ts select` (prints the playbook name); after the run (PR opened or downgrade issue filed) run `npx tsx scripts/skill-prune/select-skill.ts stamp <playbook-name>`.
 
 It compares each playbook body against `scripts/ci/skill-size-baseline.json`,
 picks the largest over-baseline delta, else the least-recently-pruned playbook
