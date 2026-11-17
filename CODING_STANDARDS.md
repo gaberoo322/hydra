@@ -140,13 +140,13 @@ enforced-by: reviewer, scripts/ci/playbook-vocabulary-ratchet.ts
 
 Executable logic lives in a tested script. The playbook says when and why to run it.
 
-enforced-by: reviewer
+enforced-by: reviewer, scripts/ci/playbook-vocabulary-ratchet.ts
 
 ### STD-PLAYBOOK-CURRENT-BEHAVIOUR
 
 Describe only what happens now: no rollout phase, no status or history phrase, no retired glossary term, no "retired" note on a step that still runs. History belongs in git and the ADRs.
 
-enforced-by: scripts/ci/playbook-vocabulary-ratchet.ts
+enforced-by: reviewer, scripts/ci/playbook-vocabulary-ratchet.ts
 
 ### STD-PLAYBOOK-ONE-HOME
 
@@ -159,3 +159,11 @@ enforced-by: reviewer
 Never assume the Target's name, checkout path or service. Read them from the Target facts seam.
 
 enforced-by: scripts/ci/playbook-vocabulary-ratchet.ts
+
+## Baselines
+
+### STD-BASELINE-EDIT-ROWS
+
+Move only the baseline rows for files the PR changes. Lower a row for a file you shrank. Never commit a blanket writer's output. A raised row needs a PR-body line `Baseline-raise: <fixture-path> <row-key> — <reason>`. An undisclosed raise, or a row moved for a file outside the diff, is a medium finding, reviewer-fixable as ADR-0046 class A.
+
+enforced-by: reviewer

@@ -1,43 +1,203 @@
 {
   "note": "Shrink-only per-file counts of banned playbook vocabulary (issue #5500). Never raise a count: rewrite the sentence per CODING_STANDARDS.md. Lower with npx tsx scripts/ci/playbook-vocabulary-ratchet.ts --write-baseline.",
   "files": {
+    "docs/operator-playbooks/_fragments/checks-fetch.md": {
+      "issue-cite": 5,
+      "back-compat": 1
+    },
+    "docs/operator-playbooks/_fragments/grounding-tests-deposit.md": {
+      "issue-cite": 3,
+      "shell-lines": 2
+    },
+    "docs/operator-playbooks/_fragments/hydra-autopilot-dispatch-reference.md": {
+      "issue-cite": 1,
+      "shell-lines": 3
+    },
+    "docs/operator-playbooks/_fragments/hydra-autopilot-operator-guide.md": {
+      "shell-lines": 18
+    },
+    "docs/operator-playbooks/_fragments/hydra-autopilot-phase6-ops.md": {
+      "shell-lines": 9
+    },
+    "docs/operator-playbooks/_fragments/hydra-dev-child-flow.md": {
+      "issue-cite": 47,
+      "shell-lines": 100
+    },
     "docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md": {
-      "target": 2
+      "target": 2,
+      "issue-cite": 26,
+      "shell-lines": 78
     },
     "docs/operator-playbooks/_fragments/hydra-qa-reference.md": {
-      "status": 6
+      "status": 6,
+      "issue-cite": 29,
+      "shell-lines": 223
+    },
+    "docs/operator-playbooks/_fragments/hydra-target-build-anchor-preflight.md": {
+      "shell-lines": 161
+    },
+    "docs/operator-playbooks/_fragments/hydra-target-build-inline-mode.md": {
+      "issue-cite": 3,
+      "shell-lines": 7
+    },
+    "docs/operator-playbooks/_fragments/hydra-target-build-merge-flow.md": {
+      "shell-lines": 167
+    },
+    "docs/operator-playbooks/_fragments/reflection-telemetry-deposit.md": {
+      "issue-cite": 4,
+      "shell-lines": 4
+    },
+    "docs/operator-playbooks/_fragments/target-seam-preamble.md": {
+      "issue-cite": 3,
+      "shell-lines": 17
+    },
+    "docs/operator-playbooks/_fragments/target-self-isolation-preamble.md": {
+      "issue-cite": 4,
+      "shell-lines": 39
+    },
+    "docs/operator-playbooks/hydra-architect.md": {
+      "issue-cite": 3,
+      "shell-lines": 40
     },
     "docs/operator-playbooks/hydra-architecture-scan.md": {
-      "status": 2
+      "status": 2,
+      "shell-lines": 64
     },
     "docs/operator-playbooks/hydra-autopilot.md": {
-      "target": 1
+      "target": 1,
+      "issue-cite": 130,
+      "back-compat": 6,
+      "shell-lines": 54
+    },
+    "docs/operator-playbooks/hydra-branch-prune.md": {
+      "shell-lines": 2
+    },
+    "docs/operator-playbooks/hydra-cleanup.md": {
+      "back-compat": 2,
+      "shell-lines": 16
+    },
+    "docs/operator-playbooks/hydra-design-qa.md": {
+      "issue-cite": 18,
+      "shell-lines": 6
     },
     "docs/operator-playbooks/hydra-dev.md": {
-      "status": 2
+      "status": 2,
+      "issue-cite": 13,
+      "shell-lines": 35
+    },
+    "docs/operator-playbooks/hydra-digest.md": {
+      "shell-lines": 2
+    },
+    "docs/operator-playbooks/hydra-discover.md": {
+      "shell-lines": 61
+    },
+    "docs/operator-playbooks/hydra-doctor.md": {
+      "shell-lines": 13
+    },
+    "docs/operator-playbooks/hydra-epic-close.md": {
+      "issue-cite": 2,
+      "shell-lines": 27
+    },
+    "docs/operator-playbooks/hydra-epic-sprint.md": {
+      "issue-cite": 4,
+      "shell-lines": 5
     },
     "docs/operator-playbooks/hydra-grill.md": {
-      "target": 7
+      "target": 7,
+      "issue-cite": 7,
+      "back-compat": 1,
+      "shell-lines": 97
+    },
+    "docs/operator-playbooks/hydra-hitl-grill.md": {
+      "issue-cite": 1,
+      "shell-lines": 6
+    },
+    "docs/operator-playbooks/hydra-issue-research.md": {
+      "shell-lines": 23
+    },
+    "docs/operator-playbooks/hydra-pr-rebase.md": {
+      "shell-lines": 5
     },
     "docs/operator-playbooks/hydra-prd.md": {
       "status": 3,
-      "avoid-term": 1
+      "avoid-term": 1,
+      "issue-cite": 11,
+      "shell-lines": 82
     },
     "docs/operator-playbooks/hydra-qa.md": {
       "status": 5,
-      "line-cite": 1
+      "line-cite": 1,
+      "issue-cite": 47,
+      "shell-lines": 87
     },
     "docs/operator-playbooks/hydra-research.md": {
-      "status": 2
+      "status": 2,
+      "shell-lines": 97
     },
     "docs/operator-playbooks/hydra-retro.md": {
-      "status": 2
+      "status": 2,
+      "issue-cite": 13,
+      "shell-lines": 28
     },
     "docs/operator-playbooks/hydra-review.md": {
-      "status": 5
+      "status": 5,
+      "issue-cite": 21,
+      "back-compat": 1,
+      "shell-lines": 103
+    },
+    "docs/operator-playbooks/hydra-skill-prune.md": {
+      "shell-lines": 19
+    },
+    "docs/operator-playbooks/hydra-sweep.md": {
+      "issue-cite": 2,
+      "shell-lines": 28
+    },
+    "docs/operator-playbooks/hydra-target-build.md": {
+      "issue-cite": 8,
+      "shell-lines": 346
+    },
+    "docs/operator-playbooks/hydra-target-cleanup.md": {
+      "issue-cite": 16,
+      "shell-lines": 43
+    },
+    "docs/operator-playbooks/hydra-target-discover.md": {
+      "issue-cite": 3,
+      "shell-lines": 88
+    },
+    "docs/operator-playbooks/hydra-target-incident.md": {
+      "issue-cite": 4,
+      "shell-lines": 107
+    },
+    "docs/operator-playbooks/hydra-target-qa.md": {
+      "issue-cite": 31,
+      "back-compat": 2,
+      "shell-lines": 58
+    },
+    "docs/operator-playbooks/hydra-target-research.md": {
+      "issue-cite": 6,
+      "shell-lines": 101
+    },
+    "docs/operator-playbooks/hydra-target-retro.md": {
+      "issue-cite": 2,
+      "shell-lines": 27
+    },
+    "docs/operator-playbooks/hydra-target-sweep.md": {
+      "issue-cite": 6,
+      "shell-lines": 79
+    },
+    "docs/operator-playbooks/hydra-tickets.md": {
+      "issue-cite": 4
+    },
+    "docs/operator-playbooks/hydra-tool-scout.md": {
+      "shell-lines": 1
     },
     "docs/operator-playbooks/hydra-wayfinder.md": {
-      "status": 4
+      "status": 4,
+      "issue-cite": 6,
+      "shell-lines": 35
+    },
+    "docs/operator-playbooks/hydra-wire-or-retire.md": {
+      "shell-lines": 18
     }
   }
 }

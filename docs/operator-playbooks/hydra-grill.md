@@ -162,6 +162,16 @@ fi
    "have we done this before?" question. Use `gh issue list --search` or
    probe-search.
 
+### Step 2.5 — Premise verdict
+
+Before the Q&A loop, classify the anchor's premise against master: **live**, **shipped-by-closing-PR**, **superseded**, or **refs-only**. Post a `## hydra-grill premise check — <verdict>` comment citing the evidence before any close; write no artifact when nothing is left to design. Comments use `--repo "$REPO"` (re-resolved per Step 2). Closes apply only when scope=orch and fire only from `ready-for-agent`, always through `npx tsx scripts/lifecycle.ts advance <N> closed --actor hydra-grill`; for scope=target report the verdict and write no state:
+
+- shipped-by-closing-PR: `--evidence pr=<M>`, M MERGED and its body closes #N.
+- superseded: `--close-reason "not planned" --evidence superseded-by=#<M>`, only when M demonstrably covers every acceptance criterion; a merged PR that closes a DIFFERENT issue is this shape, never `pr=`. If uncertain: `advance <N> parked --actor hydra-grill --reason duplicate-candidate --rationale "<candidate #M, what is unverified>"`.
+- refs-only (merged PR has `Refs #N`, no closing reference): write NO state; post one comment whose first line is exactly `merged-no-closing-ref: PR #<M>` and repeat it under the run summary's **Needs operator attention**. The operator closes via `POST /autopilot/board/close`.
+
+`--reason` is not close evidence. Any refusal (`evidence-required:pr`, `evidence-required:superseded-by`, `pr-does-not-close-issue`, `pr-not-merged`, `illegal-transition`) is final: report the code and stop (`pr-does-not-close-issue` and `pr-not-merged` are the refs-only verdict: post the `merged-no-closing-ref` comment above); never retry with other evidence, edit a merged PR body, or use `gh issue close` or a label write. Any other observed state is report-only.
+
 #### Step 2.target — Multi-context target glossaries (scope=target only)
 
 The target (`~/hydra-betting`) uses a multi-context layout with one

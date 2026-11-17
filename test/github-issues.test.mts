@@ -244,6 +244,36 @@ describe("normalizePrViewFromRest", () => {
     assert.deepEqual(out.reviews, []);
     assert.deepEqual(out.commits, []);
   });
+
+  test("REST closed + merged_at normalises state to MERGED, even when mergedAt is not requested", () => {
+    const out = normalizePrViewFromRest(
+      { state: "closed", merged_at: "2026-11-17T07:16:28Z" },
+      "state",
+    );
+    assert.deepEqual(out, { state: "MERGED" });
+  });
+
+  test("REST closed + null merged_at normalises to CLOSED; open to OPEN", () => {
+    assert.equal(normalizePrViewFromRest({ state: "closed", merged_at: null }, "state").state, "CLOSED");
+    assert.equal(normalizePrViewFromRest({ state: "open", merged_at: null }, "state").state, "OPEN");
+  });
+
+  test("state is omitted when not requested, even if merged_at is set", () => {
+    const out = normalizePrViewFromRest({ state: "closed", merged_at: "2026-11-17T07:16:28Z" }, "number");
+    assert.equal("state" in out, false);
+  });
+
+  test("a malformed merged_at degrades to the upper-cased REST state, never throws", () => {
+    const out = normalizePrViewFromRest({ state: "closed", merged_at: 42 }, "state");
+    assert.equal(out.state, "CLOSED");
+  });
+
+  test("headRefName maps from head.ref; absent/empty head omits the field", () => {
+    assert.equal(normalizePrViewFromRest({ head: { ref: "feat/x" } }, "headRefName").headRefName, "feat/x");
+    assert.equal("headRefName" in normalizePrViewFromRest({}, "headRefName"), false);
+    assert.equal("headRefName" in normalizePrViewFromRest({ head: { ref: "" } }, "headRefName"), false);
+    assert.equal("headRefName" in normalizePrViewFromRest({ head: "bad" }, "headRefName"), false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -280,6 +310,14 @@ describe("decodePrStateAndHeadRef", () => {
   test("a null view (both fields explicitly null) decodes to {state:null, headRefName:null}", () => {
     const out = decodePrStateAndHeadRef({ state: null, headRefName: null });
     assert.deepEqual(out, { state: null, headRefName: null });
+  });
+
+  test("REST-normalised merged pull decodes to the same pair as the GraphQL transport", () => {
+    const view = normalizePrViewFromRest(
+      { state: "closed", merged_at: "2026-11-17T07:16:28Z", head: { ref: "feat/z" } },
+      "state,headRefName",
+    );
+    assert.deepEqual(decodePrStateAndHeadRef(view), { state: "MERGED", headRefName: "feat/z" });
   });
 
   test("extra unrelated fields on the view are ignored", () => {

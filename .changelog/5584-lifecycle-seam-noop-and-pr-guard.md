@@ -1,0 +1,1 @@
+- fix: lifecycle seam treats a self-move as a no-op success, refuses PR numbers, and reads merged PRs as MERGED (#5584)

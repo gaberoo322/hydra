@@ -825,6 +825,16 @@ describe("suite-count-check reporter — todo marker (#5335)", () => {
     assert.equal(r[0].todo, true);
   });
 
+  test("rows carry duration_ms when the event has it, and keep shape otherwise (#5275)", async () => {
+    const r = await rows([
+      { type: "test:pass", data: { nesting: 0, name: "p", file: "/x/test/a.test.mts", details: { duration_ms: 12.5 } } },
+      { type: "test:pass", data: { nesting: 0, name: "q", file: "/x/test/a.test.mts" } },
+    ]);
+    assert.equal(r[0].duration_ms, 12.5);
+    assert.equal("duration_ms" in r[1], false);
+    assert.deepEqual(Object.keys(r[1]), ["file", "name", "ok"]);
+  });
+
   test("non-todo rows keep their old shape (no todo key)", async () => {
     const r = await rows([
       { type: "test:fail", data: { nesting: 0, name: "f", file: "/x/test/a.test.mts" } },

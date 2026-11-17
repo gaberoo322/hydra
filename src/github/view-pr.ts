@@ -141,7 +141,6 @@ const REST_INLINE_FIELD_MAP: Record<string, string> = {
   title: "title",
   url: "html_url",
   mergedAt: "merged_at",
-  state: "state",
   body: "body",
 };
 
@@ -205,6 +204,24 @@ export function normalizePrViewFromRest(
         const obj = (c ?? {}) as { author?: unknown };
         return { author: normalizeRestActor(obj.author) };
       });
+      continue;
+    }
+    if (field === "state") {
+      // REST reports a merged PR as `closed`; `gh pr view --json state` says
+      // `MERGED`. Synthesise from `merged_at` (read directly, so it holds even
+      // when `mergedAt` is not requested) and upper-case to the --json vocabulary.
+      if (typeof pull.merged_at === "string" && pull.merged_at.length > 0) {
+        out.state = "MERGED";
+      } else if ("state" in pull) {
+        out.state = String(pull.state).toUpperCase();
+      }
+      continue;
+    }
+    if (field === "headRefName") {
+      const head = pull.head;
+      const ref =
+        head && typeof head === "object" ? (head as { ref?: unknown }).ref : undefined;
+      if (typeof ref === "string" && ref.length > 0) out.headRefName = ref;
       continue;
     }
     const restKey = REST_INLINE_FIELD_MAP[field];
