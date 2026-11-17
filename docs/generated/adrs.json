@@ -249,7 +249,6 @@
         "docs/historical/merge-gate.md",
         "docs/observability/README.md",
         "docs/operations/process-cleanup.md",
-        "docs/operator-playbooks/hydra-dev.md",
         "docs/operator-playbooks/hydra-epic-close.md",
         "docs/operator-playbooks/hydra-target-research.md",
         "docs/quality-gates.md",
