@@ -29,7 +29,7 @@ supersedes:
 > sub-agent MUST pass `run_in_background: false`. The `Agent` tool defaults to
 > background dispatch, so a spawn without this flag returns immediately and the
 > turn can end with no verdict posted while reviewers are still running. The
-> reviewer-completeness check (step 7.5) is equally mandatory: never aggregate or emit a
+> reviewer-completeness check is equally mandatory: never aggregate or emit a
 > verdict for a fan-out where any spawned reviewer did not return a real result.
 
 <!-- compose-seam-supersede -->
