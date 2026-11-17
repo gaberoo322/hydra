@@ -31,9 +31,11 @@
  * second consumer family — the size / coupling / typecheck / subject-map
  * ratchets — as I/O-ONLY consumers. They hand-rolled the same read/write
  * ritual with diverging fallback conventions; the primitives stay
- * payload-shape-agnostic and policy-ignorant (the same "engine knows nothing
- * per-check" discipline above), with each script's fallback mode and note
- * wording expressed at its own call site.
+ * payload-shape-agnostic (the same "engine knows nothing per-check"
+ * discipline above), with each script's fallback mode and note wording
+ * expressed at its own call site. The ONE shared policy is the growth gate
+ * (#5551): `writeJsonBaseline` refuses to write a payload that grows the
+ * existing baseline unless `--allow-grow` is on process.argv.
  */
 
 import { readFile, writeFile } from "node:fs/promises";
@@ -279,6 +281,109 @@ export async function loadJsonBaseline<T>(
   return JSON.parse(raw) as T;
 }
 
+/** One way a candidate baseline payload exceeds the on-disk baseline. */
+export interface GrowthRow {
+  /** Slash-joined JSON path ("" is the root). */
+  path: string;
+  kind: "raised" | "added-key" | "added-element" | "shape-changed";
+  from: string;
+  to: string;
+}
+
+function jsonKind(v: unknown): string {
+  if (v === null) return "null";
+  if (Array.isArray(v)) return "array";
+  return typeof v;
+}
+
+/**
+ * Pure growth comparison of `next` against `prev` (no I/O). Reports every
+ * raised number, added object key, added array element (compared as a multiset
+ * of canonical-JSON strings, so a duplicate counts) and JSON-type change. Shrinks, unchanged values and
+ * string/boolean/null differences (e.g. a timestamped note) are not growth.
+ * Exported so a PR-diff guard can run the same comparison against a committed
+ * fixture.
+ */
+export function diffBaselineGrowth(prev: unknown, next: unknown): GrowthRow[] {
+  const rows: GrowthRow[] = [];
+  const walk = (a: unknown, b: unknown, path: string): void => {
+    const ka = jsonKind(a);
+    const kb = jsonKind(b);
+    if (ka !== kb) {
+      rows.push({ path, kind: "shape-changed", from: ka, to: kb });
+      return;
+    }
+    if (kb === "number") {
+      if ((b as number) > (a as number)) {
+        rows.push({ path, kind: "raised", from: String(a), to: String(b) });
+      }
+    } else if (kb === "array") {
+      // Multiset: baselines such as fail-loud hits count duplicates (diffKeys).
+      const left = new Map<string, number>();
+      for (const e of a as unknown[]) {
+        const c = JSON.stringify(e);
+        left.set(c, (left.get(c) ?? 0) + 1);
+      }
+      for (const e of b as unknown[]) {
+        const c = JSON.stringify(e);
+        const n = left.get(c) ?? 0;
+        if (n > 0) {
+          left.set(c, n - 1);
+          continue;
+        }
+        rows.push({ path, kind: "added-element", from: "(absent)", to: c.length > 120 ? `${c.slice(0, 117)}...` : c });
+      }
+    } else if (kb === "object") {
+      const oa = a as Record<string, unknown>;
+      const ob = b as Record<string, unknown>;
+      for (const k of Object.keys(ob)) {
+        const sub = path ? `${path}/${k}` : k;
+        if (!Object.hasOwn(oa, k)) rows.push({ path: sub, kind: "added-key", from: "(absent)", to: "(present)" });
+        else walk(oa[k], ob[k], sub);
+      }
+    }
+  };
+  walk(prev, next, "");
+  return rows;
+}
+
+/** Thrown by writeJsonBaseline when the payload would grow the on-disk baseline. */
+export class BaselineGrowthRefusedError extends Error {
+  readonly code = "baseline-growth-refused" as const;
+  readonly rows: GrowthRow[];
+  constructor(path: string, rows: GrowthRow[]) {
+    super(
+      `refusing to grow baseline ${path}:\n` +
+        rows.map((r) => `  ${r.path || "/"}: ${r.kind} ${r.from} -> ${r.to}`).join("\n") +
+        "\nre-run with --allow-grow (deliberate, reviewed growth only)",
+    );
+    this.name = "BaselineGrowthRefusedError";
+    this.rows = rows;
+  }
+}
+
+/**
+ * Shared CLI wrapper: write the baseline, turning a growth refusal into exit
+ * code 1 (after `onRefusal`, if given) and rethrowing anything else.
+ */
+export async function writeBaselineOrRefuse(
+  path: string,
+  payload: unknown,
+  opts?: { allowGrow?: boolean; onRefusal?: () => void },
+): Promise<0 | 1> {
+  try {
+    await writeJsonBaseline(path, payload, { allowGrow: opts?.allowGrow });
+  } catch (err) {
+    if (err instanceof BaselineGrowthRefusedError) {
+      opts?.onRefusal?.();
+      console.error(err.message);
+      return 1;
+    }
+    throw err;
+  }
+  return 0;
+}
+
 /**
  * Write `payload` as the baseline JSON at `path`: pretty-printed two-space
  * JSON with a trailing newline — the byte-for-byte on-disk form every
@@ -290,7 +395,18 @@ export async function loadJsonBaseline<T>(
 export async function writeJsonBaseline(
   path: string,
   payload: unknown,
+  opts?: { allowGrow?: boolean },
 ): Promise<void> {
+  const allowGrow = opts?.allowGrow ?? process.argv.includes("--allow-grow");
+  if (!allowGrow) {
+    // Only a missing file (ENOENT) is a seed: there is no prior to grow from.
+    // An unparseable prior throws rather than bypassing the growth gate.
+    const prior = await loadJsonBaseline<unknown>(path, undefined, { strict: true });
+    if (prior !== undefined) {
+      const rows = diffBaselineGrowth(prior, JSON.parse(JSON.stringify(payload)));
+      if (rows.length > 0) throw new BaselineGrowthRefusedError(path, rows);
+    }
+  }
   await writeFile(path, JSON.stringify(payload, null, 2) + "\n", "utf8");
 }
 
