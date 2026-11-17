@@ -26,6 +26,7 @@ const {
   buildBaseline,
   mergeBaselineForShapes,
   parseShapeArg,
+  resolveShapeFilter,
   formatReport,
   scanRepo,
   loadBaseline,
@@ -279,6 +280,21 @@ describe("playbook-vocabulary-ratchet: issue-cite, back-compat and shell-lines s
   test("parseShapeArg accepts known shapes and rejects an unknown one", () => {
     assert.deepEqual(parseShapeArg("issue-cite, shell-lines"), ["issue-cite", "shell-lines"]);
     assert.throws(() => parseShapeArg("bogus"), /unknown shape "bogus"/);
+  });
+
+  test("an empty or missing --shape value, or --shape without --write-baseline, throws invalid-argument", () => {
+    const code = { code: "invalid-argument" };
+    assert.throws(() => parseShapeArg(""), code);
+    assert.throws(() => resolveShapeFilter(["--write-baseline", "--shape"]), code);
+    assert.throws(() => resolveShapeFilter(["--write-baseline", "--shape", "--other"]), code);
+    assert.throws(() => resolveShapeFilter(["--write-baseline", "--shape", ""]), code);
+    assert.throws(() => resolveShapeFilter(["--shape", "issue-cite"]), code);
+  });
+
+  test("resolveShapeFilter keeps the full rewrite and the valid filter working", () => {
+    assert.equal(resolveShapeFilter(["--write-baseline"]), undefined);
+    assert.equal(resolveShapeFilter([]), undefined);
+    assert.deepEqual(resolveShapeFilter(["--write-baseline", "--shape", "issue-cite"]), ["issue-cite"]);
   });
 });
 

@@ -311,7 +311,22 @@ export function parseShapeArg(arg: string): Shape[] {
     }
     out.push(name as Shape);
   }
+  if (out.length === 0) throw new InvalidArgumentError(`--shape needs at least one shape name; expected one of ${SHAPES.join(", ")}`);
   return out;
+}
+
+/**
+ * Resolve the writer's `--shape` filter from argv: `undefined` = rewrite every
+ * shape. A `--shape` with no/empty value, or given without `--write-baseline`,
+ * throws instead of silently doing nothing.
+ */
+export function resolveShapeFilter(argv: readonly string[]): Shape[] | undefined {
+  const at = argv.indexOf("--shape");
+  if (at === -1) return undefined;
+  if (!argv.includes("--write-baseline")) throw new InvalidArgumentError("--shape only applies together with --write-baseline");
+  const value = argv[at + 1];
+  if (value === undefined || value.startsWith("--")) throw new InvalidArgumentError("--shape needs a value");
+  return parseShapeArg(value);
 }
 
 /** Empty string when clean. */
@@ -355,11 +370,11 @@ export async function loadBaseline(root: string = REPO_ROOT): Promise<Baseline> 
 }
 
 async function main(): Promise<void> {
+  const shapeFilter = resolveShapeFilter(process.argv);
   const found = scanRepo();
   if (process.argv.includes("--write-baseline")) {
-    const at = process.argv.indexOf("--shape");
     const target = join(REPO_ROOT, BASELINE_REL);
-    const next = at === -1 ? buildBaseline(found) : mergeBaselineForShapes(await loadBaseline(), found, parseShapeArg(process.argv[at + 1] ?? ""));
+    const next = shapeFilter === undefined ? buildBaseline(found) : mergeBaselineForShapes(await loadBaseline(), found, shapeFilter);
     await writeJsonBaseline(target, next);
     console.log(`[playbook-vocabulary-ratchet] wrote ${BASELINE_REL}`);
     return;
