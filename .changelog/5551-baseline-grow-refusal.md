@@ -1,0 +1,1 @@
+- feat: refuse baseline growth in the shared ratchet writer unless --allow-grow is passed (#5551)

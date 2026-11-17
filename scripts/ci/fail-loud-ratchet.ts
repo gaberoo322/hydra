@@ -20,7 +20,7 @@
  * CLI (convenience only):
  *   npx tsx scripts/ci/fail-loud-ratchet.ts                  # report
  *   npx tsx scripts/ci/fail-loud-ratchet.ts --write-baseline # shrink the baseline
- *   npx tsx scripts/ci/fail-loud-ratchet.ts --init           # (re)seed, may grow
+ *   npx tsx scripts/ci/fail-loud-ratchet.ts --init           # alias of --write-baseline (seed); growth needs --allow-grow
  *
  * `--write-baseline` refuses to add keys that are not already in the baseline.
  */
@@ -179,8 +179,7 @@ export function formatFailure(diff: RatchetDiff): string {
 
 async function main(): Promise<number> {
   const args = process.argv.slice(2);
-  const init = args.includes("--init");
-  const write = args.includes("--write-baseline") || init;
+  const write = args.includes("--write-baseline") || args.includes("--init");
   const scan = await scanTrackedFiles();
   if (scan.ok === false) {
     console.error(`fail-loud-ratchet: ${scan.error}`);
@@ -189,15 +188,19 @@ async function main(): Promise<number> {
   const baseline = await loadFailLoudBaseline();
   const diff = diffKeys(scan.keys, baseline.hits);
   if (write) {
-    if (!init && diff.newKeys.length > 0) {
-      console.error(formatFailure(diff));
-      console.error("fail-loud-ratchet: refusing to grow the baseline (use --init only to seed).");
-      return 1;
+    try {
+      await writeJsonBaseline(join(REPO_ROOT, FAIL_LOUD_BASELINE_REL), {
+        note: `Shrink-only STD-CATCH-FAIL-LOUD baseline (issue #5424). Regenerate with: ${FAIL_LOUD_WRITE_COMMAND}`,
+        hits: [...scan.keys].sort(),
+      });
+    } catch (err) {
+      if ((err as { code?: string } | null)?.code === "baseline-growth-refused") {
+        console.error(formatFailure(diff));
+        console.error((err as Error).message);
+        return 1;
+      }
+      throw err;
     }
-    await writeJsonBaseline(join(REPO_ROOT, FAIL_LOUD_BASELINE_REL), {
-      note: `Shrink-only STD-CATCH-FAIL-LOUD baseline (issue #5424). Regenerate with: ${FAIL_LOUD_WRITE_COMMAND}`,
-      hits: [...scan.keys].sort(),
-    });
     console.log(`fail-loud-ratchet: wrote ${scan.keys.length} baseline hit(s).`);
     return 0;
   }
