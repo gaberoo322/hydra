@@ -33,7 +33,7 @@ import {
   isCliEntrypoint,
   listTrackedFiles,
   loadJsonBaseline,
-  writeJsonBaseline,
+  writeBaselineOrRefuse,
 } from "./seam-check-lib.ts";
 import { stripComments } from "./test-subject-map.ts";
 
@@ -207,19 +207,20 @@ async function main(): Promise<number> {
     : baseline.hits;
   const diff = diffKeys(scan.keys, relevant);
   if (write && !only) {
-    try {
-      await writeJsonBaseline(join(REPO_ROOT, PROVENANCE_BASELINE_REL), {
+    const code = await writeBaselineOrRefuse(
+      join(REPO_ROOT, PROVENANCE_BASELINE_REL),
+      {
         note: `Shrink-only STD-TEST-OWN-FEATURE baseline (issue #5511). Regenerate with: ${PROVENANCE_WRITE_COMMAND}`,
         hits: [...scan.keys].sort(),
-      });
-    } catch (err) {
-      if ((err as { code?: string } | null)?.code === "baseline-growth-refused") {
-        console.error(formatFailure(diff));
-        console.error((err as Error).message);
-        return 1;
-      }
-      throw err;
-    }
+      },
+      {
+        allowGrow: args.includes("--allow-grow") || undefined,
+        onRefusal: () => {
+          if (diff.newKeys.length > 0) console.error(formatFailure(diff));
+        },
+      },
+    );
+    if (code !== 0) return code;
     console.log(`test-title-provenance: wrote ${scan.keys.length} baseline hit(s).`);
     return 0;
   }

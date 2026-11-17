@@ -33,7 +33,7 @@ import {
   isCliEntrypoint,
   listTrackedFiles,
   loadJsonBaseline,
-  writeJsonBaseline,
+  writeBaselineOrRefuse,
 } from "./seam-check-lib.ts";
 
 export const FAIL_LOUD_BASELINE_REL = "test/fixtures/fail-loud-baseline.json";
@@ -188,19 +188,20 @@ async function main(): Promise<number> {
   const baseline = await loadFailLoudBaseline();
   const diff = diffKeys(scan.keys, baseline.hits);
   if (write) {
-    try {
-      await writeJsonBaseline(join(REPO_ROOT, FAIL_LOUD_BASELINE_REL), {
+    const code = await writeBaselineOrRefuse(
+      join(REPO_ROOT, FAIL_LOUD_BASELINE_REL),
+      {
         note: `Shrink-only STD-CATCH-FAIL-LOUD baseline (issue #5424). Regenerate with: ${FAIL_LOUD_WRITE_COMMAND}`,
         hits: [...scan.keys].sort(),
-      });
-    } catch (err) {
-      if ((err as { code?: string } | null)?.code === "baseline-growth-refused") {
-        console.error(formatFailure(diff));
-        console.error((err as Error).message);
-        return 1;
-      }
-      throw err;
-    }
+      },
+      {
+        allowGrow: args.includes("--allow-grow") || undefined,
+        onRefusal: () => {
+          if (diff.newKeys.length > 0) console.error(formatFailure(diff));
+        },
+      },
+    );
+    if (code !== 0) return code;
     console.log(`fail-loud-ratchet: wrote ${scan.keys.length} baseline hit(s).`);
     return 0;
   }

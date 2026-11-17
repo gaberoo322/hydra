@@ -33,6 +33,7 @@ const {
   writeJsonBaseline,
   diffBaselineGrowth,
   BaselineGrowthRefusedError,
+  writeBaselineOrRefuse,
   REPO_ROOT,
 } = await import("../scripts/ci/seam-check-lib.ts");
 
@@ -310,6 +311,37 @@ describe("seam-check-lib: writeJsonBaseline growth refusal (chokepoint for every
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  test("duplicate element (multiset growth) is refused; same multiset is not growth", async () => {
+    assert.deepEqual(diffBaselineGrowth({ hits: ["a", "b"] }, { hits: ["a", "a", "b"] }).map((r: any) => r.kind), ["added-element"]);
+    assert.deepEqual(diffBaselineGrowth({ hits: ["a", "a", "b"] }, { hits: ["b", "a", "a"] }), []);
+    assert.deepEqual(diffBaselineGrowth({ hits: ["a", "a"] }, { hits: ["a"] }), []);
+    await withFile({ hits: ["a", "b"] }, async (path) => {
+      await assert.rejects(() => writeJsonBaseline(path, { hits: ["a", "a", "b"] }, { allowGrow: false }), (err: any) => err.code === "baseline-growth-refused");
+    });
+  });
+
+  test("inherited keys do not mask an added key", () => {
+    assert.deepEqual(diffBaselineGrowth({}, { constructor: 1 }).map((r: any) => r.kind), ["added-key"]);
+  });
+
+  test("an unparseable prior baseline does not bypass the gate", async () => {
+    await withFile({}, async (path) => {
+      await writeFile(path, "{not json", "utf8");
+      await assert.rejects(() => writeJsonBaseline(path, { count: 9 }, { allowGrow: false }));
+      assert.equal(await readFile(path, "utf8"), "{not json");
+    });
+  });
+
+  test("writeBaselineOrRefuse (shared CLI handler): refusal returns 1 and calls onRefusal; shrink returns 0", async () => {
+    await withFile({ hits: ["a", "b"] }, async (path) => {
+      let called = 0;
+      assert.equal(await writeBaselineOrRefuse(path, { hits: ["a", "b", "c"] }, { allowGrow: false, onRefusal: () => { called++; } }), 1);
+      assert.equal(called, 1);
+      assert.equal(await writeBaselineOrRefuse(path, { hits: ["a"] }, { allowGrow: false }), 0);
+      assert.equal(await writeBaselineOrRefuse(path, { hits: ["a", "z"] }, { allowGrow: true }), 0);
+    });
   });
 
   test("no writeJsonBaseline caller bypasses the chokepoint with its own writeFile", async () => {
