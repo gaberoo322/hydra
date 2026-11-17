@@ -1,0 +1,1 @@
+- docs: Gate 2 of the dev flow now says edit baseline rows, never regenerate; adds STD-BASELINE-EDIT-ROWS (#5554)
