@@ -193,7 +193,8 @@ export function classifyTimedOut(
 
   const reason =
     `mutation gate timed out before evaluating all mutants ` +
-    `(${report.totalMutants} of ${report.candidatesGenerated} candidate mutant(s) run; ` +
+    `(${report.totalMutants} of ${report.candidatesSampled ?? report.candidatesGenerated} ` +
+    `${report.candidatesSampled === undefined ? "candidate" : "sampled candidate"} mutant(s) run; ` +
     `partial kill rate ` +
     (partialKillRate === null ? "n/a" : `${partialKillRate}%`) +
     `) — no complete verdict, treat as inconclusive (non-blocking)`;

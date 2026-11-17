@@ -33,6 +33,7 @@
  * does) — do not resurrect the CycleContext-coupled gate that lived here.
  */
 
+import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { execWithGroupCleanup } from "./exec-with-timeout.ts";
 
@@ -120,6 +121,12 @@ export type MutationTestReport = {
   // never consume a maxMutants slot or time budget. Optional so report literals
   // that predate the counter stay valid; absent means 0.
   skippedUnparseable?: number;
+  // Issue #5583: size of the deterministic sample the run iterated (post-cap;
+  // unparseable mutants are partitioned out at generation, before the cap, so
+  // they never count here; always <= `candidatesGenerated`). Set ONLY when the caller
+  // supplied `sampleSeed`; absent means "no sample accounting" (unseeded /
+  // Target-gate runs) and readers fall back to `candidatesGenerated`.
+  candidatesSampled?: number;
 };
 
 /**
@@ -313,6 +320,56 @@ export function generateMutations(
 // ---------------------------------------------------------------------------
 
 /**
+ * Issue #5583: deterministic, seed-keyed sample of at most `cap` mutants.
+ *
+ * Pure function of (seed, mutant.file, mutant.line, mutant.type, mutant.mutated):
+ * the same seed over the same candidate set yields the same sample in the same
+ * order, independent of Math.random and of generator emission order. Mutants
+ * are grouped per file (files in path order, rotated by a seed-derived offset so
+ * that when `cap` < file count the starved files vary with the seed instead of
+ * always being the late-sorting ones); within a file they are ordered by their
+ * sha256 key. Groups are then interleaved round-robin, so when `cap` >= the
+ * number of files with a candidate every such file contributes at least one.
+ */
+export function selectMutationSample(
+  mutations: Mutation[],
+  seed: string,
+  cap: number,
+): Mutation[] {
+  const keyed = mutations.map((m) => ({
+    m,
+    key: createHash("sha256")
+      .update(`${seed}\0${m.file}\0${m.line}\0${m.type}\0${m.mutated}`)
+      .digest("hex"),
+  }));
+  const groups = new Map<string, typeof keyed>();
+  for (const k of keyed) {
+    const g = groups.get(k.m.file);
+    if (g) g.push(k);
+    else groups.set(k.m.file, [k]);
+  }
+  const files = [...groups.keys()].sort();
+  const offset = files.length
+    ? parseInt(createHash("sha256").update(seed).digest("hex").slice(0, 8), 16) % files.length
+    : 0;
+  const ordered = [...files.slice(offset), ...files.slice(0, offset)]
+    .map((f) => groups.get(f)!.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)));
+  const out: Mutation[] = [];
+  for (let round = 0; out.length < cap; round++) {
+    let any = false;
+    for (const g of ordered) {
+      if (round < g.length) {
+        any = true;
+        out.push(g[round].m);
+        if (out.length >= cap) break;
+      }
+    }
+    if (!any) break;
+  }
+  return out;
+}
+
+/**
  * Run mutation testing on the changed files.
  *
  * @param projectDir - Target project root (the configured target workspace)
@@ -320,6 +377,9 @@ export function generateMutations(
  * @param opts.timeBudgetMs - Max time for all mutations (default 120s)
  * @param opts.testCommand - Command to run tests (default: npm test)
  * @param opts.maxMutants  - Optional cap on candidate mutants (quick-fix path)
+ * @param opts.sampleSeed  - Issue #5583: when set, the maxMutants cap is applied
+ *   via the deterministic seed-keyed `selectMutationSample` instead of a random
+ *   shuffle + slice. Unset keeps the legacy shuffle behaviour byte-identical.
  * @param opts.testCommandForFile - Issue #4504: per-mutant test command derived
  *   from the (absolute) mutated file path. Returning `null` marks the mutant
  *   `noCoverage` (never run). Overrides `testCommand` when supplied.
@@ -340,6 +400,7 @@ export async function runMutationTests(
     timeBudgetMs?: number;
     testCommand?: string;
     maxMutants?: number;
+    sampleSeed?: string;
     testCommandForFile?: (file: string) => string | null;
     testTimeoutMs?: number;
     timeoutIsInconclusive?: boolean;
@@ -402,18 +463,30 @@ export async function runMutationTests(
     } catch { /* intentional: file may have been deleted in diff — skip mutation generation */ }
   }
 
-  // Shuffle mutations to get a representative sample if we time out
-  for (let i = allMutations.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [allMutations[i], allMutations[j]] = [allMutations[j], allMutations[i]];
+  // Shuffle mutations to get a representative sample if we time out. With a
+  // `sampleSeed` (issue #5583) selection is deterministic below instead.
+  const seeded = typeof opts.sampleSeed === "string";
+  if (!seeded) {
+    for (let i = allMutations.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [allMutations[i], allMutations[j]] = [allMutations[j], allMutations[i]];
+    }
   }
 
-  // Issue #272: cap candidate list so quick-fix runs stay cheap. Applied
-  // AFTER the shuffle so the sample is representative, not biased toward
-  // the first files in the diff.
-  const candidates = Number.isFinite(maxMutants)
-    ? allMutations.slice(0, maxMutants)
-    : allMutations;
+  // Issue #272: cap candidate list so quick-fix runs stay cheap. Unseeded: applied
+  // AFTER the shuffle so the sample is representative. Seeded (#5583): chosen by
+  // the deterministic selectMutationSample (no shuffle happened).
+  // A seeded UNCAPPED run still orders via selectMutationSample (cap = pool
+  // size) so a time-budget-truncated run is not biased toward early files.
+  const candidates = seeded
+    ? selectMutationSample(
+        allMutations,
+        opts.sampleSeed as string,
+        Number.isFinite(maxMutants) ? maxMutants : allMutations.length,
+      )
+    : !Number.isFinite(maxMutants)
+      ? allMutations
+      : allMutations.slice(0, maxMutants);
   // Issue #300: record the pre-cap candidate count so the gate can distinguish
   // "nothing to mutate" (legitimate no-mutants) from "we capped a larger pool"
   // (still useful signal, should classify as RAN).
@@ -551,5 +624,6 @@ export async function runMutationTests(
     inconclusive,
     noCoverage,
     skippedUnparseable: unparseableResults.length,
+    ...(seeded ? { candidatesSampled: candidates.length } : {}),
   };
 }
