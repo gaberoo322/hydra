@@ -38,7 +38,7 @@ Every ISSUE state change in this playbook is exactly one command, run from `~/hy
 npx tsx scripts/lifecycle.ts advance <N> <to> --reason <enum> --rationale "<one line>" --actor hydra-sweep
 ```
 
-Exit `0` = written (report any `wouldRefuse:<code>` in the run summary, never retry); `1` = refused or failed (leave the label as is, report the code, NEVER fall back to `gh issue edit` / `gh api .../labels`); `2` = playbook bug. `--reason` is a closed enum from `src/lifecycle/reasons.ts` (`ready-for-agent` <- `scoped` | `unblocked`; `blocked` <- `blocked-by-issue`; `needs-triage` <- `rerouted`; `parked` <- `off-list-escalation`); `-> needs-triage` from a zero-state issue is gate-free and takes no reason; `closed` takes `--evidence pr=<MERGED PR>`. Flag labels (`needs-design-concept`, `enhancement`, `bug`, `sentry`) stay plain `gh` writes. The sweep never writes `ready-for-human` and never exits a human-hold state (`needs-info`, `ready-for-human`, `hitl-grill`, `parked`) - those are report-only here; the operator exits them via `/hydra-review`.
+Exit `0` = written (report any `wouldRefuse:<code>` in the run summary, never retry); `1` = refused or failed (leave the label as is, report the code, NEVER fall back to `gh issue edit` / `gh api .../labels`); `2` = playbook bug. `--reason` is a closed enum from `src/lifecycle/reasons.ts` (`ready-for-agent` <- `scoped` | `unblocked`; `blocked` <- `blocked-by-issue`; `needs-triage` <- `rerouted`; `parked` <- `off-list-escalation`); `-> needs-triage` from a zero-state issue is gate-free and takes no reason; `closed` takes exactly one of two shapes: `--evidence pr=<M>` (M MERGED and its body closes #N, `Closes|Fixes|Resolves`) or `--close-reason "not planned" --evidence superseded-by=#<M>` (M covers every acceptance criterion of #N; a merged PR that closes a DIFFERENT issue is this shape, never `pr=`). `--reason` is not close evidence. A close refusal (`evidence-required:pr`, `evidence-required:superseded-by`, `pr-does-not-close-issue`, `pr-not-merged`, `illegal-transition`) is final: report the code and stop; never retry with other evidence, edit a merged PR body, or fall back to `gh issue close`. Flag labels (`needs-design-concept`, `enhancement`, `bug`, `sentry`) stay plain `gh` writes. The sweep never writes `ready-for-human` and never exits a human-hold state (`needs-info`, `ready-for-human`, `hitl-grill`, `parked`) - those are report-only here; the operator exits them via `/hydra-review`.
 
 ## Process
 
@@ -123,7 +123,7 @@ OPEN_PRS=$(gh pr list --repo gaberoo322/hydra --state open \
 #   no referencing OPEN PR  -> PROMOTE
 ```
 
-Gate strictly on `--state open`: a **closed-unmerged** PR means the attempt was abandoned (promote); a **merged** PR means the work is done. The report MUST name every suppression and its PR number.
+Gate strictly on `--state open`: a **closed-unmerged** PR means the attempt was abandoned (promote); a **merged** PR means the work is done, but it is closable only when its body closes #N (step 2a of the `in-progress` lane). The report MUST name every suppression and its PR number.
 
 ### 2. Group and process
 
@@ -150,7 +150,8 @@ Invoke `/hydra-issue-research $number`. Multiple in parallel OK (read-only).
 
 #### `in-progress` — check for stale work
 1. PR exists? `gh pr list --search "closes #$number"`
-2. PR merged and the issue still open: `advance $number closed --evidence pr=<PR> --rationale "PR merged, issue still open" --actor hydra-sweep`.
+2a. PR merged, its body closes #$number (`Closes|Fixes|Resolves`), issue still open: `advance $number closed --evidence pr=<PR> --rationale "PR merged, issue still open" --actor hydra-sweep`.
+2b. Only merged PR carries `Refs #$number` with no closing reference (or the seam answers `pr-does-not-close-issue` / `pr-not-merged`): write NO state. Post one issue comment whose first line is exactly `merged-no-closing-ref: PR #<M>` and repeat that line under **Needs operator attention**; the operator closes via `POST /autopilot/board/close`.
 3. PR open: skip.
 4. No PR + updated >12h ago: **report only** (stale in-progress). The re-queue and its cap arm belong to the deterministic writer (`recover-stale.sh`); the sweep writes nothing.
 
@@ -205,6 +206,6 @@ Print summary table using captured before/after values:
 ```
 
 Also report:
-- **Auto-triaged**, **Tracking parents identified**, **Critical path** (which RFA was picked and why), **Needs operator attention**, **Still blocked**, **Labels cleaned**, **Errors**.
+- **Auto-triaged**, **Tracking parents identified**, **Critical path** (which RFA was picked and why), **Needs operator attention** (including each `merged-no-closing-ref: PR #<M>` line), **Still blocked**, **Labels cleaned**, **Errors**.
 
 @include _fragments/slot-lifecycle-hook.md
