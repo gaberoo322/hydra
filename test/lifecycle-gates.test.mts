@@ -13,6 +13,8 @@ import {
   gateClaimReleased,
   gateUnblocked,
   gateClose,
+  isPullRequestUrl,
+  prRecordFromView,
   gateDispatch,
   gateJudgment,
   gatePrOpen,
@@ -149,6 +151,7 @@ function harness(
     pr?: { number: number; state: string; body: string } | null;
     dc?: { exists: boolean; status: string } | null;
     body?: string;
+    url?: string;
     comment?: CommentRecord | null;
     /** Entry clock: number = entered at, null = no labeled event, undefined = fetch fails. */
     entry?: number | null;
@@ -156,7 +159,7 @@ function harness(
 ): Harness {
   const h: Harness = { deps: undefined as never, journal: [], edits: [], closes: [], state: { labels: [...labels], state: "OPEN" }, expired: [] };
   const row = () => ({
-    number: 10, title: "t", url: "u", createdAt: "", body: opts.body ?? "", labels: [...h.state.labels], state: h.state.state,
+    number: 10, title: "t", url: opts.url ?? "u", createdAt: "", body: opts.body ?? "", labels: [...h.state.labels], state: h.state.state,
   });
   h.deps = {
     repo: "o/r",
@@ -1035,5 +1038,89 @@ describe("seam wiring for the reconcile-edge gates (#5459 INV-6)", () => {
     const r2 = await advance({ issue: 10, to: "ready-for-agent" }, sh.deps);
     assert.equal(r2.ok && r2.wouldRefuse, "fetch-failed");
     assert.equal(sh.edits.length, 1);
+  });
+});
+
+describe("self-move no-op, PR guard and merged-PR fold (#5584)", () => {
+  for (const mode of ["shadow", "enforce"] as const) {
+    test(`a self-move is a no-op success in ${mode}: no edit, one noop journal row`, async () => {
+      const h = harness(["needs-triage", "enhancement"], mode);
+      const res = await advance({ issue: 10, to: "needs-triage" }, h.deps);
+      assert.deepEqual(res, {
+        ok: true, issue: 10, from: "needs-triage", to: "needs-triage", mode, noop: true,
+        observed: { state: "OPEN", labels: ["needs-triage", "enhancement"] },
+      });
+      assert.equal(h.edits.length, 0);
+      assert.equal(h.closes.length, 0);
+      assert.equal(h.journal.length, 1);
+      assert.equal(h.journal[0].kind, "transition");
+      assert.equal(h.journal[0].result, "noop");
+      assert.equal(h.journal[0].written, false);
+    });
+  }
+
+  test("a human-hold self-move is a no-op, not a human-hold-exit, and is not a hold exit", async () => {
+    const h = harness(["hitl-grill"], "enforce");
+    const res = await advance({ issue: 10, to: "hitl-grill" }, h.deps);
+    assert.equal(res.ok && res.noop, true);
+    assert.equal(h.edits.length, 0);
+    assert.equal(h.journal[0].result, "noop");
+    assert.equal(isUnsanctionedHoldExit(h.journal[0]), false);
+  });
+
+  test("a closed issue still refuses issue-closed", async () => {
+    const h = harness(["needs-triage"], "enforce");
+    h.state.state = "CLOSED";
+    const res = await advance({ issue: 10, to: "needs-triage" }, h.deps);
+    assert.equal(res.ok, false);
+    assert.equal((res as any).code, "issue-closed");
+  });
+
+  test("a mismatched --from beats the no-op", async () => {
+    const h = harness(["needs-triage"], "enforce");
+    const res = await advance({ issue: 10, to: "needs-triage", from: "ready-for-agent" }, h.deps);
+    assert.equal(res.ok, false);
+    assert.equal((res as any).code, "from-mismatch");
+    assert.equal(h.journal[0].result, "refused:from-mismatch");
+  });
+
+  test("zero and multiple state labels are not no-ops", async () => {
+    const none = await advance({ issue: 10, to: "ready-for-agent" }, harness(["enhancement"], "enforce").deps);
+    assert.equal((none as any).code, "state-missing");
+    const many = await advance({ issue: 10, to: "needs-triage" }, harness(["needs-triage", "in-progress"], "enforce").deps);
+    assert.equal(many.ok && "noop" in many, false);
+  });
+
+  for (const mode of ["shadow", "enforce"] as const) {
+    test(`a PR number refuses not-an-issue in ${mode}: no edit, no journal row`, async () => {
+      const h = harness(["needs-triage"], mode, { url: "https://github.com/o/r/pull/10" });
+      const res = await advance({ issue: 10, to: "needs-triage" }, h.deps);
+      assert.deepEqual(res, { ok: false, issue: 10, code: "not-an-issue", mode, written: false });
+      assert.equal(h.edits.length, 0);
+      assert.equal(h.journal.length, 0);
+      const op = operatorHarness(["needs-triage"], mode);
+      op.h.deps.view = async () => ({
+        ok: true,
+        row: { number: 10, title: "t", url: "https://github.com/o/r/pull/10", createdAt: "", body: "", labels: ["needs-triage"], state: "OPEN" },
+      });
+      const opRes = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, op.h.deps);
+      assert.equal((opRes as any).code, "not-an-issue");
+      assert.equal(op.h.edits.length, 0);
+      assert.equal(op.h.journal.length, 0);
+    });
+  }
+
+  test("isPullRequestUrl distinguishes issue and pull URLs", () => {
+    assert.equal(isPullRequestUrl("https://github.com/o/r/issues/10"), false);
+    assert.equal(isPullRequestUrl("https://github.com/o/r/pull/10"), true);
+    assert.equal(isPullRequestUrl(""), false);
+  });
+
+  test("prRecordFromView reads a merged REST PR as MERGED", () => {
+    const f = (v: object) => prRecordFromView({ number: 1, body: "b", ...v }).state;
+    assert.equal(f({ state: "closed", mergedAt: "2026-11-07T05:28:01Z" }), "MERGED");
+    assert.equal(f({ state: "closed", mergedAt: null }), "CLOSED");
+    assert.equal(f({ state: "open" }), "OPEN");
+    assert.equal(f({ state: "MERGED" }), "MERGED");
   });
 });
