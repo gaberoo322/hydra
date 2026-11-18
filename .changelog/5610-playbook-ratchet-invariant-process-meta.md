@@ -1,0 +1,1 @@
+- ci: count invariant-id and PR-process meta-commentary in the playbook vocabulary ratchet (#5610)

@@ -11,7 +11,7 @@
  * STD-PLAYBOOK-CURRENT-BEHAVIOUR, STD-PLAYBOOK-TARGET-SEAM and
  * STD-PLAYBOOK-LOGIC-IN-SCRIPTS.
  *
- * Eight banned shapes:
+ * Ten banned shapes:
  *
  *   status      a status or history phrase: "not yet", "currently", "formerly",
  *               "no longer", "used to", "until #N", a rollout label
@@ -30,6 +30,12 @@
  *               camelCase() call or a .dotted.field path (not in a fenced
  *               block; a `$VAR`/`${VAR}` shell read, a filename or glob, and a
  *               symbol tied to its file by an attribution phrase are exempt)
+ *   invariant-cite an `INV-<n>` or `INV-<A>` invariant id in prose (not in a
+ *               fenced block; the label that opens a definition bullet is
+ *               exempt by token: that bullet is the invariant's home)
+ *   process-meta PR-process meta-commentary: a closed list of phrases such as
+ *               "tracked as a follow-up" or "out of scope for this PR" (not in
+ *               a fenced block)
  *
  * A line that starts with `Historical:` (the existing playbook provenance
  * convention, HISTORICAL_EXEMPT_RE) is exempt from every shape. The exemption
@@ -57,7 +63,7 @@ export const BASELINE_REL = "scripts/ci/playbook-vocabulary-baseline.json";
 export const STANDARD_REL = "CODING_STANDARDS.md";
 export const WRITE_BASELINE_CMD = "npx tsx scripts/ci/playbook-vocabulary-ratchet.ts --write-baseline";
 
-export const SHAPES = ["status", "line-cite", "target", "avoid-term", "issue-cite", "back-compat", "shell-lines", "symbol-cite"] as const;
+export const SHAPES = ["status", "line-cite", "target", "avoid-term", "issue-cite", "back-compat", "shell-lines", "symbol-cite", "invariant-cite", "process-meta"] as const;
 export type Shape = (typeof SHAPES)[number];
 
 /** One banned-shape occurrence. `line` is 1-based. */
@@ -135,6 +141,24 @@ const CONST_TOKEN_RE = /(?<![\w${])[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+(?!\w)(?!\.[a-z]
 const CALL_TOKEN_RE = /(?<!\w)[a-z][a-zA-Z0-9]*[A-Z][a-zA-Z0-9]*\(\)/g;
 const FIELD_TOKEN_RE = /(?<![\w/*.])\.[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+/g;
 const FILE_EXT_TAIL_RE = /\.(?:ts|mts|tsx|js|mjs|md|json|yml|yaml|py|sh|toml|txt|tap)$/;
+
+/** An invariant id: `INV-` plus one to three digits or one capital letter. */
+const INVARIANT_RE = /\bINV-(?:\d{1,3}|[A-Z])\b/g;
+/** The label that opens a definition bullet (`- **INV-A** — ...`); removed by token before the scan. */
+const INVARIANT_DEFINITION_RE = /^(\s*(?:>\s*)*(?:[-*+]|\d+\.)\s+)\**INV-(?:\d{1,3}|[A-Z])\**(?=\s*[\u2014:-])/;
+
+/** PR-process meta-commentary (closed list); bare "follow-up" and "this PR" are live procedure and never match. */
+const PROCESS_META_RE = new RegExp(
+  [
+    "\\btracked (?:as a (?:separate )?follow-up|separately)\\b",
+    "\\bseparate follow-up\\b",
+    "\\bin a (?:separate |later )?follow-up (?:PR|issue|slice|change)\\b",
+    "\\bout of scope for this (?:PR|change|issue|slice)\\b",
+    "\\bin scope (?:of|for) this (?:PR|change|issue|slice)\\b",
+    "\\bthis PR's scope\\b",
+  ].join("|"),
+  "gi",
+);
 
 const SHELL_INFO = new Set(["bash", "sh", "zsh", "shell"]);
 
@@ -240,6 +264,8 @@ export function findHits(file: string, text: string, avoidTerms: readonly string
       scan("issue-cite", ISSUE_CITE_RE, line.replace(TEMPLATE_TOKEN_RE, ""));
       scan("back-compat", BACK_COMPAT_RE);
       scan("back-compat", PHASE_RE);
+      scan("invariant-cite", INVARIANT_RE, line.replace(INVARIANT_DEFINITION_RE, "$1"));
+      scan("process-meta", PROCESS_META_RE);
       const attributed = attributedSymbols(line);
       for (const re of [CONST_TOKEN_RE, CALL_TOKEN_RE, FIELD_TOKEN_RE]) {
         for (const m of line.matchAll(re)) {
@@ -364,6 +390,11 @@ export function formatReport(cmp: Comparison): string {
     if (cmp.exceeded.some((d) => d.shape === "symbol-cite")) {
       out.push(
         "symbol-cite fix: attribute the symbol to its file with an attribution phrase (so playbook-reference-check resolves it), or name the fact's home without copying the symbol.",
+      );
+    }
+    if (cmp.exceeded.some((d) => d.shape === "invariant-cite")) {
+      out.push(
+        "invariant-cite fix: name the invariant's home (the design-concept artifact, or the assert_invariants.py docstring) instead of copying the invariant id.",
       );
     }
     out.push(
