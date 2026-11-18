@@ -18,7 +18,6 @@ import { join } from "node:path";
 const {
   SHAPES,
   STANDARD_REL,
-  WRITE_BASELINE_CMD,
   parseAvoidTerms,
   findHits,
   countByShape,
@@ -182,7 +181,8 @@ describe("playbook-vocabulary-ratchet: shrink-only per-file baseline", () => {
     );
     const report = formatReport(cmp);
     assert.match(report, /lower the baseline/);
-    assert.ok(report.includes(WRITE_BASELINE_CMD));
+    assert.match(report, /by hand/);
+    assert.ok(!report.includes("--write-baseline"));
   });
 
   test("buildBaseline is sorted, per file, and omits clean files and zero counts", () => {
