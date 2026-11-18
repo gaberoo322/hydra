@@ -54,6 +54,7 @@ import {
   type OpenIssueRef,
   type PullRequestRef,
 } from "./hydra-cleanup-render.ts";
+import { InvalidArgumentError } from "../../src/errors.ts";
 import { runEmitShell, type EmitShellSpec, type EmitShellIo } from "./hydra-emit-shell.ts";
 import { loadKnipReport } from "./hydra-knip-source.ts";
 
@@ -652,7 +653,7 @@ export function fileCleanupIssue(title: string, body: string, lane: CleanupLane,
     { input: body },
   );
   const m = out.trim().match(/github\.com\/.*\/issues\/(\d+)/);
-  if (!m) throw new Error(`could not parse issue number from gh issue create output: ${out.trim()}`);
+  if (!m) throw new InvalidArgumentError(`could not parse issue number from gh issue create output: ${out.trim()}`);
   const n = Number(m[1]);
 
   const tri = seamAdvance(exec, n, "needs-triage", []);
@@ -686,7 +687,7 @@ export function readHitlGrillOpenCount(exec: ExecFn = defaultExec): number {
     "issue", "list", "--repo", REPO, "--label", "hitl-grill", "--state", "open", "--limit", "200", "--json", "number",
   ]);
   const parsed = JSON.parse(out) as unknown;
-  if (!Array.isArray(parsed)) throw new Error("gh issue list returned a non-array");
+  if (!Array.isArray(parsed)) throw new InvalidArgumentError("gh issue list returned a non-array");
   return parsed.length;
 }
 
