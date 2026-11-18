@@ -176,7 +176,7 @@ describe("print-target-facts CLI (INV-7)", () => {
   });
 
   test("the plain preamble run (no flag, no TARGET_MANIFEST_ROOT) exports TARGET_MANIFEST_ROOT = the workspace", () => {
-    const env = { ...process.env, HYDRA_PROJECT_WORKSPACE: root };
+    const env: NodeJS.ProcessEnv = { ...process.env, HYDRA_PROJECT_WORKSPACE: root };
     delete env.TARGET_MANIFEST_ROOT;
     const r = spawnSync(process.execPath, ["--experimental-strip-types", script, "--sh"], { encoding: "utf8", env });
     assert.equal(r.status, 0, r.stderr);
