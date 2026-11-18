@@ -54,6 +54,8 @@ concurrency:
 
 permissions:
   contents: read
+  # gh pr view (live PR body for the baseline-raise step, #5553).
+  pull-requests: read
 
 env:
   # Pinned, version-tagged alpine image for comby (carries comby + its
@@ -329,6 +331,26 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           node --experimental-strip-types scripts/ci/qa-fix-proof.ts --mode changed-tests \
+            --base "$PR_BASE_SHA" --head "$PR_HEAD_SHA"
+
+      # ── Baseline-raise guard (issue #5553, parent #5550) ───────────────────
+      # STD-BASELINE-EDIT-ROWS reviewer aid: annotate committed shrink-only
+      # baseline growth (or a row moved for a file outside the PR diff) lacking
+      # a matching `Baseline-raise: <fixture> <row-key> - <reason>` PR-body line.
+      # ADVISORY: exits 0 always (no --strict). Promoting it (--strict or a
+      # required context) is an operator decision; ci.yml is never edited. The
+      # PR body is read LIVE via gh, not the push-time event payload.
+      - name: Baseline-raise check (advisory; scripts/ci/baseline-raise-check.ts)
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          PR_BODY="$(gh pr view "$PR_NUM" --json body --jq .body || true)"
+          export PR_BODY
+          node --experimental-strip-types scripts/ci/baseline-raise-check.ts \
             --base "$PR_BASE_SHA" --head "$PR_HEAD_SHA"
 
       - name: Upload zizmor results
