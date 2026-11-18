@@ -671,18 +671,27 @@ describe("getAttentionFeed — INV-2: no deviation/spend/quota anywhere in the s
     }
   });
 
-  test("src/attention.ts imports no cost or usage-tracker module (import discipline)", async () => {
-    const src = await import("node:fs").then((fs) =>
-      fs.readFileSync(new URL("../src/attention.ts", import.meta.url), "utf8"),
-    );
-    // Scan IMPORT lines only — the module's own doc comment names the
-    // exclusion ("never src/cost/* or usage-tracker output"), which is the
-    // guard being documented, not a violation.
-    const importLines = src.split("\n").filter((l) => /\bfrom\s+"/.test(l));
-    assert.equal(
-      importLines.some((l) => /cost\/|usage-tracker/.test(l)),
-      false,
-    );
+  test("src/attention.ts and src/attention/*.ts import no cost or usage-tracker module (import discipline)", async () => {
+    const fs = await import("node:fs");
+    const dir = new URL("../src/attention/", import.meta.url);
+    const files = [
+      new URL("../src/attention.ts", import.meta.url),
+      ...(fs.existsSync(dir)
+        ? fs.readdirSync(dir).filter((f) => f.endsWith(".ts")).map((f) => new URL(f, dir))
+        : []),
+    ];
+    for (const file of files) {
+      const src = fs.readFileSync(file, "utf8");
+      // Scan IMPORT lines only — the module's own doc comment names the
+      // exclusion ("never src/cost/* or usage-tracker output"), which is the
+      // guard being documented, not a violation.
+      const importLines = src.split("\n").filter((l) => /\bfrom\s+"/.test(l));
+      assert.equal(
+        importLines.some((l) => /cost\/|usage-tracker/.test(l)),
+        false,
+        file.pathname,
+      );
+    }
   });
 });
 

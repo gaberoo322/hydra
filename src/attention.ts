@@ -49,6 +49,15 @@
  * usage-eligibility, which pulls cost/ in and fails SAFE to "not paused");
  * `test/attention.test.mts` regression-locks it.
  *
+ * # Module layout (issue #5615)
+ *
+ * This file is the composer + public facade. Each bucket's line builders and
+ * readers live in `src/attention/<bucket>.ts` and return a uniform
+ * `BucketRead`; the composer keeps ordering, evidence accounting, registry
+ * action resolution, the §8.4 ledger reconcile and the dismissal filter.
+ * `AttentionFeedDeps` is the intersection of the per-bucket deps interfaces,
+ * so callers still inject one flat object.
+ *
  * # Design contract
  *
  * - **Never throws** (getAttentionFeed): every sub-read runs under
@@ -63,79 +72,42 @@
  *   feed; the surfaced/dismissed counters are keyed by SIGNAL, not by item.
  */
 
-import { DEFAULT_THRESHOLDS } from "./aggregators/stuck-items.ts";
-import {
-  getIssuesWaiting,
-  type IssuesWaitingDeps,
-  type IssuesWaitingResult,
-  type WaitingIssue,
-} from "./aggregators/issues-waiting.ts";
-import { getRepoArchivedOrNull } from "./github/repo.ts";
-import { getTargetGithubRepo } from "./target-config.ts";
-import {
-  listDispatchOutcomes,
-  type DispatchOutcomeListResult,
-} from "./redis/dispatch-outcomes.ts";
-import { bucketCycleStatus } from "./autopilot/cycle-status.ts";
-import {
-  getStalledPrs,
-  type StalledPr,
-  type StalledPrLine,
-  type StalledPrsDeps,
-  type StalledPrsResult,
-} from "./aggregators/stalled-prs.ts";
-import {
-  getFrictionPatterns,
-  type FrictionPatternsDeps,
-  type FrictionPatternsSnapshot,
-  type FrictionPatternRow,
-} from "./aggregators/friction-patterns.ts";
-import { PROMOTION_THRESHOLD, escalationThresholdForCue } from "./pattern-memory/index.ts";
-import {
-  HITL_GRILL_CAP,
-  HITL_GRILL_LABEL,
-} from "./schemas/autopilot-board.ts";
-import {
-  listIssuesByLabel,
-  resolveGithubRepo,
-  type IssueReadResult,
-  type IssueRow,
-} from "./github/issues.ts";
-import { readReconcileReport } from "./redis/lifecycle-journal.ts";
-import { projectHitlGrillLane } from "./autopilot/work-projections.ts";
-import { HOLD_EXIT_ALERT_WINDOW_DAYS } from "./lifecycle/index.ts";
-import { listHoldExits, type ListHoldExitsResult } from "./redis/lifecycle-journal.ts";
-import { settledOr } from "./settled-fold.ts";
+import { logger } from "./logger.ts";
 import {
   loadDismissed as loadDismissedLedger,
   reconcileLedgers as reconcileLedgersDefault,
   type AdmittedLine,
 } from "./redis/attention.ts";
-import { getAutopilotPaused, type AutopilotPauseState } from "./redis/autopilot-pause.ts";
-import { getSessionBlockedUntil } from "./redis/session-block.ts";
-import { getStatus as getSchedulerStatus } from "./scheduler/heartbeat.ts";
-import { deliberateStopFreshness } from "./scheduler/stop-marker.ts";
-import {
-  DEPLOY_DRIFT_GRACE_SECONDS,
-  readDeployDrift,
-  type DeployDriftReading,
-} from "./health/deployed-sha.ts";
 import { REGISTRY } from "./operator-actions/registry.ts";
 import {
   ADMISSION_LINE_KEYS,
   BUCKETS,
-  BUCKET_LINES,
-  type Action,
   type Bucket,
   type OperatorActionEntry,
-  type Variant,
 } from "./schemas/operator-actions.ts";
 import type {
   AttentionBucketSummary,
   AttentionFeedItem,
   MachineStoppedSubLine,
 } from "./schemas/attention.ts";
-import { logger } from "./logger.ts";
+import { resolveAction } from "./attention/actions.ts";
+import { bucketOf, settle, type BucketRead, type Draft } from "./attention/draft.ts";
+import { readMachineStopped, type MachineStoppedDeps } from "./attention/machine-stopped.ts";
+import { readStalledPrs, type StalledPrsBucketDeps } from "./attention/stalled-prs.ts";
+import {
+  readInvalidState,
+  readWaiting,
+  type WaitingBucketDeps,
+} from "./attention/waiting.ts";
+import { readTargetItems, type TargetBucketDeps } from "./attention/target.ts";
+import { readRepetition, repetitionItems, type RepetitionBucketDeps } from "./attention/repetition.ts";
+import { readParked, type ParkedBucketDeps } from "./attention/parked.ts";
+
+// Facade: every symbol this module exported before the #5615 split.
+export { resolveAction, type ActionContext } from "./attention/actions.ts";
+export { crossedAtFrom, INVALID_STATE_REPORT_MAX_AGE_MS, type InvalidStateRead } from "./attention/waiting.ts";
+export { repetitionItems };
+export type { SchedulerStopRead } from "./attention/machine-stopped.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -156,25 +128,12 @@ export interface AttentionFeedResult {
   sourcesOk: boolean;
 }
 
-export interface AttentionFeedDeps {
+/** The composer's own injection slice (everything not owned by one bucket). */
+export interface ComposerDeps {
   /** Wall-clock anchor — defaults to `new Date()`; forwarded to both aggregators. */
   now?: Date;
   /** GitHub repo handle (`owner/name`). Defaults to `gaberoo322/hydra`. */
   githubRepo?: string;
-  /** Override the rank-2 issues-waiting aggregator (issue #4625). Tests inject a stub. */
-  getIssuesWaiting?: (deps?: IssuesWaitingDeps) => Promise<IssuesWaitingResult>;
-  /** Override the rank-3 issues-waiting read against the Target repo. Defaults to the same aggregator. */
-  getTargetIssuesWaiting?: (deps?: IssuesWaitingDeps) => Promise<IssuesWaitingResult>;
-  /** The configured Target repo. Defaults to `getTargetGithubRepo()` (src/target-config.ts). */
-  targetGithubRepo?: string;
-  /** Is the Target repo archived? `null` = UNKNOWN. Default: src/github/repo.ts. */
-  readTargetRepoArchived?: (repo: string) => Promise<boolean | null>;
-  /** Dispatch-outcome window read for the reframe attempt count. Default: src/redis/dispatch-outcomes.ts. */
-  listDispatchOutcomes?: (opts: { sinceMs: number }) => Promise<DispatchOutcomeListResult>;
-  /** Override the rank-1 stalled-PRs aggregator (issue #4624). Tests inject a stub. */
-  getStalledPrs?: (deps?: StalledPrsDeps) => Promise<StalledPrsResult>;
-  /** Override the friction-patterns aggregator. Tests inject a stub. */
-  getFrictionPatterns?: (deps?: FrictionPatternsDeps) => Promise<FrictionPatternsSnapshot>;
   /** Override the per-line dismissed-episode ledger read. Tests inject a stub. */
   loadDismissed?: (now?: Date) => Promise<ReadonlyMap<string, ReadonlySet<string>>>;
   /**
@@ -185,61 +144,22 @@ export interface AttentionFeedDeps {
     admittedByLine: ReadonlyMap<string, AdmittedLine>,
     now?: Date,
   ) => Promise<void>;
-  /** Rank-0 `paused` line read. Default: src/redis/autopilot-pause.ts. */
-  readPaused?: () => Promise<AutopilotPauseState>;
-  /** Rank-0 `session-blocked` line read (epoch ms, null = none). Default: src/redis/session-block.ts. */
-  readSessionBlockedUntil?: () => Promise<number | null>;
-  /**
-   * Rank-0 `scheduler-deliberate` line read: ONE snapshot of `stopReason` +
-   * `deliberateStoppedAt` (never two reads — a torn pair could mix a new
-   * reason with a stale stamp). Default: scheduler heartbeat getStatus().
-   */
-  readSchedulerStop?: () => Promise<SchedulerStopRead>;
-  /** Rank-0 `sha-drift` line read. Default: src/health/deployed-sha.ts readDeployDrift(). */
-  readShaDrift?: () => Promise<DeployDriftReading>;
-  /** Rank-5 hitl-grill lane read (issue #4626). Default: listIssuesByLabel(HITL_GRILL_LABEL, {repo}). */
-  readHitlGrillIssues?: () => Promise<IssueReadResult<IssueRow>>;
-  /**
-   * Rank-2 `hold-exit` line read (ADR-0047 Decision 3, #5313): unsanctioned
-   * human-hold exits journaled at or after `sinceMs`. Default:
-   * src/redis/lifecycle-journal.ts listHoldExits.
-   */
-  readHoldExits?: (repo: string, sinceMs: number) => Promise<ListHoldExitsResult>;
-  /**
-   * `waiting-on-you:invalid-state` line read (issue #5316): the persisted
-   * lifecycle reconcile report, composed from ONE Redis read and zero gh
-   * calls. Default: src/redis/lifecycle-journal.ts readReconcileReport().
-   */
-  readLifecycleReconcile?: () => Promise<InvalidStateRead>;
   /** Override the operator-action registry (tests only). */
   registry?: readonly OperatorActionEntry[];
 }
 
-/** The slice of the persisted reconcile report the `invalid-state` line composes from. */
-export type InvalidStateRead =
-  | { ok: true; ts: number | null; invalid: Array<{ number: number; labels: string[] }> }
-  | { ok: false };
-
-/** The `invalid-state` line is healthy only while the report is younger than this (3h). */
-export const INVALID_STATE_REPORT_MAX_AGE_MS = 3 * 60 * 60 * 1000;
-
-async function readLifecycleReconcileDefault(): Promise<InvalidStateRead> {
-  const res = await readReconcileReport(resolveGithubRepo());
-  if (res.ok === false) return { ok: false };
-  const raw = res.report?.invalid;
-  const invalid = Array.isArray(raw)
-    ? raw.flatMap((r) => {
-        const row = r as { number?: unknown; labels?: unknown } | null;
-        return row && typeof row.number === "number" && Array.isArray(row.labels)
-          ? [{ number: row.number, labels: row.labels.map(String) }]
-          : [];
-      })
-    : [];
-  return { ok: true, ts: res.report === null ? null : res.ts, invalid };
-}
-
-/** Per-item template context (ADR-0034 §8.2 BUCKET_CONTEXT). */
-export type ActionContext = Readonly<Record<string, string | number>>;
+/**
+ * The single public injection surface: the intersection of each bucket
+ * module's deps slice plus the composer's own. Field names and signatures are
+ * unchanged by the split.
+ */
+export type AttentionFeedDeps = ComposerDeps &
+  MachineStoppedDeps &
+  StalledPrsBucketDeps &
+  WaitingBucketDeps &
+  TargetBucketDeps &
+  RepetitionBucketDeps &
+  ParkedBucketDeps;
 
 const DEFAULT_REPO = "gaberoo322/hydra";
 
@@ -250,9 +170,6 @@ const DEFAULT_REPO = "gaberoo322/hydra";
 export async function getAttentionFeed(
   deps: AttentionFeedDeps = {},
 ): Promise<AttentionFeedResult> {
-  const waitingFn = deps.getIssuesWaiting ?? getIssuesWaiting;
-  const stalledFn = deps.getStalledPrs ?? getStalledPrs;
-  const frictionFn = deps.getFrictionPatterns ?? getFrictionPatterns;
   const loadDismissed = deps.loadDismissed ?? loadDismissedLedger;
   const reconcile = deps.reconcileLedgers ?? reconcileLedgersDefault;
   const registry = deps.registry ?? REGISTRY;
@@ -266,138 +183,55 @@ export async function getAttentionFeed(
   // getStuckItems is no longer called from the feed (its /api/v2/today/stuck
   // response shape is unchanged).
 
-  // Never throws — every source degrades independently.
-  const readLane =
-    deps.readHitlGrillIssues ?? (() => listIssuesByLabel(HITL_GRILL_LABEL, { repo }));
-  const readHoldExits = deps.readHoldExits ?? listHoldExits;
-  const holdSinceMs = nowDate.getTime() - HOLD_EXIT_ALERT_WINDOW_DAYS * 24 * 60 * 60 * 1000;
-  const [
-    waitingResult,
-    targetRead,
-    stalledResult,
-    frictionResult,
-    machineStopped,
-    laneResult,
-    holdExitResult,
-  ] = await Promise.all([
-      settle(() => waitingFn({ ...aggregatorDeps, now: nowDate })),
+  // Never throws — every source degrades independently (each bucket read
+  // settles its own sources and names its own failures).
+  const [waiting, invalid, target, stalled, repetition, machineStopped, parked] =
+    await Promise.all([
+      readWaiting(deps, { repo, now: nowDate, githubRepo: deps.githubRepo }),
+      readInvalidState(deps, repo, nowDate),
       readTargetItems(deps, nowDate),
-      settle(() => stalledFn({ githubRepo: repo })),
-      settle(() => frictionFn(aggregatorDeps)),
+      readStalledPrs(deps, repo),
+      readRepetition(deps, aggregatorDeps, nowDate),
       readMachineStopped(deps, nowDate),
-      settle(readLane),
-      settle(() => readHoldExits(repo, holdSinceMs)),
+      readParked(deps, repo, nowDate),
     ]);
-  // Issue #5316: the invalid-state line reads the persisted reconcile report only.
-  const invalidResult = await settle(deps.readLifecycleReconcile ?? readLifecycleReconcileDefault);
-  const invalidRead: InvalidStateRead =
-    invalidResult.status === "fulfilled" ? invalidResult.value : { ok: false };
-  const invalidFresh =
-    invalidRead.ok &&
-    invalidRead.ts !== null &&
-    nowDate.getTime() - invalidRead.ts < INVALID_STATE_REPORT_MAX_AGE_MS;
-
-  const emptyWaiting = (): IssuesWaitingResult => ({
-    items: [],
-    scanned: 0,
-    sourcesOk: false,
-    sourceErrors: ["issues-waiting"],
-    thresholds: DEFAULT_THRESHOLDS,
-  });
-  const emptyFriction = (): FrictionPatternsSnapshot => ({
-    bySkill: [],
-    thresholdCandidates: [],
-    recentMetaFrictionIssues: [],
-    promotionThreshold: PROMOTION_THRESHOLD,
-    candidateWindow: 1,
-    windowHours: 168,
-    generatedAt: nowDate.toISOString(),
-    scanned: 0,
-    sourcesOk: false,
-  });
-
-  const waiting = settledOr(waitingResult, emptyWaiting(), "attention/issues-waiting");
-  const friction = settledOr(
-    frictionResult,
-    emptyFriction(),
-    "attention/friction-patterns",
-  );
 
   // Per-bucket evidence accumulators.
   const evidence = new Map<Bucket, { scanned: number; errors: string[] }>(
     BUCKETS.map((b) => [b, { scanned: 0, errors: [] }]),
   );
+  const fold = (bucket: Bucket, read: BucketRead) => {
+    const e = evidence.get(bucket)!;
+    e.scanned += read.scanned;
+    for (const error of read.sourceErrors) {
+      if (!e.errors.includes(error)) e.errors.push(error);
+    }
+  };
   const note = (bucket: Bucket, error: string) => {
     const e = evidence.get(bucket)!;
     if (!e.errors.includes(error)) e.errors.push(error);
   };
 
-  // Rank 1 (issue #4624): stalled-prs. scanned = open PR rows the fetch
-  // returned (proof the lookup ran), NOT the admitted count; its named
-  // source errors (pr-list / required-contexts) render the bucket UNKNOWN.
-  const stalled = settledOr<StalledPrsResult>(
-    stalledResult,
-    { items: [], scanned: 0, sourcesOk: false, sourceErrors: ["stalled-prs"] },
-    "attention/stalled-prs",
-  );
-  evidence.get("prs-not-landing")!.scanned = stalled.scanned;
-  for (const err of stalled.sourceErrors) note("prs-not-landing", err);
-  if (!stalled.sourcesOk && stalled.sourceErrors.length === 0) {
-    note("prs-not-landing", "stalled-prs");
-  }
-
-  // Rank 2: issues-waiting against the Orchestrator repo. A rejected source
-  // names itself; a partial failure names the failed label / blocker-lookup.
-  evidence.get("waiting-on-you")!.scanned = waiting.scanned;
-  if (waitingResult.status === "rejected") note("waiting-on-you", "issues-waiting");
-  for (const err of waiting.sourceErrors) note("waiting-on-you", err);
-  if (!waiting.sourcesOk && waiting.sourceErrors.length === 0) {
-    note("waiting-on-you", "issues-waiting");
-  }
-
-  // Rank 2 `hold-exit` (#5313): a failed read names `hold-exits` (bucket
-  // UNKNOWN), never an asserted zero.
-  const holdExits = readHoldExitDrafts(holdExitResult, repo);
-  evidence.get("waiting-on-you")!.scanned += holdExits.scanned;
-  if (holdExits.failed) note("waiting-on-you", "hold-exits");
-
-  // Rank 3: the configured Target (or the archived aggregate row).
-  evidence.get("target-items")!.scanned = targetRead.scanned;
-  for (const err of targetRead.sourceErrors) note("target-items", err);
-  evidence.get("repetition")!.scanned = friction.scanned;
-  if (frictionResult.status === "rejected" || !friction.sourcesOk) {
-    note("repetition", "friction-patterns");
-  }
-  // Rank 5 (issue #4626): the hitl-grill lane. A rejected or {ok:false} read
-  // names `hitl-grill` (UNKNOWN), never an asserted zero.
-  const lane = readParkedLane(laneResult, nowDate);
-  evidence.get("parked-over-cap")!.scanned = lane.scanned;
-  if (lane.failed) {
-    note("parked-over-cap", "hitl-grill");
-  }
-  evidence.get("machine-stopped")!.scanned = machineStopped.scanned;
-  for (const err of machineStopped.sourceErrors) note("machine-stopped", err);
+  // Rank 2's `scanned` is the sum of the issues-waiting + hold-exit reads
+  // (already summed inside readWaiting).
+  fold("machine-stopped", machineStopped);
+  fold("prs-not-landing", stalled);
+  fold("waiting-on-you", waiting);
+  fold("target-items", target);
+  fold("repetition", repetition);
+  fold("parked-over-cap", parked);
 
   // Resolve each draft's registry action; a missing entry / unresolved
   // placeholder drops the item and marks its bucket UNKNOWN (never an
   // action-less item, never an asserted zero).
   const drafts: Draft[] = [
-    ...(machineStopped.row ? [machineStopped.row] : []),
-    ...stalled.items.map((pr) => stalledPrDraft(pr, repo)),
-    ...waiting.items.map((issue) =>
-      waitingDraft(issue, "waiting-on-you", repo, waiting.thresholds, undefined),
-    ),
-    ...holdExits.drafts,
-    ...(invalidRead.ok && invalidFresh
-      ? invalidRead.invalid.map((row) => invalidStateDraft(row, repo, invalidRead.ts as number))
-      : []),
-    ...targetRead.drafts,
-    ...repetitionItems(friction).map((item): Draft => ({
-      key: "repetition:hits",
-      context: {},
-      base: item,
-    })),
-    ...(lane.draft ? [lane.draft] : []),
+    ...machineStopped.drafts,
+    ...stalled.drafts,
+    ...waiting.drafts,
+    ...invalid.drafts,
+    ...target.drafts,
+    ...repetition.drafts,
+    ...parked.drafts,
   ];
 
   const items: AttentionFeedItem[] = [];
@@ -461,7 +295,7 @@ export async function getAttentionFeed(
   }
   // The invalid-state line is healthy iff the persisted report exists and is fresh.
   admittedByLine.get("waiting-on-you:invalid-state")!.healthy =
-    admittedByLine.get("waiting-on-you:invalid-state")!.healthy && invalidFresh;
+    admittedByLine.get("waiting-on-you:invalid-state")!.healthy && invalid.fresh;
   try {
     await reconcile(admittedByLine, nowDate);
   } catch (err) {
@@ -510,652 +344,6 @@ export async function getAttentionFeed(
 }
 
 // ---------------------------------------------------------------------------
-// Internals
-// ---------------------------------------------------------------------------
-
-type ItemBase = Omit<AttentionFeedItem, "bucket" | "rank" | "key" | "action" | "subLines">;
-
-interface Draft {
-  key: string;
-  context: ActionContext;
-  base: ItemBase;
-  subLines?: { key: string; line: string; detail: string }[];
-}
-
-/**
- * Per-line rendering of a rank-1 stalled PR (issue #4624). Ids: failed-required
- * keeps `pr-failed-ci-<n>` so existing 30-day dismissals survive; the new lines
- * use `pr-conflicted-<n>` / `pr-unshepherded-<n>`. crossedAt is the PR's
- * updatedAt (no transition timestamp is available).
- */
-const STALLED_LINE_RENDER: Record<
-  StalledPrLine,
-  (pr: StalledPr) => Pick<ItemBase, "id" | "signal" | "observedValue" | "threshold" | "thresholdLabel">
-> = {
-  conflicted: (pr) => ({
-    id: `pr-conflicted-${pr.number}`,
-    signal: "breakage",
-    observedValue: 1,
-    threshold: 1,
-    thresholdLabel: "mergeable = CONFLICTING",
-  }),
-  "failed-required": (pr) => ({
-    id: `pr-failed-ci-${pr.number}`,
-    signal: "breakage",
-    observedValue: pr.failedChecks.length,
-    threshold: 1,
-    thresholdLabel: "≥ 1 failed required check",
-  }),
-  unshepherded: (pr) => ({
-    id: `pr-unshepherded-${pr.number}`,
-    signal: "blocked-on-human",
-    observedValue: pr.requiredGreen,
-    threshold: pr.requiredTotal,
-    thresholdLabel: "required checks green, auto-merge unset",
-  }),
-};
-
-function stalledPrDraft(pr: StalledPr, repo: string): Draft {
-  return {
-    key: `prs-not-landing:${pr.line}`,
-    context: { repo, number: pr.number, kind: "pr" },
-    base: {
-      ...STALLED_LINE_RENDER[pr.line](pr),
-      title: pr.title,
-      url: pr.url,
-      crossedAt: pr.updatedAt,
-      dismissed: false,
-    },
-  };
-}
-
-const DAY_MS = 24 * 60 * 60 * 1000;
-/** Dispatch-outcome window the reframe attempt count reads (the record TTL). */
-const REFRAME_WINDOW_MS = 90 * DAY_MS;
-/** A reframe is a Target build that failed 2+ times (the label's own definition). */
-const REFRAME_THRESHOLD = 2;
-
-interface ReframeAttempts {
-  count: number;
-  /** Newest matching record's cycle id, for the transcript deep link. */
-  newestCycleId: string | null;
-}
-
-/** Human-readable blocker state for a blocked / stale-blocked issue row. */
-function blockerDetail(issue: WaitingIssue): string {
-  const open = issue.openBlockerNumbers;
-  if (issue.line === "blocked-live") {
-    if (issue.blockerLookupFailed && open.length > 0) {
-      return open
-        .map((n) => `blocked by #${n} (state unknown — blocker lookup failed)`)
-        .join(", ");
-    }
-    if (issue.humanBlockers.length > 0) {
-      return issue.humanBlockers.map((b) => `blocked on #${b.number} (${b.reason})`).join(", ");
-    }
-  }
-  if (open.length > 0) return `blocked by ${open.map((n) => `#${n} (open)`).join(", ")}`;
-  if (issue.blockerNumbers.length > 0) {
-    const closed = `no open blocker (refs ${issue.blockerNumbers.map((n) => `#${n}`).join(", ")} are closed)`;
-    return issue.hasFilesInScope
-      ? closed
-      : `${closed}; add a ## Files in scope section before relabelling`;
-  }
-  return "labelled blocked, no blocker referenced in the body";
-}
-
-/**
- * Per-line rendering of a rank-2 / rank-3 issue (issue #4625). Rank-2 ids keep
- * `blocked-issue-<n>` (blocked-live) / `needs-info-issue-<n>` (30-day
- * dismissal continuity); stale-blocked is `stale-blocked-issue-<n>`. Rank-3 ids
- * are `target-<line>-issue-<n>`, so equal issue numbers on the two repos can
- * never collide.
- */
-function waitingDraft(
-  issue: WaitingIssue,
-  bucket: "waiting-on-you" | "target-items",
-  repo: string,
-  thresholds: { blockedDays: number; needsInfoDays: number },
-  reframe: ReframeAttempts | null | undefined,
-): Draft {
-  const idPrefix = bucket === "target-items" ? "target-" : "";
-  const idFor = (stem: string) => `${idPrefix}${stem}-issue-${issue.number}`;
-  const common = {
-    signal: "blocked-on-human" as const,
-    title: issue.title,
-    url: issue.url,
-    dismissed: false,
-  };
-  let base: ItemBase;
-  switch (issue.line) {
-    case "blocked-live":
-      base = {
-        ...common,
-        id: idFor("blocked"),
-        observedValue: issue.ageDays,
-        threshold: thresholds.blockedDays,
-        thresholdLabel: `blocked ≥ ${thresholds.blockedDays}d`,
-        crossedAt: crossedAtFrom(issue.createdAt, thresholds.blockedDays),
-        detail: blockerDetail(issue),
-      };
-      break;
-    case "needs-info":
-      base = {
-        ...common,
-        id: idFor("needs-info"),
-        observedValue: issue.ageDays,
-        threshold: thresholds.needsInfoDays,
-        thresholdLabel: `needs-info ≥ ${thresholds.needsInfoDays}d`,
-        crossedAt: crossedAtFrom(issue.createdAt, thresholds.needsInfoDays),
-      };
-      break;
-    case "ready-for-human":
-      base = {
-        ...common,
-        id: idFor("ready-for-human"),
-        observedValue: 1,
-        threshold: 1,
-        thresholdLabel: "labelled ready-for-human",
-        crossedAt: issue.createdAt,
-      };
-      break;
-    case "stale-blocked":
-      base = {
-        ...common,
-        // Own id (INV-7): dismissing a blocked-live row must not hide the
-        // later stale-blocked signal for the same issue.
-        id: idFor("stale-blocked"),
-        observedValue: 1,
-        threshold: 1,
-        thresholdLabel: "labelled blocked, no open blocker",
-        crossedAt: issue.createdAt,
-        detail: blockerDetail(issue),
-      };
-      break;
-    case "reframe": {
-      // undefined = the enrichment read failed; null = it ran, no record matched.
-      let detail: string;
-      let count = REFRAME_THRESHOLD; // INV-8: no/unknown record => the threshold (the label's own definition)
-      if (reframe === undefined) {
-        detail = "attempt count unavailable";
-      } else if (reframe === null || reframe.count === 0) {
-        detail = "no dispatch record found for this issue";
-      } else {
-        count = reframe.count;
-        detail =
-          `${reframe.count} dev_target attempt${reframe.count === 1 ? "" : "s"}` +
-          (reframe.newestCycleId
-            ? `; latest transcript /dispatch/${reframe.newestCycleId}/transcript`
-            : "");
-      }
-      base = {
-        ...common,
-        id: idFor("reframe"),
-        observedValue: count,
-        threshold: REFRAME_THRESHOLD,
-        thresholdLabel: `failed ${REFRAME_THRESHOLD}+ times`,
-        crossedAt: issue.createdAt,
-        detail,
-      };
-      break;
-    }
-  }
-  return {
-    key: `${bucket}:${issue.line}`,
-    context: { repo, number: issue.number, kind: "issue" },
-    base,
-  };
-}
-
-interface HoldExitRead {
-  drafts: Draft[];
-  scanned: number;
-  failed: boolean;
-}
-
-/**
- * Rank 2 `hold-exit` (ADR-0047 Decision 3, #5313): ONE draft per issue — its
- * latest unsanctioned human-hold exit. The id carries the exit timestamp so a
- * later exit is a new episode a prior dismissal cannot hide. No gh call: the
- * url is built from repo + number.
- */
-function readHoldExitDrafts(
-  result: PromiseSettledResult<ListHoldExitsResult>,
-  repo: string,
-): HoldExitRead {
-  if (result.status === "rejected") {
-    logger.error({ err: result.reason }, "[attention] hold-exit read threw");
-    return { drafts: [], scanned: 0, failed: true };
-  }
-  const read = result.value;
-  if (read.ok !== true) {
-    logger.error({ error: read.error }, "[attention] hold-exit read failed");
-    return { drafts: [], scanned: 0, failed: true };
-  }
-  const latest = new Map<number, (typeof read.exits)[number]>();
-  for (const exit of read.exits) {
-    const prior = latest.get(exit.issue);
-    if (prior === undefined || exit.ts >= prior.ts) latest.set(exit.issue, exit);
-  }
-  const drafts = [...latest.values()]
-    .sort((a, b) => a.ts - b.ts)
-    .map((exit): Draft => ({
-      key: "waiting-on-you:hold-exit",
-      context: { repo, number: exit.issue, kind: "issue" },
-      base: {
-        id: `hold-exit-issue-${exit.issue}-${exit.ts}`,
-        signal: "blocked-on-human",
-        title: `#${exit.issue} left ${exit.from ?? "(unknown)"} via ${exit.source}`,
-        url: `https://github.com/${repo}/issues/${exit.issue}`,
-        dismissed: false,
-        observedValue: 1,
-        threshold: 1,
-        thresholdLabel: "human-hold exit outside operator-route",
-        crossedAt: new Date(exit.ts).toISOString(),
-      },
-    }));
-  return { drafts, scanned: read.exits.length, failed: false };
-}
-
-/**
- * `waiting-on-you:invalid-state` (issue #5316): one item per open issue the
- * reconcile found with 2+ lifecycle state labels. Composed from the persisted
- * report alone, so there is no gh call at compose time.
- */
-function invalidStateDraft(
-  row: { number: number; labels: string[] },
-  repo: string,
-  reportTs: number,
-): Draft {
-  return {
-    key: "waiting-on-you:invalid-state",
-    context: { repo, number: row.number, kind: "issue" },
-    base: {
-      id: `invalid-state-issue-${row.number}`,
-      signal: "blocked-on-human",
-      title: `Issue #${row.number} carries ${row.labels.length} lifecycle state labels`,
-      url: `https://github.com/${repo}/issues/${row.number}`,
-      dismissed: false,
-      observedValue: row.labels.length,
-      threshold: 2,
-      thresholdLabel: "2+ lifecycle state labels",
-      crossedAt: new Date(reportTs).toISOString(),
-      detail: row.labels.join(", "),
-    },
-  };
-}
-
-interface ParkedLane {
-  draft: Draft | null;
-  scanned: number;
-  failed: boolean;
-}
-
-/**
- * Rank 5 (issue #4626): one aggregate `parked-over-cap:cap` draft iff the open
- * hitl-grill lane holds >= HITL_GRILL_CAP rows. Same projection as
- * GET /autopilot/hitl-grill (projectHitlGrillLane). Never
- * throws; a failed read is `failed: true` with no draft.
- */
-function readParkedLane(
-  result: PromiseSettledResult<IssueReadResult<IssueRow>>,
-  nowDate: Date,
-): ParkedLane {
-  if (result.status === "rejected") {
-    logger.error({ err: result.reason }, "[attention] hitl-grill lane read threw");
-    return { draft: null, scanned: 0, failed: true };
-  }
-  const read = result.value;
-  if (read.ok !== true) {
-    logger.error({ code: read.code }, "[attention] hitl-grill lane read failed");
-    return { draft: null, scanned: 0, failed: true };
-  }
-  const rows = projectHitlGrillLane(read.rows);
-  const scanned = read.rows.length;
-  if (rows.length < HITL_GRILL_CAP) return { draft: null, scanned, failed: false };
-  const capped = Date.parse(rows[HITL_GRILL_CAP - 1].createdAt);
-  const crossedAt = Number.isFinite(capped)
-    ? new Date(capped).toISOString()
-    : nowDate.toISOString();
-  return {
-    scanned,
-    failed: false,
-    draft: {
-      key: "parked-over-cap:cap",
-      context: {},
-      base: {
-        id: "parked-over-cap:cap",
-        signal: "blocked-on-human",
-        title: `Parked ideas over cap: ${rows.length} / ${HITL_GRILL_CAP}`,
-        url: "/work",
-        dismissed: false,
-        observedValue: rows.length,
-        threshold: HITL_GRILL_CAP,
-        thresholdLabel: `parked ≥ ${HITL_GRILL_CAP}`,
-        crossedAt,
-        detail: rows
-          .slice(0, 3)
-          .map((r) => `#${r.number} ${r.title}`)
-          .join("; "),
-      },
-    },
-  };
-}
-
-interface TargetRead {
-  drafts: Draft[];
-  scanned: number;
-  sourceErrors: string[];
-}
-
-/**
- * Rank 3 (issue #4625): read the ONE configured Target repo. Archived or unset
- * => exactly one aggregate `target-items:archived` row (sourcesOk, scanned 1,
- * no per-issue reads). A null (UNKNOWN) archived read still runs the issue
- * reads but names `target-repo-metadata`. Never throws.
- */
-async function readTargetItems(deps: AttentionFeedDeps, nowDate: Date): Promise<TargetRead> {
-  const targetRepo = deps.targetGithubRepo ?? getTargetGithubRepo();
-  const readArchived = deps.readTargetRepoArchived ?? ((r: string) => getRepoArchivedOrNull(r));
-  const waitingFn = deps.getTargetIssuesWaiting ?? getIssuesWaiting;
-  const sourceErrors: string[] = [];
-
-  let archived: boolean | null = null;
-  if (targetRepo === "") {
-    archived = true; // unset
-  } else {
-    try {
-      archived = await readArchived(targetRepo);
-    } catch (err) {
-      logger.error({ err, repo: targetRepo }, "[attention] target repo archived read threw");
-      archived = null;
-    }
-  }
-
-  if (archived === true) {
-    const label = targetRepo === "" ? "(unset)" : targetRepo;
-    return {
-      scanned: 1,
-      sourceErrors,
-      drafts: [
-        {
-          key: "target-items:archived",
-          context: { repo: targetRepo },
-          base: {
-            id: `target-items:archived:${targetRepo}`,
-            signal: "blocked-on-human",
-            title: `Target ${label} archived — awaiting swap`,
-            url: targetRepo === "" ? "/health" : `https://github.com/${targetRepo}`,
-            observedValue: 1,
-            threshold: 1,
-            thresholdLabel: "configured Target is archived or unset",
-            crossedAt: nowDate.toISOString(),
-            dismissed: false,
-            detail: "the configured Target repo is archived or unset; swap it (ADR-0013)",
-          },
-        },
-      ],
-    };
-  }
-  if (archived === null) sourceErrors.push("target-repo-metadata");
-
-  let result: IssuesWaitingResult;
-  try {
-    result = await waitingFn({
-      now: nowDate,
-      githubRepo: targetRepo,
-      includeReframe: true,
-    });
-  } catch (err) {
-    logger.error({ err, repo: targetRepo }, "[attention] target issues-waiting read failed");
-    sourceErrors.push("issues-waiting");
-    return { drafts: [], scanned: 0, sourceErrors };
-  }
-  for (const e of result.sourceErrors) if (!sourceErrors.includes(e)) sourceErrors.push(e);
-  if (!result.sourcesOk && result.sourceErrors.length === 0) sourceErrors.push("issues-waiting");
-
-  // Reframe enrichment: one window read, only when a reframe row exists.
-  // Failure keeps the row (admission source is the label) and never flips
-  // sourcesOk.
-  let attempts: Map<number, ReframeAttempts> | null = null;
-  if (result.items.some((i) => i.line === "reframe")) {
-    attempts = await readReframeAttempts(deps, nowDate);
-  }
-
-  return {
-    scanned: result.scanned,
-    sourceErrors,
-    drafts: result.items.map((issue) =>
-      waitingDraft(
-        issue,
-        "target-items",
-        targetRepo,
-        result.thresholds,
-        issue.line === "reframe"
-          ? attempts === null
-            ? undefined
-            : (attempts.get(issue.number) ?? null)
-          : undefined,
-      ),
-    ),
-  };
-}
-
-async function readReframeAttempts(
-  deps: AttentionFeedDeps,
-  nowDate: Date,
-): Promise<Map<number, ReframeAttempts> | null> {
-  const list = deps.listDispatchOutcomes ?? listDispatchOutcomes;
-  try {
-    const res = await list({ sinceMs: nowDate.getTime() - REFRAME_WINDOW_MS });
-    if (res.ok === false) {
-      logger.error({ error: res.error }, "[attention] reframe attempt-count read failed");
-      return null;
-    }
-    const out = new Map<number, ReframeAttempts & { newestAt: number }>();
-    for (const rec of res.records) {
-      if (rec.className !== "dev_target") continue;
-      // The row reads "failed 2+ times": count failed attempts only.
-      if (bucketCycleStatus(rec.outcome) !== "failed") continue;
-      const m = /^issue-(\d+)$/.exec(rec.anchorReference ?? "");
-      if (!m) continue;
-      const n = Number.parseInt(m[1], 10);
-      const cur = out.get(n) ?? { count: 0, newestCycleId: null, newestAt: -1 };
-      cur.count += 1;
-      if (rec.recordedAt > cur.newestAt) {
-        cur.newestAt = rec.recordedAt;
-        cur.newestCycleId = rec.cycleId;
-      }
-      out.set(n, cur);
-    }
-    return out;
-  } catch (err) {
-    logger.error({ err }, "[attention] reframe attempt-count read threw");
-    return null;
-  }
-}
-
-/**
- * Run `fn` and settle it — a synchronous throw from an injected dep is
- * captured as a rejection too, so no source can escape the never-throw
- * contract.
- */
-async function settle<T>(fn: () => Promise<T>): Promise<PromiseSettledResult<T>> {
-  try {
-    return { status: "fulfilled", value: await fn() };
-  } catch (reason) {
-    return { status: "rejected", reason };
-  }
-}
-
-function bucketOf(key: string): Bucket {
-  return key.slice(0, key.indexOf(":")) as Bucket;
-}
-
-/** One scheduler-stop snapshot (see {@link AttentionFeedDeps.readSchedulerStop}). */
-export interface SchedulerStopRead {
-  stopReason: string | null;
-  deliberateStoppedAt: string | null;
-}
-
-interface MachineStoppedRead {
-  row: Draft | null;
-  scanned: number;
-  sourceErrors: string[];
-}
-
-/**
- * Read the four rank-0 lines, each independently settled. A rejected (or
- * UNKNOWN) read names itself in `sourceErrors` — it never reads as "not
- * stopped" (ADR-0034 §5.1/§5.2).
- */
-async function readMachineStopped(
-  deps: AttentionFeedDeps,
-  nowDate: Date,
-): Promise<MachineStoppedRead> {
-  const readPaused = deps.readPaused ?? getAutopilotPaused;
-  const readBlock = deps.readSessionBlockedUntil ?? (() => getSessionBlockedUntil(nowDate.getTime()));
-  const readStop =
-    deps.readSchedulerStop ??
-    (async (): Promise<SchedulerStopRead> => {
-      const status = await getSchedulerStatus();
-      return {
-        stopReason: status.stopReason ?? null,
-        deliberateStoppedAt: status.deliberateStoppedAt ?? null,
-      };
-    });
-  const readDrift = deps.readShaDrift ?? (() => readDeployDrift());
-
-  const [pausedR, blockR, stopR, driftR] = await Promise.all([
-    settle(readPaused),
-    settle(readBlock),
-    settle(readStop),
-    settle(readDrift),
-  ]);
-
-  const sourceErrors: string[] = [];
-  let scanned = 0;
-  const active = new Map<string, { detail: string; sinceMs: number | null }>();
-
-  if (pausedR.status === "fulfilled") {
-    scanned++;
-    if (pausedR.value.paused) {
-      const since = pausedR.value.since ?? null;
-      active.set("paused", {
-        detail: since !== null ? `autopilot paused since ${isoOrRaw(since)}` : "autopilot paused",
-        sinceMs: since,
-      });
-    }
-  } else {
-    logRank0Failure("paused", pausedR.reason);
-    sourceErrors.push("paused");
-  }
-
-  if (blockR.status === "fulfilled") {
-    scanned++;
-    if (blockR.value !== null) {
-      active.set("session-blocked", {
-        detail: `session blocked until ${isoOrRaw(blockR.value)}`,
-        sinceMs: null,
-      });
-    }
-  } else {
-    logRank0Failure("session-block", blockR.reason);
-    sourceErrors.push("session-block");
-  }
-
-  if (stopR.status === "fulfilled") {
-    scanned++;
-    if (stopR.value.stopReason === "deliberate") {
-      // A missing or unparseable stamp (fresh === null) is treated as FRESH:
-      // the row stays loud while /health yields no verdict and keeps Start
-      // disabled (fail closed; issue #5164, ADR-0034 §8.1).
-      const { fresh, stoppedAtMs } = deliberateStopFreshness(
-        stopR.value.deliberateStoppedAt,
-        nowDate.getTime(),
-      );
-      if (fresh !== false) {
-        active.set("scheduler-deliberate", {
-          detail: "scheduler stopped deliberately (stopReason=deliberate)",
-          sinceMs: stoppedAtMs,
-        });
-      }
-    }
-  } else {
-    logRank0Failure("scheduler", stopR.reason);
-    sourceErrors.push("scheduler");
-  }
-
-  if (driftR.status === "fulfilled") {
-    const d = driftR.value;
-    if (d.deployedSha === null) sourceErrors.push("deployed-sha");
-    if (d.originMasterSha === null) sourceErrors.push("origin-master-sha");
-    if (d.deployedSha !== null && d.originMasterSha !== null) {
-      scanned++;
-      if (d.active) {
-        active.set("sha-drift", {
-          detail:
-            `deployed ${d.deployedSha.slice(0, 8)} ≠ origin/master ${d.originMasterSha.slice(0, 8)} ` +
-            `for ${d.driftSeconds ?? 0}s (≥ ${DEPLOY_DRIFT_GRACE_SECONDS}s)`,
-          sinceMs: d.firstSeenMs,
-        });
-      }
-    }
-  } else {
-    logRank0Failure("sha-drift", driftR.reason);
-    sourceErrors.push("sha-drift");
-  }
-
-  // Active lines in BUCKET_LINES['machine-stopped'] order (most upstream first).
-  const lines = BUCKET_LINES["machine-stopped"].filter((line) => active.has(line));
-  if (lines.length === 0) return { row: null, scanned, sourceErrors };
-
-  const subLines = lines.map((line) => ({
-    key: `machine-stopped:${line}`,
-    line,
-    detail: active.get(line)!.detail,
-  }));
-  const sinceCandidates = lines
-    .map((line) => active.get(line)!.sinceMs)
-    .filter((ms): ms is number => ms !== null && Number.isFinite(ms));
-  const crossedAt =
-    sinceCandidates.length > 0
-      ? new Date(Math.min(...sinceCandidates)).toISOString()
-      : nowDate.toISOString();
-
-  const row: Draft = {
-    key: subLines[0].key,
-    context: {},
-    subLines,
-    base: {
-      // The §8.4 episode subject: the sorted set of active lines.
-      id: `machine-stopped:${[...lines].sort().join(",")}`,
-      signal: "blocked-on-human",
-      title: `Machine stopped: ${lines.join(", ")}`,
-      url: "/health",
-      observedValue: lines.length,
-      threshold: 1,
-      thresholdLabel: `stopped: ${lines.join(", ")}`,
-      crossedAt,
-      dismissed: false,
-    },
-  };
-  return { row, scanned, sourceErrors };
-}
-
-function logRank0Failure(source: string, reason: unknown): void {
-  logger.error(
-    { err: reason, source },
-    "[attention] machine-stopped source read failed — rank 0 renders UNKNOWN",
-  );
-}
-
-function isoOrRaw(ms: number): string {
-  const d = new Date(ms);
-  return Number.isFinite(d.getTime()) ? d.toISOString() : String(ms);
-}
-
-// ---------------------------------------------------------------------------
 // Pure helpers — exported for tests
 // ---------------------------------------------------------------------------
 
@@ -1177,111 +365,4 @@ export function compareDrainOrder(
   if (aOk && !bOk) return -1;
   if (!aOk && bOk) return 1;
   return a.id.localeCompare(b.id);
-}
-
-const PLACEHOLDER = /\{([a-zA-Z0-9_]+)\}/g;
-
-function substitute(template: string, context: ActionContext): string {
-  return template.replace(PLACEHOLDER, (match, name: string) =>
-    Object.prototype.hasOwnProperty.call(context, name) ? String(context[name]) : match,
-  );
-}
-
-function resolveTemplates(action: Action, context: ActionContext): Action {
-  if (action.kind === "terminal-skill") {
-    return { ...action, command: substitute(action.command, context) };
-  }
-  if (action.kind === "in-dashboard") {
-    return { ...action, route: substitute(action.route, context) };
-  }
-  return { ...action };
-}
-
-function hasPlaceholder(action: Action): boolean {
-  const field =
-    action.kind === "terminal-skill"
-      ? action.command
-      : action.kind === "in-dashboard"
-        ? action.route
-        : "";
-  return /\{[a-zA-Z0-9_]+\}/.test(field);
-}
-
-/**
- * Resolve the registry entry for `(key, variant)` — falling back to the
- * default (variant-less) entry — with `{repo}` / `{number}` / `{kind}`
- * substituted in `recommended` and both `alternatives` (ADR-0034 §8.2).
- * Returns null when no entry exists or a placeholder stays unresolved.
- */
-export function resolveAction(
-  key: string,
-  variant: Variant | undefined,
-  context: ActionContext,
-  registry: readonly OperatorActionEntry[] = REGISTRY,
-): OperatorActionEntry | null {
-  const entry =
-    (variant !== undefined
-      ? registry.find((e) => e.key === key && e.variant === variant)
-      : undefined) ?? registry.find((e) => e.key === key && e.variant === undefined);
-  if (!entry) return null;
-  const recommended = resolveTemplates(entry.recommended, context);
-  const alternatives: [Action, Action] = [
-    resolveTemplates(entry.alternatives[0], context),
-    resolveTemplates(entry.alternatives[1], context),
-  ];
-  if ([recommended, alternatives[0], alternatives[1]].some(hasPlaceholder)) return null;
-  return { ...entry, recommended, alternatives };
-}
-
-/**
- * Best-effort instant an age-threshold crossing happened: creation plus the
- * threshold in days. An unparseable createdAt degrades to the raw string —
- * the sort treats it as unknown, never as "just now".
- */
-export function crossedAtFrom(createdAt: string, thresholdDays: number): string {
-  const createdMs = Date.parse(createdAt);
-  if (!Number.isFinite(createdMs)) return createdAt;
-  return new Date(createdMs + thresholdDays * 24 * 60 * 60 * 1000).toISOString();
-}
-
-/**
- * Pure helper — exported for tests. Lifts the repetition rows (hitCount ≥ the
- * cue's own escalation threshold, default PROMOTION_THRESHOLD — issue #4569)
- * out of a friction snapshot into the common item shape (before the bucket /
- * key / action fields the composer adds).
- * Deep-links to the escalation's GitHub issue when one has fired, else to the
- * Explore page's Friction tab (the current detail owner for un-escalated
- * patterns; /runs — ADR-0034's future home for this content — has not
- * shipped).
- */
-export function repetitionItems(snapshot: FrictionPatternsSnapshot): ItemBase[] {
-  const out: ItemBase[] = [];
-  for (const group of snapshot.bySkill) {
-    for (const pattern of group.patterns) {
-      // Issue #4569: the line is the cue's OWN production escalation bar
-      // (cue-policy.ts), defaulting to PROMOTION_THRESHOLD. A never-escalate
-      // cue (Infinity — fires by design, #1789) therefore never surfaces.
-      const threshold = escalationThresholdForCue(pattern.cue, PROMOTION_THRESHOLD);
-      if (pattern.hitCount < threshold) continue;
-      out.push({
-        id: `friction-${encodeURIComponent(group.skill)}-${encodeURIComponent(pattern.cue)}`,
-        signal: "repetition",
-        title: `${group.skill}: ${pattern.cue}`,
-        url: repetitionUrl(pattern),
-        observedValue: pattern.hitCount,
-        threshold,
-        thresholdLabel: `hits ≥ ${threshold}`,
-        crossedAt: pattern.lastSeen || snapshot.generatedAt,
-        dismissed: false,
-      });
-    }
-  }
-  return out;
-}
-
-function repetitionUrl(pattern: FrictionPatternRow): string {
-  if (pattern.lastEscalation?.issueNumber) {
-    return `https://github.com/gaberoo322/hydra/issues/${pattern.lastEscalation.issueNumber}`;
-  }
-  return "/explore/friction";
 }

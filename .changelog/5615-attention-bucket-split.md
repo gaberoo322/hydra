@@ -1,0 +1,1 @@
+- refactor: split the attention feed composer into per-bucket line modules behind one facade (#5615)
