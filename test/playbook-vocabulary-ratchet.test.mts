@@ -347,7 +347,7 @@ describe("playbook-vocabulary-ratchet: the real playbooks", () => {
     assert.equal(report, "", `\n${report}\n`);
   });
 
-  test("target-seam-preamble.md carries zero symbol-cite hits (design-concept INV-4)", () => {
+  test("target-seam-preamble.md carries zero symbol-cite hits (cleaned in this PR; INV-4 amendment)", () => {
     const rel = "docs/operator-playbooks/_fragments/target-seam-preamble.md";
     const hits = scanRepo()[rel] ?? [];
     assert.deepEqual(hits.filter((h) => h.shape === "symbol-cite"), []);
