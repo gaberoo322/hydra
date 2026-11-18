@@ -13,12 +13,17 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, symlinkSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import {
   shouldCaptureDesignConcept as shouldCaptureRaw,
   buildDesignConcept as buildRaw,
   serializeDesignConcept,
   parseDesignConcept,
+  runCli,
   selectOperatorDecision,
   isStaleAgainstDecision,
   type TargetDesignConceptInput,
@@ -335,7 +340,8 @@ describe("selectOperatorDecision — content-marker selection (issue #4693)", ()
     assert.ok(i33 >= 0 && i33 < pb.indexOf("### 3.5. Self-declare scope"));
     const block = pb.slice(i33, pb.indexOf("### 3.5. Self-declare scope"));
     assert.ok(block.includes('<"$OD_TMP.merged"'), "comment thread must stream via stdin redirect, not argv (ARG_MAX)");
-    assert.ok(block.includes("readFileSync(0"), "node must read the comment thread from stdin");
+    assert.ok(block.includes("target-design-concept.ts\" select-decision <"), "the select-decision CLI must read the comment thread from stdin");
+    assert.ok(!block.includes("node --input-type=module"), "no inline node import snippet in the playbook");
     assert.ok(block.includes("operator-decision selection FAILED"), "selection failure must WARN");
     assert.ok(block.includes("safe-path builds"), "safe-path (no Step 4.5) enforcement must be documented");
   });
@@ -511,5 +517,99 @@ describe("isStaleAgainstDecision — retry-reuse staleness (issue #4693)", () =>
     assert.equal(isStaleAgainstDecision(concept, badDecision), true);
     const badConcept = { ...concept, capturedAt: "not-a-date" };
     assert.equal(isStaleAgainstDecision(badConcept, newer), true);
+  });
+});
+
+describe("runCli — playbook subcommands (Steps 3.3 / 4.5)", () => {
+  const noStdin = () => "";
+  const decision: OperatorDecision = {
+    url: "https://example/1#c",
+    createdAt: "2026-09-27T18:00:00Z",
+    body: "**Operator decision (2026-09-27):** x",
+  };
+
+  test("select-decision reads a comments array from stdin and prints the selected decision or empty", () => {
+    const hit = runCli(["select-decision"], () => JSON.stringify([ROUTING_NOTE, DECISION_0923]));
+    assert.equal(hit.code, 0);
+    assert.equal(JSON.parse(hit.out).body, DECISION_0923.body);
+    assert.deepEqual(runCli(["select-decision"], () => JSON.stringify([ROUTING_NOTE])), { out: "", code: 0 });
+  });
+
+  test("build then parse round-trips and summarize prints scope and invariants", () => {
+    const built = runCli(["build", JSON.stringify(sampleInput())], noStdin);
+    assert.equal(built.code, 0);
+    const parsed = runCli(["parse", built.out], noStdin);
+    assert.equal(JSON.parse(parsed.out).anchorRef, sampleInput().anchorRef);
+    const summary = runCli(["summarize"], () => parsed.out);
+    assert.match(summary.out, /^ {2}scope: /);
+    assert.match(summary.out, /\n {2}invariants: /);
+    assert.ok(summary.out.endsWith("\n"), "summarize output ends with a newline like the old console.log");
+  });
+
+  test("parse of corrupt input prints empty and stale of a decision-less artifact is stale", () => {
+    assert.deepEqual(runCli(["parse", "{not json"], noStdin), { out: "", code: 0 });
+    const built = runCli(["build", JSON.stringify(sampleInput())], noStdin);
+    assert.equal(runCli(["stale", built.out, JSON.stringify(decision)], noStdin).out, "stale");
+  });
+
+  test("should-capture answers yes or no; an unknown subcommand exits 2; bad JSON exits 1", () => {
+    assert.equal(runCli(["should-capture", "docs/readme.md"], noStdin).out, "no");
+    assert.equal(runCli(["bogus"], noStdin).code, 2);
+    assert.equal(runCli(["build", "{nope"], noStdin).code, 1);
+  });
+
+  test("should-capture yes for a risk-critical path, no for a safe one, multi-argv honoured (fixture manifest)", () => {
+    const prev = process.env.TARGET_MANIFEST_ROOT;
+    process.env.TARGET_MANIFEST_ROOT = fileURLToPath(new URL("./fixtures/target-manifest-fixture", import.meta.url));
+    try {
+      assert.equal(runCli(["should-capture", "web/src/lib/execution/runner.ts"], noStdin).out, "yes");
+      assert.equal(runCli(["should-capture", "docs/readme.md", "web/src/lib/execution/runner.ts"], noStdin).out, "yes");
+      assert.equal(runCli(["should-capture", "docs/readme.md", "web/src/ui/button.tsx"], noStdin).out, "no");
+    } finally {
+      if (prev === undefined) delete process.env.TARGET_MANIFEST_ROOT;
+      else process.env.TARGET_MANIFEST_ROOT = prev;
+    }
+  });
+
+  test("stale of a parseable artifact carrying the current operatorDecision is fresh", () => {
+    const built = runCli(["build", JSON.stringify(sampleInput({ operatorDecision: decision }))], noStdin);
+    assert.equal(runCli(["stale", built.out, JSON.stringify(decision)], noStdin).out, "fresh");
+  });
+
+  test("fresh/stale and select-decision with bad JSON exit 1; stale of a malformed concept is fresh", () => {
+    assert.equal(runCli(["stale", "{not json", "{nope"], noStdin).code, 1);
+    assert.equal(runCli(["select-decision"], () => "{nope").code, 1);
+    const built = runCli(["build", JSON.stringify(sampleInput())], noStdin);
+    assert.equal(runCli(["stale", "{not json", JSON.stringify(decision)], noStdin).out, "fresh");
+    assert.equal(runCli(["stale", built.out, "{nope"], noStdin).code, 1);
+  });
+
+  test("real entrypoint: spawned script builds then parses a non-empty artifact (not a silent no-op)", () => {
+    const script = fileURLToPath(new URL("../scripts/target/target-design-concept.ts", import.meta.url));
+    const run = (args: string[]) =>
+      spawnSync(process.execPath, ["--experimental-strip-types", script, ...args], { encoding: "utf8" });
+    const built = run(["build", JSON.stringify(sampleInput())]);
+    assert.equal(built.status, 0, built.stderr);
+    assert.notEqual(built.stdout.trim(), "", "build must emit a non-empty artifact");
+    const parsed = run(["parse", built.stdout]);
+    assert.equal(parsed.status, 0, parsed.stderr);
+    assert.equal(JSON.parse(parsed.stdout).anchorRef, sampleInput().anchorRef);
+    assert.equal(run(["bogus"]).status, 2);
+    assert.equal(run(["build", "{nope"]).status, 1);
+  });
+
+  test("real entrypoint reached through a symlinked path still runs (not a silent no-op)", () => {
+    const script = fileURLToPath(new URL("../scripts/target/target-design-concept.ts", import.meta.url));
+    const dir = mkdtempSync(join(tmpdir(), "dc-symlink-"));
+    try {
+      const link = join(dir, "dc-link.ts");
+      symlinkSync(script, link);
+      const r = spawnSync(process.execPath, ["--experimental-strip-types", link, "build", JSON.stringify(sampleInput())], { encoding: "utf8" });
+      assert.equal(r.status, 0, r.stderr);
+      assert.notEqual(r.stdout.trim(), "", "symlinked invocation must emit an artifact");
+      assert.equal(spawnSync(process.execPath, ["--experimental-strip-types", link, "bogus"], { encoding: "utf8" }).status, 2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
