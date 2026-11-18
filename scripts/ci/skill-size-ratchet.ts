@@ -35,21 +35,27 @@
  * skills. "Word" = whitespace token (split on /\s+/, drop
  * empties): dependency-free, deterministic, and monotone with token load.
  *
- * # Why a separate workflow, not ci.yml
+ * # Where it is enforced
  *
- * ci.yml is Verifier Core (ADR-0001/ADR-0015). A NEW verification lands as a
- * Tier-3 sibling workflow (.github/workflows/skill-size-ratchet.yml) — the
- * ast-grep-lint / comby-check / test-typecheck precedent. Advisory in the
- * seam-checks sense: the job goes red on violation but is never a required
- * branch-protection check.
+ * REQUIRED, via the required `test` job: the "the real playbooks" case in
+ * test/skill-size-ratchet.test.mts runs this ratchet over the real playbooks
+ * and the committed baseline, and fails `npm test` on any violation (#5631).
+ * ci.yml (Verifier Core, ADR-0001/ADR-0015) is not edited for this — the
+ * check rides the suite ci.yml already requires. The CLI step in
+ * .github/workflows/advisory-checks.yml still runs too, as a readable
+ * per-PR report.
  *
  * Usage:
  *   npx tsx scripts/ci/skill-size-ratchet.ts                    # check
  *   npx tsx scripts/ci/skill-size-ratchet.ts --write-baseline   # (re)seed
  *
- * Update flow when a playbook must deliberately grow: make the change, re-run
- * with --write-baseline, and commit the raised baseline entry alongside it —
- * the reviewed-growth escape valve of the baseline-ratchet idiom.
+ * Update flow when a playbook must deliberately grow (STD-BASELINE-EDIT-ROWS):
+ * make the change, raise exactly that file's row in
+ * scripts/ci/skill-size-baseline.json to the measured count in the same PR
+ * (hand-edit; never commit a blanket --write-baseline), and add a PR-body line
+ * `Baseline-raise: scripts/ci/skill-size-baseline.json <row-key> - <reason>`.
+ * A new playbook or fragment adds its own row the same way. Descriptions are
+ * never raised: shorten them under the cap instead.
  */
 
 import { readFile, readdir } from "node:fs/promises";
