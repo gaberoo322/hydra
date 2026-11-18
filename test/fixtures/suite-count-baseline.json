@@ -274,7 +274,7 @@
   "test/hydra-branch-prune-merged-remote.test.mts": 6,
   "test/hydra-branch-prune-worktree-orphan.test.mts": 5,
   "test/hydra-branch-prune.test.mts": 11,
-  "test/hydra-cleanup-emit.test.mts": 3,
+  "test/hydra-cleanup-emit.test.mts": 4,
   "test/hydra-cleanup-render.test.mts": 11,
   "test/hydra-cli-backlog-move.test.mts": 1,
   "test/hydra-cli-raw-body.test.mts": 1,
