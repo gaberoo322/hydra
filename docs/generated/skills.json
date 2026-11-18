@@ -122,6 +122,8 @@
         "docs/operator-playbooks/_vendor/implement.md",
         "docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md",
         "docs/operator-playbooks/_fragments/hydra-dev-child-flow.md",
+        "docs/operator-playbooks/_fragments/lifecycle-seam-writes.md",
+        "docs/operator-playbooks/_fragments/blocked-slice-labelling.md",
         "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
       ],
       "route": "/docs/skill/hydra-dev",
@@ -214,7 +216,9 @@
           "via": "default"
         }
       ],
-      "composedFrom": [],
+      "composedFrom": [
+        "docs/operator-playbooks/_fragments/lifecycle-seam-writes.md"
+      ],
       "route": "/docs/skill/hydra-grill",
       "source": {
         "path": "docs/operator-playbooks/hydra-grill.md"
@@ -224,7 +228,7 @@
       "name": "hydra-hitl-grill",
       "path": "docs/operator-playbooks/hydra-hitl-grill.md",
       "stage": "operator-interactive",
-      "description": "Drain the hitl-grill park lane on gaberoo322/hydra — classify every parked agent-filed item (premise still true? duplicate? scoped? which cluster?), dismiss moot clusters in one question, then walk the rest one at a time to Promote / Scope-and-promote / Grill-first / Fold / Dismiss through the board routes. Operator-interactive; never an autopilot dispatch class.",
+      "description": "Drain the hitl-grill park lane on gaberoo322/hydra — classify every parked agent-filed item (premise still true? duplicate? scoped? which cluster?), dismiss moot clusters in one question, then walk the rest one at a time to Promote / Scope-and-promote / Grill-first / Fold / Dismiss via board routes. Operator-interactive; never autopilot-dispatched.",
       "dispatchedBy": [],
       "composedFrom": [],
       "route": "/docs/skill/hydra-hitl-grill",
@@ -295,6 +299,8 @@
       "composedFrom": [
         "docs/operator-playbooks/_vendor/code-review.md",
         "docs/operator-playbooks/_fragments/hydra-qa-reference.md",
+        "docs/operator-playbooks/_fragments/lifecycle-seam-writes.md",
+        "docs/operator-playbooks/_fragments/qa-verdict-is-a-comment.md",
         "docs/operator-playbooks/_fragments/checks-fetch.md",
         "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
       ],

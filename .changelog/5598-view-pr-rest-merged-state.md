@@ -1,0 +1,1 @@
+- fix: REST PR view now reports merged PRs as MERGED and maps headRefName (#5598)

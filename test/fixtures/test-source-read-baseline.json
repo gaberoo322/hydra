@@ -50,6 +50,7 @@
     "test/autopilot-unattended.test.mts": "behaviour",
     "test/autopilot-wait-or-reap-handler.test.mts": "behaviour",
     "test/autopilot-watchdog.test.mts": "behaviour",
+    "test/baseline-raise-check.test.mts": "drift-guard",
     "test/branch-prune-script.test.mts": "behaviour",
     "test/build-spritesheet.test.mts": "behaviour",
     "test/builder-page.test.mts": "grandfathered",

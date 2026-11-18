@@ -1,0 +1,1 @@
+- docs: document lifecycle-seam close recipes (superseded, Refs-only merged PR) in grill, tickets and sweep playbooks (#5597)

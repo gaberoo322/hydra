@@ -48,9 +48,9 @@ enforced-by: src/ast-grep-rules/typed-error-throw.yml (advisory), reviewer
 
 ### STD-CATCH-FAIL-LOUD
 
-Every `catch` either logs with context, rethrows, or carries an `/* intentional: <reason> */` annotation. A silent catch is a finding; in a changed catch it is a blocker.
+Every `catch`, `except` and `>/dev/null` discard logs with context, rethrows (`from err`) or carries an `intentional: <reason>` annotation, heredoc Python included. Silent is a finding; changed, a blocker.
 
-enforced-by: src/ast-grep-rules/fail-loud-catch.yml, src/ast-grep-rules/fail-loud-catch-src.yml, src/ast-grep-rules/fail-loud-except-py.yml, src/ast-grep-rules/fail-loud-devnull-sh.yml, scripts/ci/fail-loud-ratchet.ts
+enforced-by: src/ast-grep-rules/fail-loud-catch.yml, src/ast-grep-rules/fail-loud-catch-src.yml, src/ast-grep-rules/fail-loud-except-py.yml, src/ast-grep-rules/fail-loud-devnull-sh.yml, scripts/ci/fail-loud-ratchet.ts, reviewer
 
 ### STD-LOG-PINO-SEAM
 
@@ -140,22 +140,30 @@ enforced-by: reviewer, scripts/ci/playbook-vocabulary-ratchet.ts
 
 Executable logic lives in a tested script. The playbook says when and why to run it.
 
-enforced-by: reviewer
+enforced-by: reviewer, scripts/ci/playbook-vocabulary-ratchet.ts
 
 ### STD-PLAYBOOK-CURRENT-BEHAVIOUR
 
 Describe only what happens now: no rollout phase, no status or history phrase, no retired glossary term, no "retired" note on a step that still runs. History belongs in git and the ADRs.
 
-enforced-by: scripts/ci/playbook-vocabulary-ratchet.ts
+enforced-by: reviewer, scripts/ci/playbook-vocabulary-ratchet.ts
 
 ### STD-PLAYBOOK-ONE-HOME
 
 A rule two playbooks share lives in one fragment.
 
-enforced-by: reviewer
+enforced-by: reviewer, scripts/ci/playbook-duplicate-ratchet.ts
 
 ### STD-PLAYBOOK-TARGET-SEAM
 
 Never assume the Target's name, checkout path or service. Read them from the Target facts seam.
 
 enforced-by: scripts/ci/playbook-vocabulary-ratchet.ts
+
+## Baselines
+
+### STD-BASELINE-EDIT-ROWS
+
+Move only the baseline rows for files the PR changes. Lower a row for a file you shrank. Never commit a blanket writer's output. A raised row needs a PR-body line `Baseline-raise: <fixture-path> <row-key> — <reason>`. An undisclosed raise, or a row moved for a file outside the diff, is a medium finding, reviewer-fixable as ADR-0046 class A.
+
+enforced-by: reviewer

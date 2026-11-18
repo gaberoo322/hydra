@@ -20,7 +20,7 @@
  * ----------------
  *   (default) one JSON object on stdout:
  *     { name, githubRepo, workspace, serviceName, webUrl,
- *       manifest: { ok: true, appSubdir, surface, surfaceRepoRelative }
+ *       manifest: { ok: true, appSubdir, surface, surfaceRepoRelative, verify }
  *                | { ok: false, errors } }
  *
  *   --sh       shell `export` statements on stdout (consumed via
@@ -28,11 +28,24 @@
  *              from the shared `_fragments/target-seam-preamble.md`):
  *                TARGET_NAME, TARGET_GH_REPO, TARGET_WS, TARGET_SERVICE,
  *                TARGET_WEB_URL, TARGET_APP_SUBDIR, TARGET_APP_DIR,
- *                TARGET_RISK_SURFACE_JSON
+ *                TARGET_RISK_SURFACE_JSON, and the manifest's verify commands
+ *                TARGET_VERIFY_INSTALL / _TEST / _TYPECHECK / _BUILD / _LINT
+ *                (`_LINT` is the empty string when the manifest declares no
+ *                lint gate)
  *              On a manifest failure this mode prints NOTHING exportable and
  *              exits 1 — the fragment's `eval "$(...)" || exit 1` then aborts
  *              the playbook loudly instead of running with an empty/guessed
  *              carve-out (fail closed, mirrors decide.py's INV-3).
+ *
+ *   --manifest-root <dir>
+ *              read `<dir>/.hydra/manifest.json` instead of the workspace's
+ *              copy (precedence over `TARGET_MANIFEST_ROOT`; the
+ *              `--manifest-root=<dir>` form is accepted too). A Target build
+ *              passes its worktree, so the verify commands and appSubdir come
+ *              from the branch it is building while `TARGET_WS` stays the main
+ *              checkout. `--sh` exports the root as `TARGET_MANIFEST_ROOT`,
+ *              exactly as passed. The flag without a value exits 1 with
+ *              nothing on stdout (fail closed).
  *
  * CAPABILITIES (issue #5498)
  * ---------------------------
@@ -74,13 +87,23 @@ import {
   getTargetServiceName,
   getTargetWebUrl,
 } from "../../src/target-config.ts";
-import { loadRiskSurface, resolveManifestRoot } from "./target-risk-surface.ts";
+import { loadManifest } from "../../src/target/manifest.ts";
+import { resolveManifestRoot } from "./target-risk-surface.ts";
 import {
   probeTargetCapabilities,
   renderCapabilityShell,
   shQuote,
   type TargetCapabilities,
 } from "./target-capabilities.ts";
+
+/** The Target Manifest's verify commands; `lint` is "" when the manifest declares none. */
+export type TargetVerifyCommands = {
+  install: string;
+  test: string;
+  typecheck: string;
+  build: string;
+  lint: string;
+};
 
 /** The JSON shape this script emits in default (non-`--sh`) mode. */
 export type TargetFacts = {
@@ -89,12 +112,15 @@ export type TargetFacts = {
   workspace: string;
   serviceName: string;
   webUrl: string;
+  /** The root whose `.hydra/manifest.json` was read, exactly as resolved or passed. */
+  manifestRoot: string;
   manifest:
     | {
         ok: true;
         appSubdir: string;
         surface: string[];
         surfaceRepoRelative: string[];
+        verify: TargetVerifyCommands;
       }
     | { ok: false; errors: string[] };
 };
@@ -117,28 +143,42 @@ export function collectTargetFacts(manifestRoot: string = resolveManifestRoot())
     workspace: getTargetWorkspace(),
     serviceName: getTargetServiceName(),
     webUrl: getTargetWebUrl(),
+    manifestRoot,
   };
 
-  const risk = loadRiskSurface(manifestRoot);
-  if (risk.ok === false) {
-    return { ...base, manifest: { ok: false, errors: risk.errors } };
+  const loaded = loadManifest(manifestRoot);
+  if (loaded.ok === false) {
+    return { ...base, manifest: { ok: false, errors: loaded.errors } };
   }
 
+  const { verify, riskCritical } = loaded.manifest;
   return {
     ...base,
     manifest: {
       ok: true,
-      appSubdir: risk.appSubdir,
-      surface: [...risk.surface],
-      surfaceRepoRelative: risk.surface.map((e) => toRepoRelative(risk.appSubdir, e)),
+      appSubdir: verify.appSubdir,
+      surface: [...riskCritical.surface],
+      surfaceRepoRelative: riskCritical.surface.map((e) => toRepoRelative(verify.appSubdir, e)),
+      verify: {
+        install: verify.install,
+        test: verify.test,
+        typecheck: verify.typecheck,
+        build: verify.build,
+        lint: verify.lint ?? "",
+      },
     },
   };
 }
 
 /**
  * Render the `--sh` mode output: one `export` statement per fact, plus
- * `TARGET_APP_DIR` (workspace joined with appSubdir) and
- * `TARGET_RISK_SURFACE_JSON` (the repo-relative surface, JSON-encoded).
+ * `TARGET_APP_DIR` (workspace joined with appSubdir),
+ * `TARGET_RISK_SURFACE_JSON` (the repo-relative surface, JSON-encoded), one
+ * `TARGET_VERIFY_*` export per manifest verify command, and
+ * `TARGET_MANIFEST_ROOT` — the root those manifest facts came from, exactly as
+ * passed, so a playbook block can check their provenance with a string
+ * comparison (and the gate scripts, which honour the same variable, read the
+ * same manifest copy).
  * Returns `null` when the manifest failed to resolve — the caller then
  * prints nothing exportable and exits 1 (fail closed).
  */
@@ -156,13 +196,43 @@ export function renderShell(facts: TargetFacts): string | null {
     `export TARGET_APP_SUBDIR=${shQuote(facts.manifest.appSubdir)}`,
     `export TARGET_APP_DIR=${shQuote(appDir)}`,
     `export TARGET_RISK_SURFACE_JSON=${shQuote(JSON.stringify(facts.manifest.surfaceRepoRelative))}`,
+    `export TARGET_VERIFY_INSTALL=${shQuote(facts.manifest.verify.install)}`,
+    `export TARGET_VERIFY_TEST=${shQuote(facts.manifest.verify.test)}`,
+    `export TARGET_VERIFY_TYPECHECK=${shQuote(facts.manifest.verify.typecheck)}`,
+    `export TARGET_VERIFY_BUILD=${shQuote(facts.manifest.verify.build)}`,
+    `export TARGET_VERIFY_LINT=${shQuote(facts.manifest.verify.lint)}`,
+    `export TARGET_MANIFEST_ROOT=${shQuote(facts.manifestRoot)}`,
   ];
   return lines.join("\n");
 }
 
+/**
+ * The `--manifest-root <dir>` (or `--manifest-root=<dir>`) value, returned
+ * exactly as passed: `undefined` when the flag is absent, `null` when it is
+ * present without a value (a usage error the caller fails closed on).
+ */
+export function parseManifestRootFlag(argv: readonly string[]): string | null | undefined {
+  const eq = argv.find((a) => a.startsWith("--manifest-root="));
+  if (eq !== undefined) {
+    const value = eq.slice("--manifest-root=".length);
+    return value.trim() === "" ? null : value;
+  }
+  const at = argv.indexOf("--manifest-root");
+  if (at === -1) return undefined;
+  const value = argv[at + 1];
+  if (value === undefined || value.startsWith("--") || value.trim() === "") return null;
+  return value;
+}
+
 async function main(): Promise<number> {
-  const shMode = process.argv.slice(2).includes("--sh");
-  const facts = collectTargetFacts();
+  const argv = process.argv.slice(2);
+  const shMode = argv.includes("--sh");
+  const manifestRoot = parseManifestRootFlag(argv);
+  if (manifestRoot === null) {
+    process.stderr.write("print-target-facts: --manifest-root needs a directory\n");
+    return 1;
+  }
+  const facts = collectTargetFacts(manifestRoot ?? resolveManifestRoot());
   const appDir =
     facts.manifest.ok && facts.manifest.appSubdir
       ? `${facts.workspace}/${facts.manifest.appSubdir}`

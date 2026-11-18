@@ -87,6 +87,8 @@ GitHub UI (`external`). A human-hold exit from any other source goes on the atte
   - head moved while green → `needs-qa`;
   - merged → closed;
   - closed unmerged → `ready-for-agent`.
+- **`ready-for-agent` with exactly one open, non-draft PR closing it and no held dispatch claim →
+  `needs-qa`** (reconcile-fired, gate `pr-open`, #5489): reconcile is the hourly backstop; the sweep's develop lane and the autopilot's reap-strand follow-up fire the same edge first with `pr=` evidence and `--from ready-for-agent` (#5596), and a reconcile pass after a caller-side firing writes nothing because the arm reads only `ready-for-agent` (#5524 INV-2). Skipped (counted `prCovered.skippedQaFail`) when the issue's last written transition was a `needs-qa` bounce, so a QA-FAIL does not ping-pong. Deliberate amendment to the design concept (INV-3 / INV-8): the guard also skips when the journal still reads `needs-qa` (an external move out of QA not yet journaled), and a read failure of the journal skips the issue. The bounce skip expires after `PR_COVERED_QA_BOUNCE_SKIP_MS` (6h); the QA round cap bounds repeats.
 - **A record counts on shape + binding.** It must parse, match the head SHA, match the PR/issue refs,
   and **post-date the issue's entry into its current state**. Records are not signed.
 - **Design-concept gate fails closed at dispatch.** When the issue is flagged `needs-design-concept`,

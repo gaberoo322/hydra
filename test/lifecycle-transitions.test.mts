@@ -81,10 +81,23 @@ describe("transition table (INV-2)", () => {
     assert.equal(isLegalTransition("closed", "needs-triage"), false);
   });
 
+  test("neither table has a self row: a self-move is a seam no-op, not an edge (#5584)", () => {
+    assert.equal(TRANSITIONS.some((t) => t.from === t.to), false);
+    assert.equal(OPERATOR_TRANSITIONS.some((t) => t.from === t.to), false);
+    for (const s of LIFECYCLE_STATES) assert.equal(isLegalTransition(s, s), false, s);
+  });
+
   test("qa-passed exits are split by cause and reconcile-fired", () => {
     for (const to of ["needs-dev-resume", "needs-qa", "closed", "ready-for-agent"] as const) {
       assert.equal(findTransition("qa-passed", to)?.firedBy, "reconcile", to);
     }
+  });
+
+  test("ready-for-agent -> needs-qa is reconcile-fired through pr-open with no cap (#5489)", () => {
+    const t = findTransition("ready-for-agent", "needs-qa");
+    assert.equal(t?.firedBy, "reconcile");
+    assert.equal(t?.gate, "pr-open");
+    assert.equal(t?.cap, undefined);
   });
 
   test("the dispatcher owns ready-for-agent -> in-progress", () => {

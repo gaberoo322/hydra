@@ -119,7 +119,7 @@ describe("hydra-target-build playbook — worktree isolation (issue #542)", () =
     const step06 = playbook.slice(playbook.indexOf("### 0.6."), playbook.indexOf("### 0.5."));
     assert.doesNotMatch(
       step06,
-      /eval "\$INSTALL_CMD --no-audit --no-fund"/,
+      /eval "\$TARGET_VERIFY_INSTALL --no-audit --no-fund"/,
       "Step 0.6 must not unconditionally install — node_modules resolves by ancestor walk",
     );
   });
@@ -150,7 +150,7 @@ describe("hydra-target-build playbook — worktree isolation (issue #542)", () =
     );
     assert.match(
       playbook,
-      /eval "\$INSTALL_CMD --no-audit --no-fund"/,
+      /eval "\$TARGET_VERIFY_INSTALL --no-audit --no-fund"/,
       "the install-then-retry branch must still run the manifest-declared install command",
     );
   });

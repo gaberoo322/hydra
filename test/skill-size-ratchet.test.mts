@@ -5,8 +5,10 @@
  * description cap (effective cap = max(50, baselined count)).
  *
  * Feeds synthetic playbook strings and synthetic baselines through the
- * exported pure functions — no filesystem walk, no process.exit (the script
- * only runs main() as a CLI entrypoint).
+ * exported pure functions — no process.exit (the script only runs main() as
+ * a CLI entrypoint). The last case runs the real ratchet over the real
+ * playbooks and the committed baseline: that is the gate, enforced by the
+ * required `test` job (#5631).
  */
 
 import { test, describe } from "node:test";
@@ -17,6 +19,9 @@ const {
   countWords,
   effectiveDescriptionCap,
   compareAgainstBaseline,
+  formatShrinkHints,
+  measureSkillSources,
+  loadBaseline,
   DESCRIPTION_WORD_CAP,
 } = await import("../scripts/ci/skill-size-ratchet.ts");
 
@@ -25,6 +30,23 @@ const FRAG = "docs/operator-playbooks/_fragments/example-fragment.md";
 
 function baselineOf(files: Record<string, { body: number; description?: number }>) {
   return { note: "synthetic baseline for tests", files };
+}
+
+/** INV-1/INV-2: growth advice carries --allow-grow + Baseline-raise, no bare writer. */
+function assertGrowthAdvice(msg: string): void {
+  assert.match(msg, /--allow-grow/);
+  assert.match(msg, /Baseline-raise:/);
+  assert.match(msg, /STD-BASELINE-EDIT-ROWS/);
+  for (const m of msg.matchAll(/--write-baseline(?! --allow-grow)/g)) {
+    assert.fail(`bare --write-baseline at ${m.index} in: ${msg}`);
+  }
+}
+
+/** INV-3: stale advice is hand-edit only, names no writer. */
+function assertStaleAdvice(msg: string): void {
+  assert.match(msg, /by hand/);
+  assert.match(msg, /Do not regenerate/);
+  assert.doesNotMatch(msg, /--write-baseline|--shape/);
 }
 
 describe("skill-size-ratchet: measureSkillSource (core grammar)", () => {
@@ -90,7 +112,7 @@ describe("skill-size-ratchet: shrink-only baseline comparison", () => {
     assert.equal(violations[0].path, PB);
     assert.equal(violations[0].current, 105);
     assert.equal(violations[0].allowed, 100);
-    assert.match(violations[0].message, /--write-baseline/);
+    assertGrowthAdvice(violations[0].message);
   });
 
   test("SHRINK: body below baseline passes green, listed as tightenable", () => {
@@ -110,7 +132,7 @@ describe("skill-size-ratchet: shrink-only baseline comparison", () => {
     assert.equal(violations.length, 1);
     assert.equal(violations[0].rule, "missing-baseline-entry");
     assert.equal(violations[0].path, PB);
-    assert.match(violations[0].message, /--write-baseline/);
+    assertGrowthAdvice(violations[0].message);
   });
 
   test("MISSING BASELINE: null baseline fails with the seed command", () => {
@@ -131,7 +153,7 @@ describe("skill-size-ratchet: shrink-only baseline comparison", () => {
     assert.equal(violations.length, 1);
     assert.equal(violations[0].rule, "stale-baseline-entry");
     assert.equal(violations[0].path, PB);
-    assert.match(violations[0].message, /prune/);
+    assertStaleAdvice(violations[0].message);
   });
 
   test("fragments (no description field) ratchet on body only", () => {
@@ -203,5 +225,34 @@ describe("skill-size-ratchet: description cap with grandfathering", () => {
     assert.deepEqual(rules, ["description-over-cap", "missing-baseline-entry"]);
     const cap = violations.find((v) => v.rule === "description-over-cap")!;
     assert.equal(cap.allowed, 50);
+  });
+});
+
+describe("skill-size shrink hints (#5552)", () => {
+  const shrunk = [
+    { path: PB, current: 80, baseline: 100 },
+    { path: FRAG, current: 5, baseline: 9 },
+  ];
+
+  test("in-diff row gets a hint; out-of-diff row gets none", () => {
+    const lines = formatShrinkHints(shrunk, new Set([PB]));
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], new RegExp(`hint: ${PB} row can drop 100 -> 80 in scripts/ci/skill-size-baseline.json`));
+    assert.doesNotMatch(lines[0], /example-fragment/);
+  });
+
+  test("null diff set yields the single skipped line", () => {
+    const lines = formatShrinkHints(shrunk, null, "origin/master: gone");
+    assert.deepEqual(lines, [
+      "[skill-size-ratchet] hint: diff base unresolvable (origin/master: gone) — shrink hints skipped",
+    ]);
+  });
+});
+
+describe("skill-size-ratchet: the real playbooks", () => {
+  test("no playbook or fragment grows past its baselined row, and every description is within cap", async () => {
+    const { violations } = compareAgainstBaseline(await measureSkillSources(), await loadBaseline());
+    const report = violations.map((v: { rule: string; message: string }) => `[${v.rule}] ${v.message}`).join("\n");
+    assert.equal(report, "", `\n${report}\n`);
   });
 });

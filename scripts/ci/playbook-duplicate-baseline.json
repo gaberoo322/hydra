@@ -1,0 +1,98 @@
+{
+  "note": "Shrink-only per-file counts of playbook passages shared verbatim with another playbook source (issue #5587). Never raise a count: move the passage into a _fragments/ file per CODING_STANDARDS.md STD-PLAYBOOK-ONE-HOME. Lower with npx tsx scripts/ci/playbook-duplicate-ratchet.ts --write-baseline [--files a.md,b.md].",
+  "files": {
+    "docs/operator-playbooks/_fragments/grounding-tests-deposit.md": {
+      "spans": 1
+    },
+    "docs/operator-playbooks/_fragments/hydra-autopilot-class-wiring.md": {
+      "spans": 1
+    },
+    "docs/operator-playbooks/_fragments/hydra-autopilot-dispatch-reference.md": {
+      "spans": 3
+    },
+    "docs/operator-playbooks/_fragments/hydra-dev-child-flow.md": {
+      "spans": 5
+    },
+    "docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md": {
+      "spans": 6
+    },
+    "docs/operator-playbooks/_fragments/hydra-qa-reference.md": {
+      "spans": 1
+    },
+    "docs/operator-playbooks/_fragments/hydra-target-build-merge-flow.md": {
+      "spans": 3
+    },
+    "docs/operator-playbooks/_fragments/thermo-nuclear-proposal-format.md": {
+      "spans": 2
+    },
+    "docs/operator-playbooks/hydra-architecture-scan.md": {
+      "spans": 16
+    },
+    "docs/operator-playbooks/hydra-autopilot.md": {
+      "spans": 4
+    },
+    "docs/operator-playbooks/hydra-dev.md": {
+      "spans": 9
+    },
+    "docs/operator-playbooks/hydra-discover.md": {
+      "spans": 7
+    },
+    "docs/operator-playbooks/hydra-epic-close.md": {
+      "spans": 1
+    },
+    "docs/operator-playbooks/hydra-grill.md": {
+      "spans": 3
+    },
+    "docs/operator-playbooks/hydra-hitl-grill.md": {
+      "spans": 3
+    },
+    "docs/operator-playbooks/hydra-prd.md": {
+      "spans": 2
+    },
+    "docs/operator-playbooks/hydra-qa.md": {
+      "spans": 7
+    },
+    "docs/operator-playbooks/hydra-research.md": {
+      "spans": 16
+    },
+    "docs/operator-playbooks/hydra-retro.md": {
+      "spans": 7
+    },
+    "docs/operator-playbooks/hydra-review.md": {
+      "spans": 2
+    },
+    "docs/operator-playbooks/hydra-sweep.md": {
+      "spans": 2
+    },
+    "docs/operator-playbooks/hydra-target-build.md": {
+      "spans": 15
+    },
+    "docs/operator-playbooks/hydra-target-cleanup.md": {
+      "spans": 1
+    },
+    "docs/operator-playbooks/hydra-target-discover.md": {
+      "spans": 2
+    },
+    "docs/operator-playbooks/hydra-target-incident.md": {
+      "spans": 3
+    },
+    "docs/operator-playbooks/hydra-target-qa.md": {
+      "spans": 3
+    },
+    "docs/operator-playbooks/hydra-target-research.md": {
+      "spans": 1
+    },
+    "docs/operator-playbooks/hydra-target-retro.md": {
+      "spans": 7
+    },
+    "docs/operator-playbooks/hydra-target-sweep.md": {
+      "spans": 1
+    },
+    "docs/operator-playbooks/hydra-wayfinder.md": {
+      "spans": 1
+    },
+    "docs/operator-playbooks/thermo-nuclear-code-quality-review.md": {
+      "spans": 2
+    }
+  }
+}

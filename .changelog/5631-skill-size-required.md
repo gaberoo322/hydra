@@ -1,0 +1,1 @@
+- feat(ci): the skill-size ratchet is enforced by the required `test` job (a real-playbooks case in `test/skill-size-ratchet.test.mts`) after one reviewed rebaseline of `scripts/ci/skill-size-baseline.json`; reviewed growth is a same-PR row raise plus a `Baseline-raise:` PR-body line (#5631)

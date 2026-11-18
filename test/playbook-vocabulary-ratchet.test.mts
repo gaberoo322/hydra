@@ -18,12 +18,14 @@ import { join } from "node:path";
 const {
   SHAPES,
   STANDARD_REL,
-  WRITE_BASELINE_CMD,
   parseAvoidTerms,
   findHits,
   countByShape,
   compareAgainstBaseline,
   buildBaseline,
+  mergeBaselineForShapes,
+  parseShapeArg,
+  resolveShapeFilter,
   formatReport,
   scanRepo,
   loadBaseline,
@@ -59,6 +61,7 @@ describe("playbook-vocabulary-ratchet: each banned shape is detected", () => {
         "3 status no longer",
         "4 status used to",
         "5 status until #1234 lands",
+        "5 issue-cite #1234",
         "6 status shadow mode",
         "6 status rollout",
       ],
@@ -95,8 +98,11 @@ describe("playbook-vocabulary-ratchet: each banned shape is detected", () => {
 
 describe("playbook-vocabulary-ratchet: the Historical: exemption", () => {
   test("a line marked Historical: is exempt from every shape", () => {
-    const body = "not yet at src/gate.ts:42 in hydra-betting, the Untouchable Core";
-    assert.deepEqual(new Set(findHits(PB, body, AVOID).map((h: { shape: string }) => h.shape)), new Set(SHAPES));
+    const body = "not yet at src/gate.ts:42 in hydra-betting, the Untouchable Core, see #1945, kept for legacy, EMIT_CAP";
+    assert.deepEqual(
+      new Set(findHits(PB, body, AVOID).map((h: { shape: string }) => h.shape)),
+      new Set(SHAPES.filter((s: string) => s !== "shell-lines")),
+    );
     assert.deepEqual(hits(`Historical: ${body}`), []);
   });
 
@@ -175,7 +181,8 @@ describe("playbook-vocabulary-ratchet: shrink-only per-file baseline", () => {
     );
     const report = formatReport(cmp);
     assert.match(report, /lower the baseline/);
-    assert.ok(report.includes(WRITE_BASELINE_CMD));
+    assert.match(report, /by hand/);
+    assert.ok(!report.includes("--write-baseline"));
   });
 
   test("buildBaseline is sorted, per file, and omits clean files and zero counts", () => {
@@ -185,10 +192,165 @@ describe("playbook-vocabulary-ratchet: shrink-only per-file baseline", () => {
   });
 });
 
+describe("playbook-vocabulary-ratchet: issue-cite, back-compat and shell-lines shapes", () => {
+  const F = "```";
+
+  test("a bare issue or PR number in prose is an issue-cite; placeholders are not", () => {
+    assert.deepEqual(hits("per #1945 and issue #4118, see PR #4090. Use #N, #<N>, #$ANCHOR_NUM, #12345678.", "issue-cite"), [
+      "1 issue-cite per #1945",
+      "1 issue-cite issue #4118",
+      "1 issue-cite PR #4090",
+    ]);
+  });
+
+  test("a template token is exempt by token while another cite on the same line still counts", () => {
+    assert.deepEqual(hits("Body ends Closes #1234, Part of #5678 and Blocked by #4321; see #1945.", "issue-cite"), [
+      "1 issue-cite #1945",
+    ]);
+    assert.deepEqual(hits("Refs: #1234 and Parent #5678", "issue-cite"), []);
+  });
+
+  test("issue-cite and back-compat skip fenced blocks and Historical: lines", () => {
+    const text = ["```text", "see #1945 and legacy path", "```", "Historical: #1945 kept for legacy", "see #1946, legacy"].join("\n");
+    assert.deepEqual(hits(text, "issue-cite"), ["5 issue-cite #1946"]);
+    assert.deepEqual(hits(text, "back-compat"), ["5 back-compat legacy"]);
+  });
+
+  test("back-compat is the closed phrase list", () => {
+    assert.deepEqual(
+      hits("Kept for readers; a legacy title, retained rows, previously seen, back-compat, back-compatible, Phase B.", "back-compat"),
+      [
+        "1 back-compat Kept for",
+        "1 back-compat legacy",
+        "1 back-compat retained",
+        "1 back-compat previously",
+        "1 back-compat back-compat",
+        "1 back-compat back-compatible",
+        "1 back-compat Phase B",
+      ],
+    );
+    assert.deepEqual(hits("The phase is over. Phase out the legacies; phase a rollout is not a letter.", "back-compat"), []);
+  });
+
+  test("shell-lines emits one hit per shell block with its size and ignores other fences", () => {
+    const text = [
+      `${F}bash`, "a", "b", F,
+      `${F}json`, "{}", F,
+      F, "x", F,
+      `~~~~Sh title`, "c", F, "~~~~",
+      `${F}python`, "print(1)", F,
+    ].join("\n");
+    assert.deepEqual(hits(text, "shell-lines"), ["1 shell-lines bash fence, 2 lines", "11 shell-lines sh fence, 2 lines"]);
+    assert.deepEqual(countByShape(findHits(PB, text, AVOID)), { "shell-lines": 4 });
+  });
+
+  test("a longer fence nests a shorter one and a blockquote prefix does not hide the fence", () => {
+    const text = ["````bash", `${F}`, "inner", `${F}`, "````", "> ```zsh", "> ls", "> ```", "```bash", "tail"].join("\n");
+    assert.deepEqual(hits(text, "shell-lines"), [
+      "1 shell-lines bash fence, 3 lines",
+      "6 shell-lines zsh fence, 1 lines",
+      "9 shell-lines bash fence, 1 lines",
+    ]);
+  });
+
+  test("the Historical: exemption does not apply to a shell block", () => {
+    assert.deepEqual(hits(["```bash", "Historical: echo hi", "```"].join("\n"), "shell-lines"), ["1 shell-lines bash fence, 1 lines"]);
+  });
+
+  test("new shapes sit after the original four so existing hit order is unchanged", () => {
+    assert.deepEqual(SHAPES.slice(0, 4), ["status", "line-cite", "target", "avoid-term"]);
+    assert.deepEqual(SHAPES.slice(4), ["issue-cite", "back-compat", "shell-lines", "symbol-cite"]);
+  });
+
+  test("a shape count above its baseline fails like the original shapes", () => {
+    const found = { [PB]: findHits(PB, "see #1945\nsee #1946", AVOID) };
+    const cmp = compareAgainstBaseline(found, { note: "", files: { [PB]: { "issue-cite": 1 } } });
+    assert.deepEqual(cmp.exceeded.map((d: { shape: string }) => d.shape), ["issue-cite"]);
+  });
+
+  test("--shape re-seeds only the named shapes and leaves every other row and the note", () => {
+    const found = { "a.md": findHits(PB, "see #1945\nIt currently runs.", AVOID), "c.md": findHits(PB, "see #1946", AVOID) };
+    const existing = { note: "keep me", files: { "a.md": { status: 9, "issue-cite": 7 }, "b.md": { "issue-cite": 2 } } };
+    assert.deepEqual(mergeBaselineForShapes(existing, found, ["issue-cite"]), {
+      note: "keep me",
+      files: { "a.md": { status: 9, "issue-cite": 1 }, "c.md": { "issue-cite": 1 } },
+    });
+  });
+
+  test("parseShapeArg accepts known shapes and rejects an unknown one", () => {
+    assert.deepEqual(parseShapeArg("issue-cite, shell-lines"), ["issue-cite", "shell-lines"]);
+    assert.throws(() => parseShapeArg("bogus"), /unknown shape "bogus"/);
+  });
+
+  test("an empty or missing --shape value, or --shape without --write-baseline, throws invalid-argument", () => {
+    const code = { code: "invalid-argument" };
+    assert.throws(() => parseShapeArg(""), code);
+    assert.throws(() => resolveShapeFilter(["--write-baseline", "--shape"]), code);
+    assert.throws(() => resolveShapeFilter(["--write-baseline", "--shape", "--other"]), code);
+    assert.throws(() => resolveShapeFilter(["--write-baseline", "--shape", ""]), code);
+    assert.throws(() => resolveShapeFilter(["--shape", "issue-cite"]), code);
+  });
+
+  test("resolveShapeFilter keeps the full rewrite and the valid filter working", () => {
+    assert.equal(resolveShapeFilter(["--write-baseline"]), undefined);
+    assert.equal(resolveShapeFilter([]), undefined);
+    assert.deepEqual(resolveShapeFilter(["--write-baseline", "--shape", "issue-cite"]), ["issue-cite"]);
+  });
+});
+
+describe("playbook-vocabulary-ratchet: the symbol-cite shape", () => {
+  const sym = (text: string): string[] => hits(text, "symbol-cite");
+
+  test("counts a constant, a camelCase call and a dotted field path, in prose or code spans", () => {
+    assert.deepEqual(sym("The cap is EMIT_CAP and `childLabels()` reads .pr.headSha.\nAlso `SYMBOLS_PER_BATCH`."), [
+      "1 symbol-cite EMIT_CAP",
+      "1 symbol-cite childLabels()",
+      "1 symbol-cite .pr.headSha",
+      "2 symbol-cite SYMBOLS_PER_BATCH",
+    ]);
+  });
+
+  test("a bare camelCase word, a one-segment field and a plain constant are not hits", () => {
+    assert.deepEqual(sym("Call childLabels then read .headSha on the HTTP OK path."), []);
+  });
+
+  test("a $VAR or ${VAR} shell read is exempt, the same name without its sigil is a hit", () => {
+    assert.deepEqual(sym("Read $TARGET_WS and ${TARGET_GH_REPO:?unset} here."), []);
+    assert.deepEqual(sym("Read TARGET_WS here."), ["1 symbol-cite TARGET_WS"]);
+  });
+
+  test("filenames, extensions and globs are not hits", () => {
+    assert.deepEqual(sym("See CODING_STANDARDS.md, *.test.mts, .d.ts, foo.test.mts and HYDRA_TARGET_*."), []);
+  });
+
+  test("a symbol tied to its file by an attribution phrase is exempt", () => {
+    assert.deepEqual(sym("`EMIT_CAP` in `scripts/ci/x.ts` bounds it."), []);
+    assert.deepEqual(sym("`scripts/ci/x.ts`'s `childLabels()` renders it."), []);
+    assert.deepEqual(sym("`EMIT_CAP` and `OTHER_CAP` in `scripts/ci/x.ts`."), ["1 symbol-cite EMIT_CAP"]);
+  });
+
+  test("fenced blocks and a Historical: line are skipped", () => {
+    assert.deepEqual(sym(["```text", "EMIT_CAP childLabels() .a.b", "```"].join("\n")), []);
+    assert.deepEqual(sym("Historical: EMIT_CAP was here."), []);
+  });
+
+  test("a symbol-cite overrun adds the shape-specific fix line", () => {
+    const found = { [PB]: findHits(PB, "EMIT_CAP", AVOID) };
+    const report = formatReport(compareAgainstBaseline(found, { note: "", files: {} }));
+    assert.match(report, /symbol-cite fix: attribute the symbol/);
+  });
+});
+
 describe("playbook-vocabulary-ratchet: the real playbooks", () => {
   test("no playbook or fragment is above or below its baselined count", async () => {
     const report = formatReport(compareAgainstBaseline(scanRepo(), await loadBaseline()));
     assert.equal(report, "", `\n${report}\n`);
+  });
+
+  test("target-seam-preamble.md carries zero symbol-cite hits (cleaned in this PR; INV-4 amendment)", () => {
+    const rel = "docs/operator-playbooks/_fragments/target-seam-preamble.md";
+    const hits = scanRepo()[rel] ?? [];
+    assert.deepEqual(hits.filter((h) => h.shape === "symbol-cite"), []);
   });
 
   test("the standard the report points at defines the playbook rules", () => {

@@ -8,9 +8,10 @@
  * module counts the mechanically detectable breaches of that standard in every
  * operator playbook and fragment, and caps each count per file with a
  * shrink-only baseline. It enforces STD-PLAYBOOK-POINT-DONT-RESTATE,
- * STD-PLAYBOOK-CURRENT-BEHAVIOUR and STD-PLAYBOOK-TARGET-SEAM.
+ * STD-PLAYBOOK-CURRENT-BEHAVIOUR, STD-PLAYBOOK-TARGET-SEAM and
+ * STD-PLAYBOOK-LOGIC-IN-SCRIPTS.
  *
- * Four banned shapes:
+ * Eight banned shapes:
  *
  *   status      a status or history phrase: "not yet", "currently", "formerly",
  *               "no longer", "used to", "until #N", a rollout label
@@ -19,11 +20,22 @@
  *               target-coupling-check.ts, which owns the token list
  *   avoid-term  a term CONTEXT.md lists under _Avoid_ and marks retired; the
  *               list is parsed from CONTEXT.md at run time, never restated here
+ *   issue-cite  a bare `#NNN` issue or PR number in prose (not in a fenced
+ *               block; a `Closes #N`-style template token is exempt by token)
+ *   back-compat a retention or back-compat phrase: "kept for", "legacy",
+ *               "retained", "previously", "back-compat", "Phase B"
+ *   shell-lines the lines inside fenced shell blocks (bash, sh, zsh, shell),
+ *               one hit per block carrying its line count
+ *   symbol-cite a code symbol copied into prose: a SCREAMING_SNAKE constant, a
+ *               camelCase() call or a .dotted.field path (not in a fenced
+ *               block; a `$VAR`/`${VAR}` shell read, a filename or glob, and a
+ *               symbol tied to its file by an attribution phrase are exempt)
  *
  * A line that starts with `Historical:` (the existing playbook provenance
  * convention, HISTORICAL_EXEMPT_RE) is exempt from every shape. The exemption
  * covers that physical line only: the continuation lines of a hard-wrapped note
- * are counted, so a provenance note is written on one line.
+ * are counted, so a provenance note is written on one line. It does not apply
+ * to shell-lines, which counts a whole fenced block, not a line.
  *
  * The baseline (scripts/ci/playbook-vocabulary-baseline.json) holds one count
  * per file per shape. A count above its baseline fails; a count below it fails
@@ -36,15 +48,16 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { listPlaybooks } from "./playbook-reference-check.ts";
-import { REPO_ROOT, isCliEntrypoint, loadJsonBaseline, writeJsonBaseline } from "./seam-check-lib.ts";
+import { InvalidArgumentError } from "../../src/errors.ts";
+import { attributedSymbols, listPlaybooks } from "./playbook-reference-check.ts";
+import { REPO_ROOT, formatStaleAdvice, isCliEntrypoint, loadJsonBaseline, writeJsonBaseline } from "./seam-check-lib.ts";
 import { HISTORICAL_EXEMPT_RE, classifyFile } from "./target-coupling-check.ts";
 
 export const BASELINE_REL = "scripts/ci/playbook-vocabulary-baseline.json";
 export const STANDARD_REL = "CODING_STANDARDS.md";
 export const WRITE_BASELINE_CMD = "npx tsx scripts/ci/playbook-vocabulary-ratchet.ts --write-baseline";
 
-export const SHAPES = ["status", "line-cite", "target", "avoid-term"] as const;
+export const SHAPES = ["status", "line-cite", "target", "avoid-term", "issue-cite", "back-compat", "shell-lines", "symbol-cite"] as const;
 export type Shape = (typeof SHAPES)[number];
 
 /** One banned-shape occurrence. `line` is 1-based. */
@@ -52,6 +65,8 @@ export interface Hit {
   shape: Shape;
   line: number;
   phrase: string;
+  /** Weight of this hit in the per-shape count; absent means 1 (shell-lines sets the block size). */
+  count?: number;
 }
 
 export type ShapeCounts = Partial<Record<Shape, number>>;
@@ -100,6 +115,31 @@ const STATUS_RE = new RegExp(
 
 /** `src/foo.ts:42`, `scripts/x.py:10-20` — a line cite into a source file. */
 const LINE_CITE_RE = /[\w./-]+\.(?:ts|mts|tsx|jsx|js|mjs|py|sh):\d+(?:-\d+)?/g;
+
+/** `#1234`, `issue #1234`, `PR #1234`, `per #1234`: 3 to 5 literal digits, so `#N` placeholders never match. */
+const ISSUE_CITE_RE = /(?:\b(?:issue|PR|per) )?#\d{3,5}\b/g;
+
+/** A template token the issue-tracker contract needs literally; removed before the issue-cite scan. */
+const TEMPLATE_TOKEN_RE = /(?:Closes|Fixes|Resolves|Refs?|Part of|Blocked by|Parent)\s*:?\s*#\d+/g;
+
+/** Retention and back-compat phrasing (closed list). */
+const BACK_COMPAT_RE = /\bkept for\b|\blegacy\b|\bretained\b|\bpreviously\b|\bback-compat(?:ible|ibility)?\b/gi;
+const PHASE_RE = /\b[Pp]hase [A-Z]\b/g;
+
+/**
+ * symbol-cite token forms. (i) a constant of 2+ segments, not behind `$` or `{`
+ * (a shell variable read) and not a filename stem; (ii) a camelCase call; (iii) a
+ * `.dotted.field` path of 2+ segments, not a filename or glob.
+ */
+const CONST_TOKEN_RE = /(?<![\w${])[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+(?!\w)(?!\.[a-z])/g;
+const CALL_TOKEN_RE = /(?<!\w)[a-z][a-zA-Z0-9]*[A-Z][a-zA-Z0-9]*\(\)/g;
+const FIELD_TOKEN_RE = /(?<![\w/*.])\.[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+/g;
+const FILE_EXT_TAIL_RE = /\.(?:ts|mts|tsx|js|mjs|md|json|yml|yaml|py|sh|toml|txt|tap)$/;
+
+const SHELL_INFO = new Set(["bash", "sh", "zsh", "shell"]);
+
+/** A CommonMark fence line, optionally inside blockquote prefixes. */
+const FENCE_RE = /^\s*(?:>\s*)*(`{3,}|~{3,})(.*)$/;
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -157,16 +197,61 @@ function avoidRegex(terms: readonly string[]): RegExp | null {
 export function findHits(file: string, text: string, avoidTerms: readonly string[]): Hit[] {
   const hits: Hit[] = [];
   const avoid = avoidRegex(avoidTerms);
+  let fence: { char: string; len: number; info: string; line: number; lines: number } | null = null;
+  const closeFence = (): void => {
+    if (fence && SHELL_INFO.has(fence.info) && fence.lines > 0) {
+      hits.push({
+        shape: "shell-lines",
+        line: fence.line,
+        phrase: `${fence.info} fence, ${fence.lines} lines`,
+        count: fence.lines,
+      });
+    }
+    fence = null;
+  };
   text.split("\n").forEach((line, i) => {
+    const fm = FENCE_RE.exec(line);
+    if (fm) {
+      const marker = fm[1];
+      const rest = fm[2].trim();
+      if (fence) {
+        if (marker[0] === fence.char && marker.length >= fence.len && rest === "") closeFence();
+        else fence.lines++;
+        return;
+      }
+      if (!(marker[0] === "`" && rest.includes("`"))) {
+        fence = { char: marker[0], len: marker.length, info: (rest.split(/\s+/)[0] ?? "").toLowerCase(), line: i + 1, lines: 0 };
+        return;
+      }
+    }
+    if (fence) {
+      fence.lines++;
+    }
+    const inFence = fence !== null;
     if (HISTORICAL_EXEMPT_RE.test(line)) return;
-    const scan = (shape: Shape, re: RegExp | null): void => {
+    const scan = (shape: Shape, re: RegExp | null, subject: string = line): void => {
       if (!re) return;
-      for (const m of line.matchAll(re)) hits.push({ shape, line: i + 1, phrase: m[0] });
+      for (const m of subject.matchAll(re)) hits.push({ shape, line: i + 1, phrase: m[0] });
     };
     scan("status", STATUS_RE);
     scan("line-cite", LINE_CITE_RE);
     scan("avoid-term", avoid);
+    if (!inFence) {
+      scan("issue-cite", ISSUE_CITE_RE, line.replace(TEMPLATE_TOKEN_RE, ""));
+      scan("back-compat", BACK_COMPAT_RE);
+      scan("back-compat", PHASE_RE);
+      const attributed = attributedSymbols(line);
+      for (const re of [CONST_TOKEN_RE, CALL_TOKEN_RE, FIELD_TOKEN_RE]) {
+        for (const m of line.matchAll(re)) {
+          const tok = m[0];
+          if (re === FIELD_TOKEN_RE && FILE_EXT_TAIL_RE.test(tok)) continue;
+          if (attributed.has(tok)) continue;
+          hits.push({ shape: "symbol-cite", line: i + 1, phrase: tok });
+        }
+      }
+    }
   });
+  closeFence(); // an unclosed fence runs to the end of the file
   // The Target token list lives in target-coupling-check.ts; it applies the
   // same Historical: exemption itself.
   for (const v of classifyFile(file, text, "playbooks")) {
@@ -177,7 +262,7 @@ export function findHits(file: string, text: string, avoidTerms: readonly string
 
 export function countByShape(hits: readonly Hit[]): ShapeCounts {
   const counts: ShapeCounts = {};
-  for (const h of hits) counts[h.shape] = (counts[h.shape] ?? 0) + 1;
+  for (const h of hits) counts[h.shape] = (counts[h.shape] ?? 0) + (h.count ?? 1);
   return counts;
 }
 
@@ -219,6 +304,54 @@ export function buildBaseline(found: Record<string, Hit[]>): Baseline {
   };
 }
 
+/**
+ * Re-seed only the named shapes' rows: every other key and the note stay as
+ * they are, a file row is added only when a named shape is non-zero there and
+ * dropped only when it ends up empty (STD-BASELINE-EDIT-ROWS).
+ */
+export function mergeBaselineForShapes(existing: Baseline, found: Record<string, Hit[]>, shapes: readonly Shape[]): Baseline {
+  const files: Record<string, ShapeCounts> = {};
+  const names = new Set([...Object.keys(existing.files), ...Object.keys(found)]);
+  for (const file of [...names].sort()) {
+    const counts = countByShape(found[file] ?? []);
+    const prev = existing.files[file] ?? {};
+    const row: ShapeCounts = {};
+    for (const shape of SHAPES) {
+      const v = shapes.includes(shape) ? counts[shape] : prev[shape];
+      if (v) row[shape] = v;
+    }
+    if (Object.keys(row).length > 0) files[file] = row;
+  }
+  return { note: existing.note, files };
+}
+
+/** Parse a `--shape a,b` argument; an unknown name throws. */
+export function parseShapeArg(arg: string): Shape[] {
+  const out: Shape[] = [];
+  for (const name of arg.split(",").map((n) => n.trim()).filter(Boolean)) {
+    if (!(SHAPES as readonly string[]).includes(name)) {
+      throw new InvalidArgumentError(`unknown shape "${name}"; expected one of ${SHAPES.join(", ")}`);
+    }
+    out.push(name as Shape);
+  }
+  if (out.length === 0) throw new InvalidArgumentError(`--shape needs at least one shape name; expected one of ${SHAPES.join(", ")}`);
+  return out;
+}
+
+/**
+ * Resolve the writer's `--shape` filter from argv: `undefined` = rewrite every
+ * shape. A `--shape` with no/empty value, or given without `--write-baseline`,
+ * throws instead of silently doing nothing.
+ */
+export function resolveShapeFilter(argv: readonly string[]): Shape[] | undefined {
+  const at = argv.indexOf("--shape");
+  if (at === -1) return undefined;
+  if (!argv.includes("--write-baseline")) throw new InvalidArgumentError("--shape only applies together with --write-baseline");
+  const value = argv[at + 1];
+  if (value === undefined || value.startsWith("--")) throw new InvalidArgumentError("--shape needs a value");
+  return parseShapeArg(value);
+}
+
 /** Empty string when clean. */
 export function formatReport(cmp: Comparison): string {
   const out: string[] = [];
@@ -228,6 +361,11 @@ export function formatReport(cmp: Comparison): string {
       out.push(`  ${d.file}: ${d.shape} count ${d.count} > baseline ${d.baseline}`);
       for (const h of d.hits) out.push(`    ${d.file}:${h.line}  ${h.shape}  "${h.phrase}"`);
     }
+    if (cmp.exceeded.some((d) => d.shape === "symbol-cite")) {
+      out.push(
+        "symbol-cite fix: attribute the symbol to its file with an attribution phrase (so playbook-reference-check resolves it), or name the fact's home without copying the symbol.",
+      );
+    }
     out.push(
       `Fix: rewrite the sentence so it states current behaviour and points at the fact's home (${STANDARD_REL}, STD-PLAYBOOK-*). ` +
         "A provenance note kept on one line may start it with `Historical:`; a wrapped continuation line is counted. Do not raise the baseline.",
@@ -236,7 +374,7 @@ export function formatReport(cmp: Comparison): string {
   if (cmp.stale.length > 0) {
     out.push("Counts now below the baseline (lower the baseline so they cannot creep back):");
     for (const d of cmp.stale) out.push(`  ${d.file}: ${d.shape} count ${d.count} < baseline ${d.baseline}`);
-    out.push(`Fix: ${WRITE_BASELINE_CMD}`);
+    out.push(formatStaleAdvice({ baselineRel: BASELINE_REL, rowAction: "lower the listed counts to the printed values" }));
   }
   return out.join("\n");
 }
@@ -260,9 +398,12 @@ export async function loadBaseline(root: string = REPO_ROOT): Promise<Baseline> 
 }
 
 async function main(): Promise<void> {
+  const shapeFilter = resolveShapeFilter(process.argv);
   const found = scanRepo();
   if (process.argv.includes("--write-baseline")) {
-    await writeJsonBaseline(join(REPO_ROOT, BASELINE_REL), buildBaseline(found));
+    const target = join(REPO_ROOT, BASELINE_REL);
+    const next = shapeFilter === undefined ? buildBaseline(found) : mergeBaselineForShapes(await loadBaseline(), found, shapeFilter);
+    await writeJsonBaseline(target, next);
     console.log(`[playbook-vocabulary-ratchet] wrote ${BASELINE_REL}`);
     return;
   }
