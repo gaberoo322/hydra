@@ -96,3 +96,69 @@ export function extractScopeFromBody(body: string): string[] {
 export function hasScopeSection(body: string): boolean {
   return extractScopeFromBody(body).length > 0;
 }
+
+/**
+ * Paths a required or advisory drift guard REGENERATES, so a PR touching them is
+ * never scope creep (issue #5528; supersedes scope-check's `ALWAYS_IN_SCOPE`,
+ * #3678). Criterion: a path is listed iff (a) a repo script produces its content
+ * from other tracked files and (b) a CI drift guard fails when the committed copy
+ * is stale. `test/fixtures/qa-cohort-baseline.json` is a deliberately written
+ * graduation ledger, so it is excluded.
+ *
+ * Entry shape: a repo-root-relative directory prefix ending in `/`, or a full
+ * file path. Never a bare suffix: `classifyScope`'s matcher has an `endsWith`
+ * arm that would turn a suffix into an implicit glob.
+ */
+export const MECHANICAL_COMPANIONS: readonly string[] = [
+  ".changelog/",
+  "docs/generated/",
+  "scripts/ci/anthropic-seam-baseline.json",
+  "scripts/ci/claude-cli-seam-baseline.json",
+  "scripts/ci/github-seam-baseline.json",
+  "scripts/ci/host-probe-seam-baseline.json",
+  "scripts/ci/journal-seam-baseline.json",
+  "scripts/ci/never-throw-baseline.json",
+  "scripts/ci/playbook-duplicate-baseline.json",
+  "scripts/ci/playbook-reference-baseline.json",
+  "scripts/ci/playbook-vocabulary-baseline.json",
+  "scripts/ci/query-seam-baseline.json",
+  "scripts/ci/redis-seam-baseline.json",
+  "scripts/ci/schema-seam-baseline.json",
+  "scripts/ci/skill-size-baseline.json",
+  "scripts/ci/target-coupling-baseline.json",
+  "scripts/ci/telegram-seam-baseline.json",
+  "scripts/ci/test-typecheck-baseline.json",
+  "test/fixtures/adr-area-baseline.json",
+  "test/fixtures/coding-standards-baseline.json",
+  "test/fixtures/docs-drift-baseline.json",
+  "test/fixtures/fail-loud-baseline.json",
+  "test/fixtures/lifecycle-seam-baseline.json",
+  "test/fixtures/suite-count-baseline.json",
+  "test/fixtures/test-pools.json",
+  "test/fixtures/test-source-read-baseline.json",
+  "test/fixtures/test-subject-baseline.json",
+  "test/fixtures/test-title-provenance-baseline.json",
+];
+
+/**
+ * The scope gate's path matcher: exact, prefix either way, or suffix match
+ * against any entry of `list`. Shared by `classifyScope` (scripts/ci/scope-check.ts)
+ * (issue #5528). Companion admission does NOT go through this loose matcher:
+ * both the gate and the QA packet use the strict `isMechanicalCompanion`.
+ */
+export function matchesScopeList(target: string, list: readonly string[]): boolean {
+  if (list.length === 0) return false;
+  if (list.includes(target)) return true;
+  return list.some((s) => target.startsWith(s) || s.startsWith(target) || target.endsWith(s));
+}
+
+/**
+ * True when `path` is a gate-regenerated companion (see MECHANICAL_COMPANIONS).
+ * Deliberately STRICTER than `matchesScopeList`: exact equality for file
+ * entries, `startsWith` only for entries ending in `/` — no endsWith or
+ * reverse-prefix arms, so `x/scripts/ci/skill-size-baseline.json` and
+ * `test/fixtures/test-pools.json.bak` are not companions.
+ */
+export function isMechanicalCompanion(path: string): boolean {
+  return MECHANICAL_COMPANIONS.some((e) => (e.endsWith("/") ? path.startsWith(e) : path === e));
+}

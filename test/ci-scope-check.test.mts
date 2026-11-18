@@ -9,7 +9,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   extractScopeFromBody,
@@ -17,9 +17,9 @@ import {
   extractScopeJustifications,
   classifyScope,
   isTargetRepoPath,
-  ALWAYS_IN_SCOPE,
   validateIssueScope,
 } from "../scripts/ci/scope-check.ts";
+import { MECHANICAL_COMPANIONS, isMechanicalCompanion } from "../src/scope-section.ts";
 
 describe("extractScopeFromBody", () => {
   test("pulls backticked paths from a markdown ## section", () => {
@@ -422,38 +422,93 @@ describe("isTargetRepoPath (#2175)", () => {
   });
 });
 
-describe("ALWAYS_IN_SCOPE (issue #3678)", () => {
+describe("MECHANICAL_COMPANIONS", () => {
+  // Classified-or-fail: a new gate-regenerated file must be listed or explicitly excluded.
+  const COMPANION_EXCLUSIONS = ["test/fixtures/qa-cohort-baseline.json"];
+
   test("includes the .changelog/ prefix", () => {
-    assert.ok(ALWAYS_IN_SCOPE.includes(".changelog/"));
+    assert.ok(MECHANICAL_COMPANIONS.includes(".changelog/"));
   });
 
-  test("a changelog fragment is in scope when unioned into inScope, even with an empty scope section", () => {
-    // Mirrors main()'s union: ALWAYS_IN_SCOPE ∪ (empty PR/issue scope).
-    const inScope = [...ALWAYS_IN_SCOPE];
-    const result = classifyScope([".changelog/3678-changelog-convention.md"], inScope);
+  test("isMechanicalCompanion accepts dir-prefix and exact-file companions", () => {
+    assert.equal(isMechanicalCompanion(".changelog/5528-a.md"), true);
+    assert.equal(isMechanicalCompanion("docs/generated/routes.json"), true);
+    assert.equal(isMechanicalCompanion("scripts/ci/skill-size-baseline.json"), true);
+  });
+
+  test("isMechanicalCompanion rejects ordinary files and the deliberate ledger", () => {
+    assert.equal(isMechanicalCompanion("src/scope-section.ts"), false);
+    assert.equal(isMechanicalCompanion("docs/quality-gates.md"), false);
+    assert.equal(isMechanicalCompanion("test/fixtures/qa-cohort-baseline.json"), false);
+  });
+
+  test("isMechanicalCompanion is strict: no suffix, extension, or reverse-prefix matches", () => {
+    assert.equal(isMechanicalCompanion("x/scripts/ci/skill-size-baseline.json"), false);
+    assert.equal(isMechanicalCompanion("test/fixtures/test-pools.json.bak"), false);
+    assert.equal(isMechanicalCompanion("docs/"), false);
+    assert.equal(isMechanicalCompanion("scripts/ci/skill-size-baseline.json"), true);
+  });
+
+  test("every entry is a root-relative dir prefix ending in / or a full file path, never a suffix", () => {
+    for (const e of MECHANICAL_COMPANIONS) {
+      assert.ok(!e.startsWith("/") && !e.startsWith("./"), `${e} must be repo-root-relative`);
+      assert.ok(e.endsWith("/") || e.includes("/"), `${e} must be a dir prefix or a full path, not a bare basename/suffix`);
+      assert.ok(!e.includes("*"), `${e} must not be a glob`);
+    }
+    assert.equal(new Set(MECHANICAL_COMPANIONS).size, MECHANICAL_COMPANIONS.length);
+  });
+
+  test("every baseline/ratchet file on disk is classified as a companion or an explicit exclusion", () => {
+    const root = resolve(import.meta.dirname, "..");
+    const onDisk = [
+      ...readdirSync(resolve(root, "test/fixtures")).filter((f) => f.endsWith("-baseline.json")).map((f) => `test/fixtures/${f}`),
+      ...readdirSync(resolve(root, "scripts/ci")).filter((f) => f.endsWith("-baseline.json")).map((f) => `scripts/ci/${f}`),
+      "test/fixtures/test-pools.json",
+    ];
+    for (const f of onDisk) {
+      const listed = MECHANICAL_COMPANIONS.includes(f);
+      const excluded = COMPANION_EXCLUSIONS.includes(f);
+      assert.ok(listed !== excluded, `${f} must be in exactly one of MECHANICAL_COMPANIONS / COMPANION_EXCLUSIONS`);
+    }
+    for (const e of MECHANICAL_COMPANIONS) {
+      if (!e.endsWith("/")) assert.ok(onDisk.includes(e), `${e} is listed but not a known baseline file`);
+    }
+  });
+
+  test("a companions-only diff is in scope with an empty scope section", () => {
+    const inScope: string[] = [];
+    const changed = [
+      ".changelog/5528-a.md",
+      "docs/generated/adrs.json",
+      "test/fixtures/suite-count-baseline.json",
+      "scripts/ci/skill-size-baseline.json",
+      "test/fixtures/test-pools.json",
+    ];
+    const result = classifyScope(changed, inScope);
     assert.equal(result.blocked, false);
     assert.deepEqual(result.outOfScope, []);
   });
 
-  test("a fragment-only PR does not trip the ratio gate", () => {
-    const inScope = [...ALWAYS_IN_SCOPE];
-    const changed = [
-      ".changelog/3678-a.md",
-      ".changelog/3678-b.md",
-      ".changelog/3678-c.md",
-      ".changelog/3678-d.md",
-    ];
-    const result = classifyScope(changed, inScope);
-    assert.equal(result.blocked, false);
-    assert.equal(result.outOfScope.length, 0);
+  test("the gate applies the strict companion predicate: nested or suffixed lookalikes stay out of scope", () => {
+    const lookalikes = ["x/scripts/ci/skill-size-baseline.json", "test/fixtures/test-pools.json.bak"];
+    const result = classifyScope(lookalikes, []);
+    assert.deepEqual(result.outOfScope.sort(), [...lookalikes].sort());
   });
 
-  test("does not whitelist non-changelog paths", () => {
-    const inScope = [...ALWAYS_IN_SCOPE];
-    const result = classifyScope(["src/a.ts"], inScope);
-    // src/a.ts is not covered by .changelog/, so it is out-of-scope (though a
-    // single file never trips the ratio+count block on its own).
-    assert.deepEqual(result.outOfScope, ["src/a.ts"]);
+  test("a companion listed out-of-scope is reconciled in-scope-wins", () => {
+    const result = classifyScope(["docs/generated/adrs.json"], [], {
+      outOfScopeDeclared: ["docs/generated/adrs.json"],
+    });
+    assert.deepEqual(result.outOfScope, []);
+  });
+
+  test("a non-companion doc and the excluded ledger still trip as out of scope", () => {
+    const inScope: string[] = [];
+    const result = classifyScope(
+      ["docs/quality-gates.md", "test/fixtures/qa-cohort-baseline.json", "src/a.ts", "src/b.ts", "src/c.ts"],
+      inScope,
+    );
+    assert.deepEqual(result.outOfScope.sort(), ["docs/quality-gates.md", "src/a.ts", "src/b.ts", "src/c.ts", "test/fixtures/qa-cohort-baseline.json"]);
   });
 });
 

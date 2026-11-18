@@ -247,6 +247,14 @@ out-of-scope files. Thresholds match the historical in-cycle gate
 `src/scope-enforcement.ts` was removed by issue #476 and the CI script is
 now the single source of truth.
 
+**Always in scope.** `MECHANICAL_COMPANIONS` (`src/scope-section.ts`, imported
+by `scripts/ci/scope-check.ts`) is admitted by `classifyScope` through the strict `isMechanicalCompanion` predicate (exact file or `/`-prefix match, the same one the QA packet uses): a path is listed
+iff a repo script generates it from other tracked files AND a CI drift guard
+forces its regeneration into the same PR (`.changelog/`, `docs/generated/`, the
+ratchet baselines). The QA packet names the companions present in a diff so
+reviewers share the same list. `test/fixtures/qa-cohort-baseline.json` (a
+deliberately written ledger) is excluded.
+
 **Thresholds.**
 - `SCOPE_OUT_OF_SCOPE_THRESHOLD` env var, float `0..1`, default `0.8`
 - `SCOPE_MIN_OUT_OF_SCOPE_COUNT` env var, int, default `3`
