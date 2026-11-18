@@ -37,6 +37,7 @@
   "scripts/build-spritesheet.js": 1,
   "scripts/ci/anthropic-seam-check.ts": 1,
   "scripts/ci/b.ts": 1,
+  "scripts/ci/baseline-raise-check.ts": 2,
   "scripts/ci/biome-check.ts": 1,
   "scripts/ci/brain-source.ts": 1,
   "scripts/ci/branch-prune.ts": 2,
