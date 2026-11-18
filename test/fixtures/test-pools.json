@@ -87,6 +87,7 @@
     "test/page-item-format.test.mts",
     "test/planner-model-routing.test.mts",
     "test/playbook-absolute-write-target.test.mts",
+    "test/playbook-duplicate-ratchet.test.mts",
     "test/playbook-seam-var-guard.test.mts",
     "test/post-commit-status.test.mts",
     "test/probe-search.test.mts",
