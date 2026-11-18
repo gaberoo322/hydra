@@ -528,7 +528,9 @@ function cleanAlternatives(
  *   build <input-json>                                   -> serialized artifact
  *                            exit 0; input that is not JSON exits 1, prints nothing
  *   summarize                stdin: artifact JSON        -> two human lines
- *                            exit 0; stdin that is not an artifact exits 1, prints nothing
+ *                            exit 0 for any JSON object with an `invariants` array
+ *                            (even an empty one); stdin that is not JSON, or has no
+ *                            `invariants` array, exits 1, prints nothing
  *   <anything else>          exit 2, prints nothing
  *
  * Every non-zero exit also writes the reason to stderr, so the caller's

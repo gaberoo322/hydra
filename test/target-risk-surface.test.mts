@@ -261,6 +261,8 @@ describe("print-target-facts — the playbook identity + risk-surface seam (issu
     assert.match(rendered, /^export TARGET_VERIFY_TYPECHECK='npm run typecheck'$/m);
     assert.match(rendered, /^export TARGET_VERIFY_BUILD='npm run build'$/m);
     assert.match(rendered, /^export TARGET_VERIFY_LINT=''$/m);
+    assert.equal(facts.manifestRoot, FIXTURE_ROOT);
+    assert.ok(rendered.split("\n").includes(`export TARGET_MANIFEST_ROOT='${FIXTURE_ROOT}'`));
   });
 
   test("parseManifestRootFlag: absent is undefined, a value is returned, a missing value is null", () => {
@@ -269,6 +271,8 @@ describe("print-target-facts — the playbook identity + risk-surface seam (issu
     assert.equal(parseManifestRootFlag(["--manifest-root"]), null);
     assert.equal(parseManifestRootFlag(["--manifest-root", "--sh"]), null);
     assert.equal(parseManifestRootFlag(["--manifest-root", " "]), null);
+    assert.equal(parseManifestRootFlag(["--sh", "--manifest-root=/wt/"]), "/wt/", "equals form, returned exactly as passed");
+    assert.equal(parseManifestRootFlag(["--manifest-root="]), null);
   });
 
   test("renderShell returns null (nothing exportable) when the manifest is unresolved — fail closed", () => {

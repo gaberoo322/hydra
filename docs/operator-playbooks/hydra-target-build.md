@@ -143,7 +143,7 @@ bash ~/hydra/scripts/sync-target-gate.sh "$TARGET_WT"
 export HYDRA_GATE_DIR="${TARGET_WT}.hydra-gate"
 ```
 
-**Manifest re-resolution.** The worktree is this cycle's canonical checkout, so the verify commands and `appSubdir` come from its own `.hydra/manifest.json` (ADR-0026), read once through the seam. Steps 1, 4, 6 and 6.6 read `$TARGET_APP_SUBDIR` and `$TARGET_VERIFY_TEST` / `_TYPECHECK` / `_BUILD` / `_LINT` / `_INSTALL` from it; `$TARGET_WS` and `$TARGET_APP_DIR` stay the main checkout. Run this block again first in any later Bash call that reads those variables:
+**Manifest re-resolution.** The worktree is this cycle's canonical checkout, so the verify commands and `appSubdir` come from its own `.hydra/manifest.json` (ADR-0026), read once through the seam. Steps 1, 4, 6 and 6.6 read `$TARGET_APP_SUBDIR` and `$TARGET_VERIFY_TEST` / `_TYPECHECK` / `_BUILD` / `_LINT` / `_INSTALL` from it; `$TARGET_WS` and `$TARGET_APP_DIR` stay the main checkout. The plain seam preamble exports the same variables from the serving checkout's manifest, so each consuming block first checks that `$TARGET_MANIFEST_ROOT` (the root the seam read) is `$TARGET_WT`; re-running only the preamble fails that check. Run this block again first in any later Bash call that reads those variables:
 
 ```bash
 # Fail closed: a missing or malformed manifest prints nothing exportable and
@@ -241,10 +241,9 @@ Ground runs the test and typecheck commands ONLY — deliberately no build and n
 
 ```bash
 # $TARGET_APP_SUBDIR / $TARGET_VERIFY_* come from the Step 0.6 manifest re-resolution.
-: "${TARGET_VERIFY_TEST:?unset - re-run the Step 0.6 manifest re-resolution in this Bash call}"
+[ "${TARGET_MANIFEST_ROOT:-}" = "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}" ] || { echo "ABORT: manifest facts not read from \$TARGET_WT - re-run the Step 0.6 manifest re-resolution in this Bash call" >&2; exit 1; }
 cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}/$TARGET_APP_SUBDIR"      # appSubdir='' => repo root
-# eval word-splits the multi-word manifest commands under zsh (a bare `$TARGET_VERIFY_TEST`
-# is taken as one command word — `command not found: npm run <script>`). Portable.
+# eval word-splits the multi-word manifest commands under zsh, where a bare `$TARGET_VERIFY_TEST` is one command word.
 eval "$TARGET_VERIFY_TEST"        # the manifest's declared REAL suite, NEVER assume bare `npm test` is it
 eval "$TARGET_VERIFY_TYPECHECK"
 git log --oneline -5
@@ -442,9 +441,9 @@ Challenge:
 5. Smallest possible move?
 6. Before deleting, prove the module is truly orphaned — but a **single-line `from`-grep is a false-negative trap** (retro cue `multiline-import-misses-importer-grep`, recurrence 4): a live consumer whose `import { … }` list spans several lines puts the symbol and the `from "./x"` clause on *different* lines, so a `from.*['"].*<name>` regex matches neither line. It also misses relative + `.ts`-suffixed specifiers (a path-fragment regex like `arbitrage/mod` skips `./mod` and `./mod.ts`). Verify by **bare basename** across the Target code root (`$TARGET_WT/$TARGET_APP_SUBDIR/src` — the manifest's `appSubdir`, which may be empty, i.e. the repo root), then let the compiler be the proof:
    ```bash
-   # $TARGET_APP_SUBDIR / $TARGET_VERIFY_TYPECHECK come from the Step 0.6 manifest re-resolution.
+   [ "${TARGET_MANIFEST_ROOT:-}" = "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}" ] || { echo "ABORT: manifest facts not read from \$TARGET_WT - re-run the Step 0.6 manifest re-resolution in this Bash call" >&2; exit 1; }
    grep -rn "<basename-without-ext>" "$TARGET_WT/$TARGET_APP_SUBDIR/src"   # bare name, every line — necessary-but-not-sufficient
-   eval "${TARGET_VERIFY_TYPECHECK:?unset - re-run the Step 0.6 manifest re-resolution in this Bash call}"   # red ⇒ NOT orphaned
+   eval "$TARGET_VERIFY_TYPECHECK"   # red ⇒ NOT orphaned
    # plus the Target's own dead-code ratchet script, if its package.json declares one
    ```
    An empty bare-basename grep is only a *hint*; the retire is safe **only** when typecheck/deadcode still pass. When a `wire-or-retire` ledger row is the anchor, the row itself is the authoritative orphan source — trust it over a hand-grep, and re-verify each module against `origin/main` before deleting (the ledger lags the active retire wave).
@@ -582,7 +581,7 @@ Verify commands are the manifest's (ADR-0026), from the Step 0.6 manifest re-res
 ```bash
 # $TARGET_APP_SUBDIR / $TARGET_VERIFY_* come from the Step 0.6 manifest re-resolution;
 # $TARGET_VERIFY_LINT is "" when the manifest declares no lint gate.
-: "${TARGET_VERIFY_TEST:?unset - re-run the Step 0.6 manifest re-resolution in this Bash call}"
+[ "${TARGET_MANIFEST_ROOT:-}" = "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}" ] || { echo "ABORT: manifest facts not read from \$TARGET_WT - re-run the Step 0.6 manifest re-resolution in this Bash call" >&2; exit 1; }
 cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}/$TARGET_APP_SUBDIR"
 
 # --- Install decision, trigger 1 (lockfile diff) -------------
@@ -729,7 +728,7 @@ cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}"
 MERGE_BASE=$(git merge-base origin/main HEAD)
 CHANGED_FILES=$(git diff --name-only "${MERGE_BASE}"...HEAD)
 # $TARGET_APP_SUBDIR comes from the Step 0.6 manifest re-resolution ('' = repo-root app).
-: "${TARGET_VERIFY_TEST:?unset - re-run the Step 0.6 manifest re-resolution in this Bash call}"
+[ "${TARGET_MANIFEST_ROOT:-}" = "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}" ] || { echo "ABORT: manifest facts not read from \$TARGET_WT - re-run the Step 0.6 manifest re-resolution in this Bash call" >&2; exit 1; }
 CHANGED_FILES="$CHANGED_FILES" \
 TARGET_PROJECT_DIR="$TARGET_WT/$TARGET_APP_SUBDIR" \
   npx tsx "$HYDRA_GATE_DIR/scripts/target/mutation-check.ts"
@@ -849,9 +848,7 @@ failure mode.
 
 > **CONTEXT POINTER:** when you reach the merge phase, read `hydra-target-build-merge-flow.md` (sibling of this SKILL.md). It owns Steps 7–10: the MANDATORY pre-merge health baseline, the PR-only merge path (the build never pushes to `main` and never deploys), the 7b outcome table (already-merged-post-green is SUCCESS; a fenced PR is the operator's to merge, and the fence reads the PR's own labels first, then its linked issues and the anchor, failing closed), deploy observation, post-merge verify with the revert-PR path, the alarm-only health smoke check, worktree cleanup, state sync, the friction report and the summary table.
 
-### 8.5. Worktree cleanup
-
-Runs on every successful build, the resume arm included; the recipe lives once, in `hydra-target-build-merge-flow.md` Step 8.5.
+Step 8.5 worktree cleanup runs on every successful build, the resume arm included; its recipe lives once, in `hydra-target-build-merge-flow.md` Step 8.5.
 
 </child-prompt>
 

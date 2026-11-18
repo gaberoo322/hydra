@@ -604,6 +604,38 @@ describe("hydra-target-build playbook wiring (issue #1451, #4526)", () => {
     );
   });
 
+  test("every block that consumes the manifest facts first checks they came from $TARGET_WT, not the serving checkout", () => {
+    // The plain seam preamble exports TARGET_VERIFY_* / TARGET_APP_SUBDIR from
+    // $TARGET_WS's manifest too, so a fresh Bash call that re-runs only the
+    // preamble must fail the provenance check rather than verify with the
+    // serving tree's commands.
+    const main = readFileSync(join(REPO_ROOT, "docs", "operator-playbooks", "hydra-target-build.md"), "utf-8");
+    const PROVENANCE =
+      '[ "${TARGET_MANIFEST_ROOT:-}" = "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}" ] || {';
+    const blocks: string[] = [];
+    let cur: string[] | null = null;
+    for (const line of main.split("\n")) {
+      if (/^\s*```/.test(line)) {
+        if (cur) {
+          blocks.push(cur.join("\n"));
+          cur = null;
+        } else if (/^\s*```bash\s*$/.test(line)) cur = [];
+        continue;
+      }
+      if (cur) cur.push(line);
+    }
+    const code = (b: string) => b.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+    const consumers = blocks.filter((b) => /\$\{?TARGET_VERIFY_|\/\$TARGET_APP_SUBDIR/.test(code(b)) && !b.includes("--manifest-root"));
+    assert.equal(consumers.length, 4, "Steps 1, 4, 6 and 6.6 consume the manifest facts");
+    for (const b of consumers) {
+      assert.ok(b.includes(PROVENANCE), `block lacks the TARGET_MANIFEST_ROOT provenance check:\n${b.slice(0, 200)}`);
+      assert.ok(
+        code(b).indexOf(PROVENANCE) < code(b).search(/\$\{?TARGET_VERIFY_|\/\$TARGET_APP_SUBDIR/),
+        "the provenance check precedes the first consumer line",
+      );
+    }
+  });
+
   test("Step 8.5 removes the sibling gate dir alongside the worktree (#4526 INV-9)", () => {
     assert.match(
       PLAYBOOK,

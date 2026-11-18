@@ -477,7 +477,7 @@ git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" branch
 TASK_TITLE="${ANCHOR_SUBJECT:-<task title>}"
 ```
 
-**Board close-out — `Closes #N` is the sole terminal signal (ADR-0031 Decision 4/5).** Target tracking lives as GitHub Issues on `$TARGET_GH_REPO`. When the anchor was a board issue, the PR body's `Closes #$ANCHOR_NUM` (Step 7) is what `automerge.yml` reads to close the issue explicitly on merge (GitHub's native auto-close does not fire on the emulated-automerge path; ADR-0031 Decision 5). That close removes the issue from the open board and IS the terminal state-sync; the in-flight signal is the `in-progress` label the Step 2 claim stamped. Completion is also recorded by the metrics record and `cycle:completed` event below.
+**Board close-out — `Closes #N` is the sole terminal signal (ADR-0031 Decision 4/5).** Target tracking lives as GitHub Issues on `$TARGET_GH_REPO`. When the anchor was a board issue, the PR body's `Closes #$ANCHOR_NUM` (Step 7) is what `automerge.yml` reads to close the issue explicitly on merge (GitHub's native auto-close does not fire when the Target's automerge lands the PR; ADR-0031 Decision 5). That close removes the issue from the open board and IS the terminal state-sync; the in-flight signal is the `in-progress` label the Step 2 claim stamped. Completion is also recorded by the metrics record and `cycle:completed` event below.
 
 ```bash
 # Board anchor: automerge.yml closes the `Closes #$ANCHOR_NUM` issue explicitly

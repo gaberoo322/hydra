@@ -597,7 +597,9 @@ describe("runCli — playbook subcommands (Steps 3.3 / 4.5)", () => {
       ["stale, concept not parseable", ["stale", "{not json", JSON.stringify(decision)], noStdin, { out: "fresh", code: 0 }],
       ["stale, decision not JSON", ["stale", built.out, "{nope"], noStdin, { out: "", code: 1 }],
       ["build, input not JSON", ["build", "{nope"], noStdin, { out: "", code: 1 }],
-      ["summarize, stdin not an artifact", ["summarize"], () => "{nope", { out: "", code: 1 }],
+      ["summarize, stdin not JSON", ["summarize"], () => "{nope", { out: "", code: 1 }],
+      ["summarize, JSON with no invariants array", ["summarize"], () => "{}", { out: "", code: 1 }],
+      ["summarize, empty invariants array", ["summarize"], () => '{"scope":"s","invariants":[]}', { out: "  scope: s\n  invariants: \n", code: 0 }],
       ["unknown subcommand", ["bogus"], noStdin, { out: "", code: 2 }],
     ];
     for (const [label, argv, stdin, expected] of cases) {

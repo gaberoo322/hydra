@@ -163,6 +163,11 @@ describe("print-target-facts CLI (INV-7)", () => {
         { encoding: "utf8" },
       );
       assert.equal(probe.stdout, `${root}|app|wt test|wl|wi`);
+      // The exported root is the --manifest-root argument exactly as passed, in either flag form.
+      assert.match(r.stdout, new RegExp(`^export TARGET_MANIFEST_ROOT='${wt.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}'$`, "m"));
+      const eqForm = run(["--sh", `--manifest-root=${wt}`]);
+      assert.equal(eqForm.status, 0, eqForm.stderr);
+      assert.equal(eqForm.stdout, r.stdout, "--manifest-root=<dir> resolves the same facts as --manifest-root <dir>");
       // The workspace's own manifest declares no lint gate: the export is the empty string.
       assert.match(run(["--sh"]).stdout, /^export TARGET_VERIFY_LINT=''$/m);
     } finally {
@@ -170,10 +175,21 @@ describe("print-target-facts CLI (INV-7)", () => {
     }
   });
 
+  test("the plain preamble run (no flag, no TARGET_MANIFEST_ROOT) exports TARGET_MANIFEST_ROOT = the workspace", () => {
+    const env = { ...process.env, HYDRA_PROJECT_WORKSPACE: root };
+    delete env.TARGET_MANIFEST_ROOT;
+    const r = spawnSync(process.execPath, ["--experimental-strip-types", script, "--sh"], { encoding: "utf8", env });
+    assert.equal(r.status, 0, r.stderr);
+    const probe = spawnSync("sh", ["-c", `${r.stdout}\nprintf '%s|%s' "$TARGET_MANIFEST_ROOT" "$TARGET_WS"`], { encoding: "utf8" });
+    assert.equal(probe.stdout, `${root}|${root}`);
+  });
+
   test("--manifest-root without a value, or naming a root with no manifest, exits 1 with nothing on stdout", () => {
-    const noValue = run(["--sh", "--manifest-root"]);
-    assert.equal(noValue.status, 1);
-    assert.equal(noValue.stdout, "");
+    for (const args of [["--sh", "--manifest-root"], ["--sh", "--manifest-root="]]) {
+      const noValue = run(args);
+      assert.equal(noValue.status, 1, args.join(" "));
+      assert.equal(noValue.stdout, "", args.join(" "));
+    }
     const missing = run(["--sh", "--manifest-root", join(root, "no-such-worktree")]);
     assert.equal(missing.status, 1);
     assert.equal(missing.stdout, "");

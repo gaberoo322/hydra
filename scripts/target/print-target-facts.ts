@@ -39,11 +39,13 @@
  *
  *   --manifest-root <dir>
  *              read `<dir>/.hydra/manifest.json` instead of the workspace's
- *              copy (precedence over `TARGET_MANIFEST_ROOT`). A Target build
+ *              copy (precedence over `TARGET_MANIFEST_ROOT`; the
+ *              `--manifest-root=<dir>` form is accepted too). A Target build
  *              passes its worktree, so the verify commands and appSubdir come
  *              from the branch it is building while `TARGET_WS` stays the main
- *              checkout. The flag without a value exits 1 with nothing on
- *              stdout (fail closed).
+ *              checkout. `--sh` exports the root as `TARGET_MANIFEST_ROOT`,
+ *              exactly as passed. The flag without a value exits 1 with
+ *              nothing on stdout (fail closed).
  *
  * CAPABILITIES (issue #5498)
  * ---------------------------
@@ -110,6 +112,8 @@ export type TargetFacts = {
   workspace: string;
   serviceName: string;
   webUrl: string;
+  /** The root whose `.hydra/manifest.json` was read, exactly as resolved or passed. */
+  manifestRoot: string;
   manifest:
     | {
         ok: true;
@@ -139,6 +143,7 @@ export function collectTargetFacts(manifestRoot: string = resolveManifestRoot())
     workspace: getTargetWorkspace(),
     serviceName: getTargetServiceName(),
     webUrl: getTargetWebUrl(),
+    manifestRoot,
   };
 
   const loaded = loadManifest(manifestRoot);
@@ -168,8 +173,12 @@ export function collectTargetFacts(manifestRoot: string = resolveManifestRoot())
 /**
  * Render the `--sh` mode output: one `export` statement per fact, plus
  * `TARGET_APP_DIR` (workspace joined with appSubdir),
- * `TARGET_RISK_SURFACE_JSON` (the repo-relative surface, JSON-encoded) and one
- * `TARGET_VERIFY_*` export per manifest verify command.
+ * `TARGET_RISK_SURFACE_JSON` (the repo-relative surface, JSON-encoded), one
+ * `TARGET_VERIFY_*` export per manifest verify command, and
+ * `TARGET_MANIFEST_ROOT` — the root those manifest facts came from, exactly as
+ * passed, so a playbook block can check their provenance with a string
+ * comparison (and the gate scripts, which honour the same variable, read the
+ * same manifest copy).
  * Returns `null` when the manifest failed to resolve — the caller then
  * prints nothing exportable and exits 1 (fail closed).
  */
@@ -192,15 +201,22 @@ export function renderShell(facts: TargetFacts): string | null {
     `export TARGET_VERIFY_TYPECHECK=${shQuote(facts.manifest.verify.typecheck)}`,
     `export TARGET_VERIFY_BUILD=${shQuote(facts.manifest.verify.build)}`,
     `export TARGET_VERIFY_LINT=${shQuote(facts.manifest.verify.lint)}`,
+    `export TARGET_MANIFEST_ROOT=${shQuote(facts.manifestRoot)}`,
   ];
   return lines.join("\n");
 }
 
 /**
- * The `--manifest-root <dir>` value: `undefined` when the flag is absent, `null`
- * when it is present without a value (a usage error the caller fails closed on).
+ * The `--manifest-root <dir>` (or `--manifest-root=<dir>`) value, returned
+ * exactly as passed: `undefined` when the flag is absent, `null` when it is
+ * present without a value (a usage error the caller fails closed on).
  */
 export function parseManifestRootFlag(argv: readonly string[]): string | null | undefined {
+  const eq = argv.find((a) => a.startsWith("--manifest-root="));
+  if (eq !== undefined) {
+    const value = eq.slice("--manifest-root=".length);
+    return value.trim() === "" ? null : value;
+  }
   const at = argv.indexOf("--manifest-root");
   if (at === -1) return undefined;
   const value = argv[at + 1];
