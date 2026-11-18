@@ -19,14 +19,8 @@
     "docs/operator-playbooks/_fragments/hydra-qa-reference.md": {
       "spans": 1
     },
-    "docs/operator-playbooks/_fragments/hydra-target-build-inline-mode.md": {
-      "spans": 2
-    },
     "docs/operator-playbooks/_fragments/hydra-target-build-merge-flow.md": {
-      "spans": 5
-    },
-    "docs/operator-playbooks/_fragments/target-self-isolation-preamble.md": {
-      "spans": 1
+      "spans": 3
     },
     "docs/operator-playbooks/_fragments/thermo-nuclear-proposal-format.md": {
       "spans": 2
@@ -71,7 +65,7 @@
       "spans": 2
     },
     "docs/operator-playbooks/hydra-target-build.md": {
-      "spans": 19
+      "spans": 15
     },
     "docs/operator-playbooks/hydra-target-cleanup.md": {
       "spans": 1

@@ -577,20 +577,24 @@ describe("hydra-target-build playbook wiring (issue #1451, #4526)", () => {
     );
   });
 
-  test("Step 6 verifies lint, typecheck, test AND build from the manifest (#4526 INV-5)", () => {
-    // The verify ladder reads every command from the worktree manifest via
-    // jq — lint is optional (jq '.verify.lint // empty'), the other three
-    // are required — and build is a gate like the rest, not a nice-to-have.
+  test("Step 6 verifies lint, typecheck, test AND build from the manifest, read once through the seam (#4526 INV-5)", () => {
+    // The worktree manifest is read once, by the Step 0.6 re-resolution through
+    // the seam (print-target-facts --manifest-root); the ladder runs its
+    // TARGET_VERIFY_* exports. Lint is optional (an empty export skips the
+    // rung); build is a gate like the rest, not a nice-to-have.
     assert.match(
       PLAYBOOK,
-      /jq -r '\.verify\.lint \/\/ empty' "\$MANIFEST"/,
-      "Step 6 must read the optional lint command from the manifest",
+      /print-target-facts\.ts --sh --manifest-root "\$\{TARGET_WT:\?/,
+      "Step 0.6 must re-resolve the seam against the worktree's own manifest",
     );
-    for (const key of ["test", "typecheck", "build"]) {
-      assert.ok(
-        PLAYBOOK.includes(`jq -r '.verify.${key}' "$MANIFEST"`),
-        `Step 6 must read verify.${key} from the manifest`,
-      );
+    assert.doesNotMatch(PLAYBOOK, /jq -r '\.verify\./, "no playbook block re-reads the manifest's verify block with jq");
+    assert.match(
+      PLAYBOOK,
+      /if \[ -n "\$TARGET_VERIFY_LINT" \]; then eval "\$TARGET_VERIFY_LINT"; fi/,
+      "Step 6 runs the optional lint rung only when the manifest declares it",
+    );
+    for (const key of ["TEST", "TYPECHECK", "BUILD"]) {
+      assert.ok(PLAYBOOK.includes(`eval "$TARGET_VERIFY_${key}"`), `Step 6 must run $TARGET_VERIFY_${key}`);
     }
     // The install decision routes through the mirrored leaf — never a
     // hand-rolled grep in the playbook (#4526 INV-6).
