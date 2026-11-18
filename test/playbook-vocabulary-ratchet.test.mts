@@ -260,7 +260,6 @@ describe("playbook-vocabulary-ratchet: issue-cite, back-compat and shell-lines s
   test("new shapes sit after the original four so existing hit order is unchanged", () => {
     assert.deepEqual(SHAPES.slice(0, 4), ["status", "line-cite", "target", "avoid-term"]);
     assert.deepEqual(SHAPES.slice(4), ["issue-cite", "back-compat", "shell-lines", "symbol-cite", "invariant-cite", "process-meta"]);
-    assert.equal(SHAPES.length, 10);
   });
 
   test("a shape count above its baseline fails like the original shapes", () => {
@@ -383,9 +382,10 @@ describe("playbook-vocabulary-ratchet: the process-meta shape", () => {
           "Lands in a follow-up slice.",
           "In scope of this change.",
           "Beyond this PR's scope.",
+          "Beyond this PR\u2019s scope.",
         ].join("\n"),
       ).map((h) => h.split(" ")[0]),
-      ["1", "2", "3", "4", "5", "6"],
+      ["1", "2", "3", "4", "5", "6", "7"],
     );
   });
 

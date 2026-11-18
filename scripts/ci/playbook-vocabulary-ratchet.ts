@@ -143,9 +143,12 @@ const FIELD_TOKEN_RE = /(?<![\w/*.])\.[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+/g;
 const FILE_EXT_TAIL_RE = /\.(?:ts|mts|tsx|js|mjs|md|json|yml|yaml|py|sh|toml|txt|tap)$/;
 
 /** An invariant id: `INV-` plus one to three digits or one capital letter. */
-const INVARIANT_RE = /\bINV-(?:\d{1,3}|[A-Z])\b/g;
+const INVARIANT_ID = "INV-(?:\\d{1,3}|[A-Z])";
+const INVARIANT_RE = new RegExp(`\\b${INVARIANT_ID}\\b`, "g");
 /** The label that opens a definition bullet (`- **INV-A** — ...`); removed by token before the scan. */
-const INVARIANT_DEFINITION_RE = /^(\s*(?:>\s*)*(?:[-*+]|\d+\.)\s+)\**INV-(?:\d{1,3}|[A-Z])\**(?=\s*[\u2014:-])/;
+const INVARIANT_DEFINITION_RE = new RegExp(
+  `^(\\s*(?:>\\s*)*(?:[-*+]|\\d+\\.)\\s+)\\**${INVARIANT_ID}\\**(?=\\s*[\\u2014:-])`,
+);
 
 /** PR-process meta-commentary (closed list); bare "follow-up" and "this PR" are live procedure and never match. */
 const PROCESS_META_RE = new RegExp(
@@ -155,7 +158,7 @@ const PROCESS_META_RE = new RegExp(
     "\\bin a (?:separate |later )?follow-up (?:PR|issue|slice|change)\\b",
     "\\bout of scope for this (?:PR|change|issue|slice)\\b",
     "\\bin scope (?:of|for) this (?:PR|change|issue|slice)\\b",
-    "\\bthis PR's scope\\b",
+    "\\bthis PR['\u2019]s scope\\b",
   ].join("|"),
   "gi",
 );
