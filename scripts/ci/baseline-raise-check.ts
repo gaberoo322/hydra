@@ -17,7 +17,7 @@
  * advisory step in advisory-checks.yml — never ci.yml (Verifier Core).
  */
 import { execFileSync } from "node:child_process";
-import { appendFileSync, existsSync, readdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { diffBaselineGrowth, type GrowthRow } from "./seam-check-lib.ts";
@@ -165,7 +165,12 @@ function subjectCandidates(row: Row): string[] | null {
     if (fields.length > 1) return fields[1] && looksLikePath(fields[1]) ? [fields[1]] : null;
     return looksLikePath(el) ? [el] : null;
   }
-  const segs = row.path.split("/").filter(Boolean);
+  const allSegs = row.path.split("/").filter(Boolean);
+  // Nested count rows (files/<path>.md/<counter>) end in a counter name, not the
+  // file: trim trailing segments to the last one carrying a file extension.
+  let last = allSegs.length - 1;
+  while (last >= 0 && !/\.[A-Za-z0-9]+$/.test(allSegs[last])) last--;
+  const segs = last >= 0 ? allSegs.slice(0, last + 1) : allSegs;
   const cands: string[] = [];
   for (let i = 0; i < segs.length; i++) {
     const c = segs.slice(i).join("/");
@@ -255,6 +260,16 @@ function gitShow(root: string, sha: string, path: string): string | null {
   }
 }
 
+/** Both sides commit-pinned: head is read from the head commit, never the working tree (a pull_request checkout is the refs/pull/N/merge commit). */
+export function buildFixturePairs(
+  paths: readonly string[],
+  mergeBase: string,
+  head: string,
+  show: (sha: string, path: string) => string | null,
+): FixturePair[] {
+  return paths.map((path) => ({ path, base: show(mergeBase, path), head: show(head, path) }));
+}
+
 export function formatSummary(r: BaselineRaiseResult): string {
   const out = ["### Baseline-raise check (advisory)", ""];
   if (r.findings.length === 0) out.push("No unaccompanied baseline raises.");
@@ -299,11 +314,9 @@ export function main(argv: string[], env: NodeJS.ProcessEnv): number {
     })
       .split("\n")
       .filter(Boolean);
-    const fixtures: FixturePair[] = listBaselineFixtures(root).map((path) => ({
-      path,
-      base: gitShow(root, mergeBase, path),
-      head: existsSync(join(root, path)) ? readFileSync(join(root, path), "utf8") : null,
-    }));
+    const fixtures = buildFixturePairs(listBaselineFixtures(root), mergeBase, head, (sha, path) =>
+      gitShow(root, sha, path),
+    );
     const result = evaluateBaselineRaise({ fixtures, changedFiles, prBody: env.PR_BODY ?? "" });
     for (const f of result.findings) {
       console.log(`::warning title=baseline-raise::${f.fixture} ${f.key} ${f.kind} ${f.from}->${f.to}`);

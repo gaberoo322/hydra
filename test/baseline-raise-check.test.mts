@@ -10,6 +10,7 @@ import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import {
   evaluateBaselineRaise,
+  buildFixturePairs,
   listBaselineFixtures,
   parseBaselineRaiseLines,
   NON_RATCHET_BASELINES,
@@ -145,5 +146,36 @@ describe("listBaselineFixtures inventory", () => {
     assert.deepEqual(listBaselineFixtures(root), expected);
     assert.ok(expected.includes("test/fixtures/suite-count-baseline.json"));
     assert.ok(!expected.includes("test/fixtures/qa-cohort-baseline.json"));
+  });
+});
+
+describe("QA round-1 fixes (#5553)", () => {
+  test("nested count row for a file outside the diff is reported", () => {
+    const row = "files/docs/operator-playbooks/x.md/issue-cite";
+    const r = run({ files: { "docs/operator-playbooks/x.md": { "issue-cite": 5 } } }, { files: { "docs/operator-playbooks/x.md": { "issue-cite": 3 } } }, ["src/other.ts"]);
+    assert.equal(r.ok, false);
+    assert.equal(r.findings[0].key, row);
+    assert.equal(r.findings[0].outOfDiff, true);
+  });
+
+  test("nested count row for a file in the diff keeps passing silently on shrink", () => {
+    const r = run({ files: { "docs/x.md": { "issue-cite": 5 } } }, { files: { "docs/x.md": { "issue-cite": 3 } } }, ["docs/x.md"]);
+    assert.equal(r.ok, true);
+  });
+
+  test("fixture pairs read head from the head commit, not the working tree", () => {
+    const calls: string[] = [];
+    const show = (sha: string, path: string) => {
+      calls.push(`${sha}:${path}`);
+      return sha === "MB" ? "base" : sha === "HEAD1" ? "head" : "working-tree";
+    };
+    const [p] = buildFixturePairs([FX], "MB", "HEAD1", show);
+    assert.deepEqual(p, { path: FX, base: "base", head: "head" });
+    assert.deepEqual(calls, [`MB:${FX}`, `HEAD1:${FX}`]);
+  });
+
+  test("path absent at head commit yields null head (retired fixture)", () => {
+    const [p] = buildFixturePairs([FX], "MB", "H", (sha) => (sha === "MB" ? "{}" : null));
+    assert.equal(p.head, null);
   });
 });
