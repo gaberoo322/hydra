@@ -98,7 +98,7 @@ describe("playbook-vocabulary-ratchet: each banned shape is detected", () => {
 
 describe("playbook-vocabulary-ratchet: the Historical: exemption", () => {
   test("a line marked Historical: is exempt from every shape", () => {
-    const body = "not yet at src/gate.ts:42 in hydra-betting, the Untouchable Core, see #1945, kept for legacy, EMIT_CAP";
+    const body = "not yet at src/gate.ts:42 in hydra-betting, the Untouchable Core, see #1945, kept for legacy, EMIT_CAP, INV-9, tracked as a follow-up";
     assert.deepEqual(
       new Set(findHits(PB, body, AVOID).map((h: { shape: string }) => h.shape)),
       new Set(SHAPES.filter((s: string) => s !== "shell-lines")),
@@ -259,7 +259,7 @@ describe("playbook-vocabulary-ratchet: issue-cite, back-compat and shell-lines s
 
   test("new shapes sit after the original four so existing hit order is unchanged", () => {
     assert.deepEqual(SHAPES.slice(0, 4), ["status", "line-cite", "target", "avoid-term"]);
-    assert.deepEqual(SHAPES.slice(4), ["issue-cite", "back-compat", "shell-lines", "symbol-cite"]);
+    assert.deepEqual(SHAPES.slice(4), ["issue-cite", "back-compat", "shell-lines", "symbol-cite", "invariant-cite", "process-meta"]);
   });
 
   test("a shape count above its baseline fails like the original shapes", () => {
@@ -338,6 +338,64 @@ describe("playbook-vocabulary-ratchet: the symbol-cite shape", () => {
     const found = { [PB]: findHits(PB, "EMIT_CAP", AVOID) };
     const report = formatReport(compareAgainstBaseline(found, { note: "", files: {} }));
     assert.match(report, /symbol-cite fix: attribute the symbol/);
+  });
+});
+
+describe("playbook-vocabulary-ratchet: the invariant-cite shape", () => {
+  const inv = (text: string): string[] => hits(text, "invariant-cite");
+
+  test("counts INV-<1-3 digits> and INV-<capital> in prose", () => {
+    assert.deepEqual(inv("INV-009 is a WARN; see INV-A and INV-12."), ["1 invariant-cite INV-009", "1 invariant-cite INV-A", "1 invariant-cite INV-12"]);
+  });
+
+  test("INV-ABC, INV-1234, INV-a and INVESTOR-1 never match", () => {
+    assert.deepEqual(inv("INV-ABC INV-1234 INV-a INVESTOR-1"), []);
+  });
+
+  test("a definition bullet loses only its label; another id on it still counts", () => {
+    assert.deepEqual(inv("- **INV-H** \u2014 the lever, as INV-007 says."), ["1 invariant-cite INV-007"]);
+    assert.deepEqual(inv("- INV-2: a definition."), []);
+    assert.deepEqual(inv("Prose with **INV-H** \u2014 not a bullet."), ["1 invariant-cite INV-H"]);
+  });
+
+  test("fenced blocks and a Historical: line are skipped", () => {
+    assert.deepEqual(inv(["```text", "INV-009", "```"].join("\n")), []);
+    assert.deepEqual(inv("Historical: INV-009 was here."), []);
+  });
+
+  test("an overrun adds the shape-specific fix line", () => {
+    const found = { [PB]: findHits(PB, "INV-009", AVOID) };
+    assert.match(formatReport(compareAgainstBaseline(found, { note: "", files: {} })), /invariant-cite fix: name the invariant's home/);
+  });
+});
+
+describe("playbook-vocabulary-ratchet: the process-meta shape", () => {
+  const meta = (text: string): string[] => hits(text, "process-meta");
+
+  test("counts the closed phrase list, case-insensitively", () => {
+    assert.deepEqual(
+      meta(
+        [
+          "Tracked as a separate follow-up.",
+          "This is tracked separately.",
+          "Out of scope for this PR.",
+          "Lands in a follow-up slice.",
+          "In scope of this change.",
+          "Beyond this PR's scope.",
+          "Beyond this PR\u2019s scope.",
+        ].join("\n"),
+      ).map((h) => h.split(" ")[0]),
+      ["1", "2", "3", "4", "5", "6", "7"],
+    );
+  });
+
+  test("bare follow-up, this PR, separate PR and out of scope for this session are not hits", () => {
+    assert.deepEqual(meta("File follow-ups for every low. The issue this PR closes. File a separate PR. Out of scope for this session."), []);
+  });
+
+  test("fenced blocks and a Historical: line are skipped", () => {
+    assert.deepEqual(meta(["```text", "tracked as a follow-up", "```"].join("\n")), []);
+    assert.deepEqual(meta("Historical: tracked as a follow-up."), []);
   });
 });
 

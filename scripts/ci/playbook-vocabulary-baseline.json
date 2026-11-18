@@ -4,14 +4,16 @@
     "docs/operator-playbooks/_fragments/checks-fetch.md": {
       "issue-cite": 5,
       "back-compat": 1,
-      "symbol-cite": 6
+      "symbol-cite": 6,
+      "invariant-cite": 4
     },
     "docs/operator-playbooks/_fragments/grounding-tests-deposit.md": {
       "issue-cite": 3,
       "shell-lines": 2
     },
     "docs/operator-playbooks/_fragments/hydra-autopilot-class-wiring.md": {
-      "symbol-cite": 5
+      "symbol-cite": 5,
+      "invariant-cite": 2
     },
     "docs/operator-playbooks/_fragments/hydra-autopilot-dispatch-reference.md": {
       "issue-cite": 1,
@@ -23,7 +25,8 @@
       "symbol-cite": 9
     },
     "docs/operator-playbooks/_fragments/hydra-autopilot-ops-reference.md": {
-      "symbol-cite": 23
+      "symbol-cite": 23,
+      "invariant-cite": 1
     },
     "docs/operator-playbooks/_fragments/hydra-autopilot-phase6-ops.md": {
       "shell-lines": 9,
@@ -32,7 +35,8 @@
     "docs/operator-playbooks/_fragments/hydra-dev-child-flow.md": {
       "issue-cite": 8,
       "shell-lines": 100,
-      "symbol-cite": 3
+      "symbol-cite": 3,
+      "invariant-cite": 4
     },
     "docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md": {
       "issue-cite": 1,
@@ -41,7 +45,8 @@
     "docs/operator-playbooks/_fragments/hydra-qa-reference.md": {
       "status": 1,
       "shell-lines": 223,
-      "symbol-cite": 16
+      "symbol-cite": 16,
+      "invariant-cite": 3
     },
     "docs/operator-playbooks/_fragments/hydra-target-build-anchor-preflight.md": {
       "shell-lines": 161,
@@ -81,7 +86,8 @@
       "issue-cite": 130,
       "back-compat": 6,
       "shell-lines": 54,
-      "symbol-cite": 17
+      "symbol-cite": 17,
+      "invariant-cite": 7
     },
     "docs/operator-playbooks/hydra-branch-prune.md": {
       "shell-lines": 2,
@@ -143,7 +149,8 @@
     "docs/operator-playbooks/hydra-qa.md": {
       "issue-cite": 4,
       "shell-lines": 87,
-      "symbol-cite": 43
+      "symbol-cite": 43,
+      "invariant-cite": 2
     },
     "docs/operator-playbooks/hydra-research.md": {
       "status": 2,
@@ -184,7 +191,8 @@
     },
     "docs/operator-playbooks/hydra-target-incident.md": {
       "issue-cite": 4,
-      "shell-lines": 107
+      "shell-lines": 107,
+      "invariant-cite": 1
     },
     "docs/operator-playbooks/hydra-target-qa.md": {
       "issue-cite": 31,
@@ -194,12 +202,14 @@
     },
     "docs/operator-playbooks/hydra-target-research.md": {
       "issue-cite": 6,
-      "shell-lines": 101
+      "shell-lines": 101,
+      "invariant-cite": 2
     },
     "docs/operator-playbooks/hydra-target-retro.md": {
       "issue-cite": 2,
       "shell-lines": 27,
-      "symbol-cite": 3
+      "symbol-cite": 3,
+      "process-meta": 1
     },
     "docs/operator-playbooks/hydra-target-sweep.md": {
       "issue-cite": 6,
@@ -208,7 +218,8 @@
     },
     "docs/operator-playbooks/hydra-tickets.md": {
       "issue-cite": 4,
-      "symbol-cite": 6
+      "symbol-cite": 6,
+      "invariant-cite": 1
     },
     "docs/operator-playbooks/hydra-tool-scout.md": {
       "shell-lines": 1,
