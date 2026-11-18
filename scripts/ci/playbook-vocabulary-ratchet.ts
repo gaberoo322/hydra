@@ -11,7 +11,7 @@
  * STD-PLAYBOOK-CURRENT-BEHAVIOUR, STD-PLAYBOOK-TARGET-SEAM and
  * STD-PLAYBOOK-LOGIC-IN-SCRIPTS.
  *
- * Seven banned shapes:
+ * Eight banned shapes:
  *
  *   status      a status or history phrase: "not yet", "currently", "formerly",
  *               "no longer", "used to", "until #N", a rollout label
@@ -26,6 +26,10 @@
  *               "retained", "previously", "back-compat", "Phase B"
  *   shell-lines the lines inside fenced shell blocks (bash, sh, zsh, shell),
  *               one hit per block carrying its line count
+ *   symbol-cite a code symbol copied into prose: a SCREAMING_SNAKE constant, a
+ *               camelCase() call or a .dotted.field path (not in a fenced
+ *               block; a `$VAR`/`${VAR}` shell read, a filename or glob, and a
+ *               symbol tied to its file by an attribution phrase are exempt)
  *
  * A line that starts with `Historical:` (the existing playbook provenance
  * convention, HISTORICAL_EXEMPT_RE) is exempt from every shape. The exemption
@@ -45,7 +49,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { InvalidArgumentError } from "../../src/errors.ts";
-import { listPlaybooks } from "./playbook-reference-check.ts";
+import { attributedSymbols, listPlaybooks } from "./playbook-reference-check.ts";
 import { REPO_ROOT, formatStaleAdvice, isCliEntrypoint, loadJsonBaseline, writeJsonBaseline } from "./seam-check-lib.ts";
 import { HISTORICAL_EXEMPT_RE, classifyFile } from "./target-coupling-check.ts";
 
@@ -53,7 +57,7 @@ export const BASELINE_REL = "scripts/ci/playbook-vocabulary-baseline.json";
 export const STANDARD_REL = "CODING_STANDARDS.md";
 export const WRITE_BASELINE_CMD = "npx tsx scripts/ci/playbook-vocabulary-ratchet.ts --write-baseline";
 
-export const SHAPES = ["status", "line-cite", "target", "avoid-term", "issue-cite", "back-compat", "shell-lines"] as const;
+export const SHAPES = ["status", "line-cite", "target", "avoid-term", "issue-cite", "back-compat", "shell-lines", "symbol-cite"] as const;
 export type Shape = (typeof SHAPES)[number];
 
 /** One banned-shape occurrence. `line` is 1-based. */
@@ -121,6 +125,16 @@ const TEMPLATE_TOKEN_RE = /(?:Closes|Fixes|Resolves|Refs?|Part of|Blocked by|Par
 /** Retention and back-compat phrasing (closed list). */
 const BACK_COMPAT_RE = /\bkept for\b|\blegacy\b|\bretained\b|\bpreviously\b|\bback-compat(?:ible|ibility)?\b/gi;
 const PHASE_RE = /\b[Pp]hase [A-Z]\b/g;
+
+/**
+ * symbol-cite token forms. (i) a constant of 2+ segments, not behind `$` or `{`
+ * (a shell variable read) and not a filename stem; (ii) a camelCase call; (iii) a
+ * `.dotted.field` path of 2+ segments, not a filename or glob.
+ */
+const CONST_TOKEN_RE = /(?<![\w${])[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+(?!\w)(?!\.[a-z])/g;
+const CALL_TOKEN_RE = /(?<!\w)[a-z][a-zA-Z0-9]*[A-Z][a-zA-Z0-9]*\(\)/g;
+const FIELD_TOKEN_RE = /(?<![\w/*.])\.[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+/g;
+const FILE_EXT_TAIL_RE = /\.(?:ts|mts|tsx|js|mjs|md|json|yml|yaml|py|sh|toml|txt|tap)$/;
 
 const SHELL_INFO = new Set(["bash", "sh", "zsh", "shell"]);
 
@@ -226,6 +240,15 @@ export function findHits(file: string, text: string, avoidTerms: readonly string
       scan("issue-cite", ISSUE_CITE_RE, line.replace(TEMPLATE_TOKEN_RE, ""));
       scan("back-compat", BACK_COMPAT_RE);
       scan("back-compat", PHASE_RE);
+      const attributed = attributedSymbols(line);
+      for (const re of [CONST_TOKEN_RE, CALL_TOKEN_RE, FIELD_TOKEN_RE]) {
+        for (const m of line.matchAll(re)) {
+          const tok = m[0];
+          if (re === FIELD_TOKEN_RE && FILE_EXT_TAIL_RE.test(tok)) continue;
+          if (attributed.has(tok)) continue;
+          hits.push({ shape: "symbol-cite", line: i + 1, phrase: tok });
+        }
+      }
     }
   });
   closeFence(); // an unclosed fence runs to the end of the file
@@ -337,6 +360,11 @@ export function formatReport(cmp: Comparison): string {
     for (const d of cmp.exceeded) {
       out.push(`  ${d.file}: ${d.shape} count ${d.count} > baseline ${d.baseline}`);
       for (const h of d.hits) out.push(`    ${d.file}:${h.line}  ${h.shape}  "${h.phrase}"`);
+    }
+    if (cmp.exceeded.some((d) => d.shape === "symbol-cite")) {
+      out.push(
+        "symbol-cite fix: attribute the symbol to its file with an attribution phrase (so playbook-reference-check resolves it), or name the fact's home without copying the symbol.",
+      );
     }
     out.push(
       `Fix: rewrite the sentence so it states current behaviour and points at the fact's home (${STANDARD_REL}, STD-PLAYBOOK-*). ` +
