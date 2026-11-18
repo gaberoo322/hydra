@@ -314,6 +314,7 @@ export function main(argv: string[], env: NodeJS.ProcessEnv): number {
     console.log(JSON.stringify(result));
     return strict && !result.ok ? 1 : 0;
   } catch (err) {
+    /* intentional: advisory contract (INV-7) — surface a ::warning:: and exit 0, never fail the PR */
     console.log(`::warning title=baseline-raise::check could not run: ${err instanceof Error ? err.message : String(err)}`);
     return 0;
   }
