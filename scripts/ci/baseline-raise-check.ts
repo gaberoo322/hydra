@@ -285,6 +285,14 @@ export function main(argv: string[], env: NodeJS.ProcessEnv): number {
   }
   const root = resolve(take("--root") ?? ".");
   try {
+    // Compare against the merge-base so a master that advanced after the PR
+    // branched never shows up as a spurious raise (matches the `...` diff).
+    let mergeBase = base;
+    try {
+      mergeBase = execFileSync("git", ["merge-base", base, head], { cwd: root, encoding: "utf8" }).trim() || base;
+    } catch {
+      /* intentional: no merge-base (shallow clone) — fall back to the base ref as given */
+    }
     const changedFiles = execFileSync("git", ["diff", "--name-only", `${base}...${head}`], {
       cwd: root,
       encoding: "utf8",
@@ -293,7 +301,7 @@ export function main(argv: string[], env: NodeJS.ProcessEnv): number {
       .filter(Boolean);
     const fixtures: FixturePair[] = listBaselineFixtures(root).map((path) => ({
       path,
-      base: gitShow(root, base, path),
+      base: gitShow(root, mergeBase, path),
       head: existsSync(join(root, path)) ? readFileSync(join(root, path), "utf8") : null,
     }));
     const result = evaluateBaselineRaise({ fixtures, changedFiles, prBody: env.PR_BODY ?? "" });
