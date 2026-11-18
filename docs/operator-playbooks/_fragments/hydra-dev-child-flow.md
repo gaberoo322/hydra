@@ -476,7 +476,7 @@ CLAUDE.md "Fail loud": every `catch` either logs with context or is annotated
 `logger.error` / `logger.warn` / `process.stderr.write`), rethrows, nor carries
 a comment containing `intentional`. Under `src/`, `fail-loud-catch-src` applies
 instead (`console.*` is not a logs branch) and `logger-seam` flags any `console.*`
-call (STD-LOG-PINO-SEAM; `scripts/` and `src/index.ts` exempt). Run it as child-step 7a, over ONLY the
+call (STD-LOG-PINO-SEAM; `scripts/` and `src/index.ts` exempt). Run it at the fail-loud lint step, over ONLY the
 files this PR touches — existing hits elsewhere on master are advisory and not
 yours to fix:
 
