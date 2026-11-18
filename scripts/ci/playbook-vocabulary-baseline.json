@@ -20,17 +20,15 @@
       "shell-lines": 9
     },
     "docs/operator-playbooks/_fragments/hydra-dev-child-flow.md": {
-      "issue-cite": 47,
+      "issue-cite": 8,
       "shell-lines": 100
     },
     "docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md": {
-      "target": 2,
-      "issue-cite": 26,
-      "shell-lines": 78
+      "issue-cite": 1,
+      "shell-lines": 76
     },
     "docs/operator-playbooks/_fragments/hydra-qa-reference.md": {
-      "status": 6,
-      "issue-cite": 29,
+      "status": 1,
       "shell-lines": 223
     },
     "docs/operator-playbooks/_fragments/hydra-target-build-anchor-preflight.md": {
@@ -81,9 +79,7 @@
       "shell-lines": 6
     },
     "docs/operator-playbooks/hydra-dev.md": {
-      "status": 2,
-      "issue-cite": 13,
-      "shell-lines": 35
+      "shell-lines": 29
     },
     "docs/operator-playbooks/hydra-digest.md": {
       "shell-lines": 2
@@ -103,10 +99,7 @@
       "shell-lines": 5
     },
     "docs/operator-playbooks/hydra-grill.md": {
-      "target": 7,
-      "issue-cite": 7,
-      "back-compat": 1,
-      "shell-lines": 97
+      "shell-lines": 96
     },
     "docs/operator-playbooks/hydra-hitl-grill.md": {
       "issue-cite": 1,
@@ -125,9 +118,7 @@
       "shell-lines": 82
     },
     "docs/operator-playbooks/hydra-qa.md": {
-      "status": 5,
-      "line-cite": 1,
-      "issue-cite": 47,
+      "issue-cite": 4,
       "shell-lines": 87
     },
     "docs/operator-playbooks/hydra-research.md": {

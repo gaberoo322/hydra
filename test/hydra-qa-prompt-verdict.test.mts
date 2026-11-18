@@ -132,12 +132,14 @@ describe("hydra-qa playbook — spawn step branches on change shape (issue #4733
     assert.ok(playbook.includes("fanout.reviewers"), "playbook must carry the decided reviewer list");
   });
 
-  test("step 7 has a single-reviewer branch; T4 and code PRs keep the full fan-out", () => {
+  test("step 7 has a single-reviewer branch; the fan-out mode comes from the preflight, never a tier literal in the playbook", () => {
     assert.match(playbook, /#### 7c\. [^\n]*single reviewer/i);
-    assert.ok(
-      playbook.includes("A T4 PR or a `code` PR always gets the full fan-out"),
-      "playbook must pin the T4/code full-fan-out rule",
-    );
+    assert.doesNotMatch(playbook, /A T4 PR or a .code. PR always gets the full fan-out/, "playbook must not restate the tier-keyed fan-out rule (INV-3)");
+    // The rule itself lives in the engine, not the prose: T4 (even docs-only) and T3 code are adversarial.
+    assert.equal(decideReviewerFanout(4, ["docs/x.md"]).mode, "adversarial");
+    assert.equal(decideReviewerFanout(3, ["src/x.ts"]).mode, "adversarial");
+    // Sibling shape that must keep its old verdict: T2 code stays the standard pair.
+    assert.equal(decideReviewerFanout(2, ["src/x.ts"]).mode, "standard");
   });
 
   test("fan-out fallback keeps the tier reviewers; diffs use --no-renames; the prompt-path list is the engine's", () => {
