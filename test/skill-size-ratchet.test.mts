@@ -5,8 +5,10 @@
  * description cap (effective cap = max(50, baselined count)).
  *
  * Feeds synthetic playbook strings and synthetic baselines through the
- * exported pure functions — no filesystem walk, no process.exit (the script
- * only runs main() as a CLI entrypoint).
+ * exported pure functions — no process.exit (the script only runs main() as
+ * a CLI entrypoint). The last case runs the real ratchet over the real
+ * playbooks and the committed baseline: that is the gate, enforced by the
+ * required `test` job (#5631).
  */
 
 import { test, describe } from "node:test";
@@ -18,6 +20,8 @@ const {
   effectiveDescriptionCap,
   compareAgainstBaseline,
   formatShrinkHints,
+  measureSkillSources,
+  loadBaseline,
   DESCRIPTION_WORD_CAP,
 } = await import("../scripts/ci/skill-size-ratchet.ts");
 
@@ -242,5 +246,13 @@ describe("skill-size shrink hints (#5552)", () => {
     assert.deepEqual(lines, [
       "[skill-size-ratchet] hint: diff base unresolvable (origin/master: gone) — shrink hints skipped",
     ]);
+  });
+});
+
+describe("skill-size-ratchet: the real playbooks", () => {
+  test("no playbook or fragment grows past its baselined row, and every description is within cap", async () => {
+    const { violations } = compareAgainstBaseline(await measureSkillSources(), await loadBaseline());
+    const report = violations.map((v: { rule: string; message: string }) => `[${v.rule}] ${v.message}`).join("\n");
+    assert.equal(report, "", `\n${report}\n`);
   });
 });
