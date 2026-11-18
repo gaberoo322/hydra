@@ -176,7 +176,6 @@
     "test/hydra-review-option-table.test.mts": "binds or dials a fixed port",
     "test/hydra-review-stalled-pr-bucket.test.mts": "binds or dials a fixed port",
     "test/hydra-target-wire-or-retire-emit.test.mts": "uses a fixed /tmp path (clobbers under concurrency)",
-    "test/mutation-runner-classification.test.mts": "names a script (leaker.sh) the scan cannot resolve - treated as unsafe",
     "test/operator-actions-affordance.test.mts": "binds or dials a fixed port",
     "test/post-merge-health.test.mts": "uses a fixed /tmp path (clobbers under concurrency)",
     "test/protected-paths-guard.test.mts": "runs `git worktree` operations against a shared repo (index.lock contention)",
