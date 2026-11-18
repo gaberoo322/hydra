@@ -72,7 +72,7 @@ If either fails, stop. Do not delegate.
 
 ## Step 2: Delegate — or declare inline mode
 
-**Mode detection (mandatory):** make exactly ONE `ToolSearch` query (`+agent spawn task`) against the deferred-tool list, then commit to a mode.
+**Mode detection (mandatory):** make exactly ONE `ToolSearch` query (`+agent spawn task`) against the deferred-tool list, then commit to a mode. Skip the query when an `Agent`/`Task` spawn tool is already in the loaded tool list; never retry it and never assume availability either way.
 
 **Delegated mode (spawn tool available):** spawn the child with
 `Agent(run_in_background=true, ...)` and the prompt below, passing `$task` if
@@ -88,7 +88,7 @@ terminal state, relay its outcome: the child returns ONLY a summary table,
 
 **Inline mode (no spawn tool):** permitted ONLY under this explicit contract — never as a silent fallback. Do NOT abort: fail-loud here zeros Target throughput.
 
-> **CONTEXT POINTER:** if you are in inline mode, read `hydra-target-build-inline-mode.md` (sibling of this SKILL.md) for the full contract: declare loudly, friction-log, apply context-budget discipline, cap complexity at standard.
+> **CONTEXT POINTER:** in inline mode, read `hydra-target-build-inline-mode.md` (sibling of this SKILL.md) before Step 0 for the contract: declare loudly, friction-log, apply context-budget discipline, cap complexity at standard.
 
 ---
 
@@ -126,36 +126,32 @@ Symmetric with how `hydra-dev` worktree-isolates `~/hydra`. The target repo (`$T
 
 @include _fragments/target-self-isolation-preamble.md
 
-Then, still inside `$TARGET_WT`:
+Then, still inside `$TARGET_WT`, mirror the gate scripts and re-resolve the seam against the worktree's own manifest:
 
 ```bash
-# No install step here: node_modules AND `npm run <script>`
-# binaries resolve by the ancestor walk above. A change that adds/bumps a
-# dependency gets a LOCAL `npm ci` in Step 6 (Verify), only when the diff
-# touches package.json/package-lock.json. appSubdir comes from the Target
-# Manifest (verify.appSubdir, ADR-0026) — not
-# hardcoded — because later steps `cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}/$APP_SUBDIR"`. Re-read it
-# from the worktree's own manifest copy (not just $TARGET_APP_SUBDIR from the
-# seam preamble) since the worktree is the canonical checkout for this cycle.
-APP_SUBDIR=$(jq -r '.verify.appSubdir' "$TARGET_WT/.hydra/manifest.json")
-
-# Mirror the Target SDLC gate scripts NEXT TO the worktree. The gate scripts (mutation-check /
-# target-design-concept / post-merge-health / verify-install-decision) and
-# their small src closure live ONLY in this orchestrator repo and import
-# `../../src/…`, so they do not exist in the target checkout. The sync copies
-# them into the SIBLING scratch dir `${TARGET_WT}.hydra-gate` (git-excluded,
-# so it never pollutes any Target diff) so Steps 4.5 / 6 / 6.6 / 8.6 run the
-# REAL gate — never from ~/hydra, never by hand-rolling the risk-critical
-# classification. The sibling location is load-bearing: INSIDE the
-# worktree the mirror sat in the cwd of every Target tool, and CSB's
-# `eslint .` descended into it (6 `no-explicit-any` failures before any
-# change was made); OUTSIDE it — but still under
-# `$TARGET_APP_DIR/.worktrees/` — no Target tool can reach the mirror, while
-# the mirror's bare `zod` import keeps resolving through the ancestor
-# node_modules walk (no symlink).
+# No install step here: node_modules AND `npm run <script>` binaries resolve
+# by the ancestor walk above; Step 6 decides whether a dependency change needs
+# a worktree-local install.
+#
+# Mirror the Target SDLC gate scripts (mutation-check / target-design-concept /
+# post-merge-health / verify-install-decision and their src closure, which live
+# only in this orchestrator repo) into the SIBLING scratch dir
+# `${TARGET_WT}.hydra-gate`. Outside the worktree no Target tool (an `eslint .`,
+# a test glob) can reach the mirror; under `$TARGET_APP_DIR/.worktrees/` its
+# bare `zod` import still resolves through the ancestor node_modules walk.
 bash ~/hydra/scripts/sync-target-gate.sh "$TARGET_WT"
 # Every later step references the gate dir through $HYDRA_GATE_DIR only.
 export HYDRA_GATE_DIR="${TARGET_WT}.hydra-gate"
+```
+
+**Manifest re-resolution.** The worktree is this cycle's canonical checkout, so the verify commands and `appSubdir` come from its own `.hydra/manifest.json` (ADR-0026), read once through the seam. Steps 1, 4, 6 and 6.6 read `$TARGET_APP_SUBDIR` and `$TARGET_VERIFY_TEST` / `_TYPECHECK` / `_BUILD` / `_LINT` / `_INSTALL` from it; `$TARGET_WS` and `$TARGET_APP_DIR` stay the main checkout. Run this block again first in any later Bash call that reads those variables:
+
+```bash
+# Fail closed: a missing or malformed manifest prints nothing exportable and
+# exits 1, so the build aborts instead of guessing a verify command.
+_target_seam_sh=$(cd "$HOME/hydra" && npx tsx scripts/target/print-target-facts.ts --sh --manifest-root "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}") || { echo "ABORT: [target-manifest] no valid manifest in $TARGET_WT (see ADR-0026)" >&2; exit 1; }
+eval "$_target_seam_sh"
+unset _target_seam_sh
 ```
 
 `scripts/branch-prune.sh` sweeps stale worktrees under `$TARGET_APP_DIR/.worktrees/*`. Step 8.5 removes the worktree and the `$HYDRA_GATE_DIR` sibling on success (the `pmh-baseline.json` + build logs live there, never under `$TARGET_WT`); leaking either is acceptable only on a crash.
@@ -189,7 +185,7 @@ RESUME_BRANCH="$resume_branch"    # that PR's head.ref
 - **Step 3.5's scope contract and Step 4.5's design-concept artifact** — the original build already declared scope and (if risk-critical) captured its artifact; a resume fixes what the QA verdict named, it does not re-plan. The QA verdict's findings ARE the scope.
 - **Steps 7–10's PR creation and merge** — see the push contract below: NEVER `gh pr create` (the PR is `$RESUME_PR`), never a merge from the build, no changelog fragment (the original PR carries it).
 
-**What still runs, unchanged:** Step 0.0 (seam), Step 0 (cycle register), **Step 0.6 with one override** — export `TARGET_WT_BASE="origin/$RESUME_BRANCH"` before including the self-isolation fragment, so the worktree is cut from the PR's own head (the fragment already fetches `origin --prune` before `worktree add`, so the resume branch is present; the worktree branch name stays `feature/${CYCLE_ID}` — only the BASE moves). Step 0.5 (drift check), Step 1 (ground), Step 6 (verify ladder from the Target Manifest — run the manifest's declared verify commands, whatever they name), and Step 8.5 (worktree cleanup on success).
+**What still runs, unchanged:** Step 0.0 (seam), Step 0 (cycle register), **Step 0.6 with one override** — export `TARGET_WT_BASE="origin/$RESUME_BRANCH"` before including the self-isolation fragment, so the worktree is cut from the PR's own head (the fragment already fetches `origin --prune` before `worktree add`, so the resume branch is present; the worktree branch name stays `feature/${CYCLE_ID}` — only the BASE moves). Step 0.5 (drift check), Step 1 (ground), Step 6 (the verify ladder), and, on success, Step 8.5 worktree cleanup as written in `hydra-target-build-merge-flow.md`.
 
 **The work, bounded by the decision:** read the LATEST `hydra-target-qa` verdict comment on PR `$RESUME_PR` (the FAIL findings) and the operator's fix-forward decision on issue `$RESUME_ISSUE` (the resolution that stamped `needs-dev-resume`). Fix ONLY what those two name — no drive-by refactors, no scope creep beyond the verdict's findings list. Then verify (Step 6) and commit.
 
@@ -240,22 +236,18 @@ gh issue edit "$RESUME_ISSUE" --repo "$TARGET_GH_REPO" \
 
 ### 1. Ground (read-only, in the manifest's appSubdir)
 
-**Verify commands come from the Target Manifest, NOT hardcoded**. Read `verify.test` / `verify.typecheck` / `verify.appSubdir` from `<TARGET_WT>/.hydra/manifest.json` and run *those* — never a hardcoded `npm test`. Some targets alias a bare `npm test` to a count-gate + a handful of sentinels rather than the real suite (a documented failure mode on a prior Target — an agent that reads its "X passed" footer as a green suite can ship a change that breaks untested modules), so grounding must run the manifest's DECLARED `verify.test` command, whatever it names. A missing/malformed manifest is **fail-closed**: abort with the `[target-manifest]` error, do NOT default to `npm test`.
+**Verify commands come from the Target Manifest, NOT hardcoded**: run `$TARGET_VERIFY_TEST` and `$TARGET_VERIFY_TYPECHECK` from the Step 0.6 manifest re-resolution — never a hardcoded `npm test`. Some targets alias a bare `npm test` to a count-gate + a handful of sentinels rather than the real suite (an agent that reads its "X passed" footer as a green suite can ship a change that breaks untested modules), so grounding runs the manifest's DECLARED test command, whatever it names. A missing/malformed manifest is **fail-closed**: the re-resolution aborts with the `[target-manifest]` error; never default to `npm test`.
 
-Ground runs `verify.test` + `verify.typecheck` ONLY — deliberately no build and no lint here: the build is the most expensive command in the ladder and grounds no decision at this stage; both build and lint run in Step 6 against the actual diff, in the worktree.
+Ground runs the test and typecheck commands ONLY — deliberately no build and no lint here: the build is the most expensive command in the ladder and grounds no decision at this stage; both build and lint run in Step 6 against the actual diff, in the worktree.
 
 ```bash
-# Source the verify block from the Target Manifest (fail-closed on absence).
-MANIFEST="$TARGET_WT/.hydra/manifest.json"
-[ -f "$MANIFEST" ] || { echo "ABORT: [target-manifest] no manifest at $MANIFEST (see ADR-0026)" >&2; exit 1; }
-APP_SUBDIR=$(jq -r '.verify.appSubdir' "$MANIFEST")
-TEST_CMD=$(jq -r '.verify.test' "$MANIFEST")
-TYPECHECK_CMD=$(jq -r '.verify.typecheck' "$MANIFEST")
-cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}/$APP_SUBDIR"      # appSubdir='' => repo root
-# eval word-splits the multi-word manifest commands under zsh (a bare `$TEST_CMD`
+# $TARGET_APP_SUBDIR / $TARGET_VERIFY_* come from the Step 0.6 manifest re-resolution.
+: "${TARGET_VERIFY_TEST:?unset - re-run the Step 0.6 manifest re-resolution in this Bash call}"
+cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}/$TARGET_APP_SUBDIR"      # appSubdir='' => repo root
+# eval word-splits the multi-word manifest commands under zsh (a bare `$TARGET_VERIFY_TEST`
 # is taken as one command word — `command not found: npm run <script>`). Portable.
-eval "$TEST_CMD"                  # the manifest's declared REAL suite, NEVER assume bare `npm test` is it
-eval "$TYPECHECK_CMD"
+eval "$TARGET_VERIFY_TEST"        # the manifest's declared REAL suite, NEVER assume bare `npm test` is it
+eval "$TARGET_VERIFY_TYPECHECK"
 git log --oneline -5
 git status --short
 ```
@@ -343,15 +335,16 @@ The issue BODY is not the whole scope contract. An operator decision posted as a
 **comment** — the hydra-review convention when routing a `ready-for-human`
 anchor back to `ready-for-agent` — **overrides the body's option list wherever
 they conflict**; the body stays authoritative for everything the decision does
-not address. CSB #119 / PR #193 QA-FAILed exactly this way: the operator's
-comment excluded moving two workers into the Target's `<target>/src/bin/`, the build read only the
-body's "wire vs retire" options, did the excluded move, and landed both workers
-on the risk surface. So for EVERY board-picked anchor (`ANCHOR_NUM` set) —
+not address. A build that reads only the body's options can carry out a move the
+operator's comment excluded and land it on the risk surface. So for EVERY
+board-picked anchor (`ANCHOR_NUM` set) —
 safe-path builds included; this read is NOT gated on Step 4.5's risk-critical
 capture — read the comment thread NOW, before scope self-declaration (3.5):
 
 ```bash
 OPERATOR_DECISION_JSON=""
+# The design-concept CLI in the gate mirror (Step 0.6); Step 4.5 defines the same path.
+DC_CLI="${HYDRA_GATE_DIR:-}/scripts/target/target-design-concept.ts"
 if [ -n "${ANCHOR_NUM:-}" ]; then
   # REST only — never `gh --json` / GraphQL (ADR-0031 Decision 6). The thread
   # travels via a temp FILE / stdin, never argv (a long thread would blow ARG_MAX).
@@ -359,7 +352,7 @@ if [ -n "${ANCHOR_NUM:-}" ]; then
   if gh api --paginate "repos/$TARGET_GH_REPO/issues/$ANCHOR_NUM/comments" >"$OD_TMP" 2>/dev/null; then
     # --paginate concatenates pages as adjacent JSON arrays; jq -s add merges
     # them into one. The pure selector tolerates the raw REST objects as-is.
-    if jq -s 'add' "$OD_TMP" >"$OD_TMP.merged" 2>/dev/null && [ -f "${HYDRA_GATE_DIR:-}/scripts/target/target-design-concept.ts" ] && OD_OUT=$(node --experimental-strip-types "${HYDRA_GATE_DIR}/scripts/target/target-design-concept.ts" select-decision <"$OD_TMP.merged"); then
+    if jq -s 'add' "$OD_TMP" >"$OD_TMP.merged" 2>/dev/null && [ -f "$DC_CLI" ] && OD_OUT=$(node --experimental-strip-types "$DC_CLI" select-decision <"$OD_TMP.merged"); then
       OPERATOR_DECISION_JSON="$OD_OUT"
     else
       echo "hydra-target-build: WARN: operator-decision selection FAILED for ${ANCHOR_REF:-issue-$ANCHOR_NUM} (jq/node error after a successful read) — proceeding on the issue body alone (fail-open)" >&2
@@ -383,9 +376,9 @@ pinned by `test/target-design-concept.test.mts` only insofar as Step 3.3
 precedes 3.5 and streams via stdin. Risk-critical builds additionally get the
 verbatim `operatorDecision` field (Step 4.5), which IS tested.
 
-The selector runs through the `target-design-concept.ts` CLI at an absolute
-path under `$HYDRA_GATE_DIR` (set by Step 0.6) — never from `~/hydra`, never
-cwd-relative. A missing mirror falls into the fail-open WARN arm above.
+The selector runs through the `$DC_CLI` path under `$HYDRA_GATE_DIR` (set by
+Step 0.6) — never from `~/hydra`, never cwd-relative. A missing mirror falls
+into the fail-open WARN arm above.
 
 A comment is a decision by **CONTENT MARKER, never by author**: its body
 contains "Operator decision" (case-insensitive — the hydra-review convention
@@ -448,10 +441,11 @@ Challenge:
 3. Scope bounded? >5 files → reject.
 4. Verification hard? (shell commands, not "review")
 5. Smallest possible move?
-6. Before deleting, prove the module is truly orphaned — but a **single-line `from`-grep is a false-negative trap** (retro cue `multiline-import-misses-importer-grep`, recurrence 4): a live consumer whose `import { … }` list spans several lines puts the symbol and the `from "./x"` clause on *different* lines, so a `from.*['"].*<name>` regex matches neither line. It also misses relative + `.ts`-suffixed specifiers (a path-fragment regex like `arbitrage/mod` skips `./mod` and `./mod.ts`). Verify by **bare basename** across the Target code root (`$TARGET_WT/$APP_SUBDIR/src` — the manifest's `appSubdir`, which may be empty, i.e. the repo root), then let the compiler be the proof:
+6. Before deleting, prove the module is truly orphaned — but a **single-line `from`-grep is a false-negative trap** (retro cue `multiline-import-misses-importer-grep`, recurrence 4): a live consumer whose `import { … }` list spans several lines puts the symbol and the `from "./x"` clause on *different* lines, so a `from.*['"].*<name>` regex matches neither line. It also misses relative + `.ts`-suffixed specifiers (a path-fragment regex like `arbitrage/mod` skips `./mod` and `./mod.ts`). Verify by **bare basename** across the Target code root (`$TARGET_WT/$TARGET_APP_SUBDIR/src` — the manifest's `appSubdir`, which may be empty, i.e. the repo root), then let the compiler be the proof:
    ```bash
-   grep -rn "<basename-without-ext>" "$TARGET_WT/$APP_SUBDIR/src"   # bare name, every line — necessary-but-not-sufficient
-   eval "$TYPECHECK_CMD"   # the manifest's verify.typecheck — red ⇒ NOT orphaned
+   # $TARGET_APP_SUBDIR / $TARGET_VERIFY_TYPECHECK come from the Step 0.6 manifest re-resolution.
+   grep -rn "<basename-without-ext>" "$TARGET_WT/$TARGET_APP_SUBDIR/src"   # bare name, every line — necessary-but-not-sufficient
+   eval "${TARGET_VERIFY_TYPECHECK:?unset - re-run the Step 0.6 manifest re-resolution in this Bash call}"   # red ⇒ NOT orphaned
    # plus the Target's own dead-code ratchet script, if its package.json declares one
    ```
    An empty bare-basename grep is only a *hint*; the retire is safe **only** when typecheck/deadcode still pass. When a `wire-or-retire` ledger row is the anchor, the row itself is the authoritative orphan source — trust it over a hand-grep, and re-verify each module against `origin/main` before deleting (the ledger lags the active retire wave).
@@ -582,20 +576,15 @@ Rules:
 
 **Commit before you verify:** `git commit` the structurally-complete change on the feature branch *before* this long verification, so a stall degrades to an unmerged PR the autopilot resumes next tick rather than work destroyed by the worktree-orphan-prune (which reaps uncommitted state).
 
-Verify commands come from the Target Manifest (`verify.typecheck` / `verify.test` / `verify.build` / `verify.lint`-when-declared / `verify.appSubdir`, ADR-0026) — never hardcoded. Run the manifest's DECLARED commands, whatever they name — never assume a bare `npm test` is the real suite (some targets alias it to a count-gate instead, a documented failure mode on a prior Target). `verify.lint` is OPTIONAL: a target that ships no lint gate omits the key and Step 6 skips the lint rung entirely — every manifest valid before #4526 stays valid unchanged.
+Verify commands are the manifest's (ADR-0026), from the Step 0.6 manifest re-resolution — never hardcoded, never a bare `npm test` assumed to be the real suite. The lint gate is OPTIONAL: a target that ships none omits `verify.lint`, `$TARGET_VERIFY_LINT` is then empty, and Step 6 skips the lint rung entirely.
 
-**A red build or a red lint fails the cycle exactly like a red test**: the ladder order is lint (iff declared) → typecheck → test → build. **The install decision is made by the mirrored pure leaf (`verify-install-decision.ts`), never re-derived in bash** — see its header for the two triggers: the lockfile-diff trigger (install BEFORE typecheck/test/build) and the new result-driven trigger (a build that failed with a module-resolution signature AND no worktree-local node_modules → install once, re-run ONLY the build, once — CSB's `next build` pins its resolution root, so the ancestor node_modules walk does not reach it from a nested worktree). **"No worktree-local node_modules" means no REAL install** — a directory holding only tool-cache entries (`.vite`, `.vite-temp`, `.cache/jiti`) does not count, because the ladder's earlier `test` rung reliably creates exactly that cache before the `build` rung ever runs; the leaf's `probeNodeModules` requires a real (non-dot-prefixed, or package-manager-marker) entry before it will report an install as present. Its `MODULE_RESOLUTION_SIGNATURE` also matches Next 16 Turbopack's `"Could not find the Next.js package"` phrasing, which the pre-#4533 regex missed.
+**A red build or a red lint fails the cycle exactly like a red test**: the ladder order is lint (iff declared) → typecheck → test → build. **The install decision is made by the mirrored pure leaf (`verify-install-decision.ts`), never re-derived in bash** — see its header for the two triggers: the lockfile-diff trigger (install BEFORE typecheck/test/build) and the result-driven trigger (a build that failed with a module-resolution signature AND no worktree-local node_modules → install once, re-run ONLY the build, once — a build tool that pins its resolution root, such as `next build`, does not reach the ancestor node_modules from a nested worktree). **"No worktree-local node_modules" means no REAL install** — a directory holding only tool-cache entries (`.vite`, `.vite-temp`, `.cache/jiti`) does not count, because the ladder's earlier `test` rung reliably creates exactly that cache before the `build` rung ever runs.
 
 ```bash
-MANIFEST="$TARGET_WT/.hydra/manifest.json"
-APP_SUBDIR=$(jq -r '.verify.appSubdir' "$MANIFEST")
-TEST_CMD=$(jq -r '.verify.test' "$MANIFEST")
-TYPECHECK_CMD=$(jq -r '.verify.typecheck' "$MANIFEST")
-BUILD_CMD=$(jq -r '.verify.build' "$MANIFEST")
-# verify.lint is optional: `// empty` yields "" for a target
-# that declares no lint gate — the rung is then skipped entirely.
-LINT_CMD=$(jq -r '.verify.lint // empty' "$MANIFEST")
-cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}/$APP_SUBDIR"
+# $TARGET_APP_SUBDIR / $TARGET_VERIFY_* come from the Step 0.6 manifest re-resolution;
+# $TARGET_VERIFY_LINT is "" when the manifest declares no lint gate.
+: "${TARGET_VERIFY_TEST:?unset - re-run the Step 0.6 manifest re-resolution in this Bash call}"
+cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}/$TARGET_APP_SUBDIR"
 
 # --- Install decision, trigger 1 (lockfile diff) -------------
 # The leaf probes worktree-local node_modules presence/symlink itself and
@@ -610,16 +599,14 @@ if [ "$ACTION" = "abort" ]; then
   exit 1
 fi
 if [ "$ACTION" = "install-then-retry" ]; then
-  INSTALL_CMD=$(jq -r '.verify.install' "$MANIFEST")
-  eval "$INSTALL_CMD --no-audit --no-fund"   # npm never walks up: writes ONLY worktree-local node_modules
+  eval "$TARGET_VERIFY_INSTALL --no-audit --no-fund"   # npm never walks up: writes ONLY worktree-local node_modules
 fi
 
 # --- The verify ladder: lint → typecheck → test → build ------
-# eval word-splits the multi-word manifest commands under zsh (a bare `$TYPECHECK_CMD`
-# is taken as one command word — `command not found: npm run typecheck`). Portable.
-if [ -n "$LINT_CMD" ]; then eval "$LINT_CMD"; fi  # rung skipped entirely when undeclared
-eval "$TYPECHECK_CMD"  # must pass
-eval "$TEST_CMD"       # the manifest's verify.test; must pass; count must not decrease
+# eval word-splits the multi-word manifest commands under zsh (see Step 1). Portable.
+if [ -n "$TARGET_VERIFY_LINT" ]; then eval "$TARGET_VERIFY_LINT"; fi  # rung skipped entirely when undeclared
+eval "$TARGET_VERIFY_TYPECHECK"  # must pass
+eval "$TARGET_VERIFY_TEST"       # must pass; count must not decrease
 
 # The build — the one rung whose failure can be a missing worktree-local
 # install rather than a code defect. Output goes to a log in the SIBLING gate
@@ -627,7 +614,7 @@ eval "$TEST_CMD"       # the manifest's verify.test; must pass; count must not d
 # failure — a bare `... | tee` pipe would eat the exit code.
 BUILD_LOG="$HYDRA_GATE_DIR/build.log"
 BUILD_EXIT=0
-eval "$BUILD_CMD" >"$BUILD_LOG" 2>&1 || BUILD_EXIT=$?
+eval "$TARGET_VERIFY_BUILD" >"$BUILD_LOG" 2>&1 || BUILD_EXIT=$?
 
 if [ "$BUILD_EXIT" -ne 0 ]; then
   head -60 "$BUILD_LOG"
@@ -650,10 +637,9 @@ if [ "$BUILD_EXIT" -ne 0 ]; then
       # resolver root differed. After this install a worktree-local
       # node_modules EXISTS, so the leaf can never return install-then-retry
       # again this pass: the once-only bound is structural, not a counter.
-      INSTALL_CMD=$(jq -r '.verify.install' "$MANIFEST")
-      eval "$INSTALL_CMD --no-audit --no-fund"
+      eval "$TARGET_VERIFY_INSTALL --no-audit --no-fund"
       BUILD_EXIT=0
-      eval "$BUILD_CMD" >"$BUILD_LOG" 2>&1 || BUILD_EXIT=$?
+      eval "$TARGET_VERIFY_BUILD" >"$BUILD_LOG" 2>&1 || BUILD_EXIT=$?
       [ "$BUILD_EXIT" -eq 0 ] || { head -60 "$BUILD_LOG"; exit 1; }  # second failure is real
       ;;
     *)
@@ -684,14 +670,13 @@ own `.hydra/manifest.json` declares under `riskCritical.surface` (ADR-0026). Whe
 NOT a tier ladder: either the changed risk-critical files clear it or the build
 fails.
 
-Invoke the **mirrored** gate script from the target worktree (Step 0.6 syncs it into the SIBLING gate dir `$HYDRA_GATE_DIR`, outside
-`$TARGET_WT` so no Target tool ever sees the mirror), feeding it the PR diff
-against the merge base. Do NOT run `scripts/target/mutation-check.ts` from
-`~/hydra`, and do NOT hand-strip the `appSubdir` prefix from `CHANGED_FILES` —
-pass the raw repo-rooted diff paths straight through. `classifyRisk()`
-(inside the mirrored script) already strips the manifest's declared
-`appSubdir` prefix, so hand-stripping re-introduces an
-already-solved bug and runs the gate inconsistently.
+Invoke the **mirrored** gate script under `$HYDRA_GATE_DIR` from the target
+worktree, feeding it the PR diff against the merge base. Do NOT run
+`scripts/target/mutation-check.ts` from `~/hydra`, and
+do NOT hand-strip the `appSubdir` prefix from `CHANGED_FILES` — pass the raw
+repo-rooted diff paths straight through: the mirrored script strips the
+manifest's declared `appSubdir` prefix itself, so hand-stripping runs the gate
+inconsistently.
 
 **Commit brand-new files BEFORE running the gate.** Mutant scoping follows the
 git diff, so an untracked (or unstaged-new) risk-critical file produces
@@ -744,13 +729,10 @@ cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}"
 # plain variable first, then pass it to `git diff`.
 MERGE_BASE=$(git merge-base origin/main HEAD)
 CHANGED_FILES=$(git diff --name-only "${MERGE_BASE}"...HEAD)
-# APP_SUBDIR comes from the worktree's own manifest copy (same convention as
-# Step 1 / Step 6 above) — never a hardcoded subdir nesting (INV-5/INV-7):
-# a target declaring `appSubdir: ""` (repo-root app) must not have this gate
-# point at a subdirectory that does not exist.
-APP_SUBDIR=$(jq -r '.verify.appSubdir' "$TARGET_WT/.hydra/manifest.json")
+# $TARGET_APP_SUBDIR comes from the Step 0.6 manifest re-resolution ('' = repo-root app).
+: "${TARGET_VERIFY_TEST:?unset - re-run the Step 0.6 manifest re-resolution in this Bash call}"
 CHANGED_FILES="$CHANGED_FILES" \
-TARGET_PROJECT_DIR="$TARGET_WT/$APP_SUBDIR" \
+TARGET_PROJECT_DIR="$TARGET_WT/$TARGET_APP_SUBDIR" \
   npx tsx "$HYDRA_GATE_DIR/scripts/target/mutation-check.ts"
 ```
 

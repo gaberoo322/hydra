@@ -514,16 +514,25 @@ function cleanAlternatives(
 
 /**
  * CLI for the playbook (Steps 3.3 and 4.5): one subcommand per pure function, so
- * no playbook block carries an inline `node -e` import. Prints to stdout and
- * exits 0; a malformed input prints the empty/neutral answer and exits 1 so the
- * caller's fail-open arm fires.
+ * no playbook block carries an inline `node -e` import. The answer goes to
+ * stdout. The exit code is per subcommand:
  *
  *   select-decision          stdin: REST comments array  -> OperatorDecision JSON or ""
- *   should-capture <paths..>                             -> "yes" | "no"
+ *                            exit 0; stdin that is not JSON exits 1, prints nothing
+ *   should-capture <paths..>                             -> "yes" | "no"; exit 0
  *   parse <raw>                                          -> artifact JSON or ""
+ *                            exit 0 always: absent or corrupt input prints "" (recapture)
  *   stale <concept-json> <decision-json>                 -> "stale" | "fresh"
+ *                            exit 0; a concept that does not parse prints "fresh";
+ *                            a decision that is not JSON exits 1, prints nothing
  *   build <input-json>                                   -> serialized artifact
+ *                            exit 0; input that is not JSON exits 1, prints nothing
  *   summarize                stdin: artifact JSON        -> two human lines
+ *                            exit 0; stdin that is not an artifact exits 1, prints nothing
+ *   <anything else>          exit 2, prints nothing
+ *
+ * Every non-zero exit also writes the reason to stderr, so the caller's
+ * fail-open arm fires loudly.
  */
 export function runCli(argv: string[], readStdin: () => string = () => readFileSync(0, "utf8")): { out: string; code: number } {
   const [cmd, ...rest] = argv;

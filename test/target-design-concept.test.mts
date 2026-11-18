@@ -340,7 +340,11 @@ describe("selectOperatorDecision — content-marker selection (issue #4693)", ()
     assert.ok(i33 >= 0 && i33 < pb.indexOf("### 3.5. Self-declare scope"));
     const block = pb.slice(i33, pb.indexOf("### 3.5. Self-declare scope"));
     assert.ok(block.includes('<"$OD_TMP.merged"'), "comment thread must stream via stdin redirect, not argv (ARG_MAX)");
-    assert.ok(block.includes("target-design-concept.ts\" select-decision <"), "the select-decision CLI must read the comment thread from stdin");
+    assert.ok(
+      block.includes('DC_CLI="${HYDRA_GATE_DIR:-}/scripts/target/target-design-concept.ts"'),
+      "Step 3.3 defines $DC_CLI itself (per-block self-sufficiency), as Step 4.5 does",
+    );
+    assert.ok(block.includes('"$DC_CLI" select-decision <'), "the select-decision CLI must read the comment thread from stdin");
     assert.ok(!block.includes("node --input-type=module"), "no inline node import snippet in the playbook");
     assert.ok(block.includes("operator-decision selection FAILED"), "selection failure must WARN");
     assert.ok(block.includes("safe-path builds"), "safe-path (no Step 4.5) enforcement must be documented");
@@ -582,6 +586,24 @@ describe("runCli — playbook subcommands (Steps 3.3 / 4.5)", () => {
     const built = runCli(["build", JSON.stringify(sampleInput())], noStdin);
     assert.equal(runCli(["stale", "{not json", JSON.stringify(decision)], noStdin).out, "fresh");
     assert.equal(runCli(["stale", built.out, "{nope"], noStdin).code, 1);
+  });
+
+  test("per-subcommand exit contract: parse and stale never fail on a corrupt concept, JSON inputs exit 1, unknown exits 2", () => {
+    const built = runCli(["build", JSON.stringify(sampleInput())], noStdin);
+    const cases: Array<[string, string[], () => string, { out: string; code: number }]> = [
+      ["select-decision, stdin not JSON", ["select-decision"], () => "{nope", { out: "", code: 1 }],
+      ["parse, absent input", ["parse"], noStdin, { out: "", code: 0 }],
+      ["parse, corrupt input", ["parse", "{not json"], noStdin, { out: "", code: 0 }],
+      ["stale, concept not parseable", ["stale", "{not json", JSON.stringify(decision)], noStdin, { out: "fresh", code: 0 }],
+      ["stale, decision not JSON", ["stale", built.out, "{nope"], noStdin, { out: "", code: 1 }],
+      ["build, input not JSON", ["build", "{nope"], noStdin, { out: "", code: 1 }],
+      ["summarize, stdin not an artifact", ["summarize"], () => "{nope", { out: "", code: 1 }],
+      ["unknown subcommand", ["bogus"], noStdin, { out: "", code: 2 }],
+    ];
+    for (const [label, argv, stdin, expected] of cases) {
+      assert.deepEqual(runCli(argv, stdin), expected, label);
+    }
+    assert.equal(runCli(["should-capture", "docs/readme.md"], noStdin).code, 0);
   });
 
   test("real entrypoint: spawned script builds then parses a non-empty artifact (not a silent no-op)", () => {
