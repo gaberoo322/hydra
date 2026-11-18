@@ -450,3 +450,18 @@ describe("lifecycle-state-label-guard: -R ordering and documented gaps (PR #5426
     assertAllow(`bash <<< "${GH_EDIT} 5 ${ADD} needs-qa"`);
   });
 });
+
+describe("lifecycle-state-label-guard: flag-only creates the playbooks now emit (#5561)", () => {
+  test("tool-scout create (enhancement + tool-scout flags) is ALLOWED", () => {
+    assertAllow(`${GH_CREATE} --repo gaberoo322/hydra --title "scout: x" --label enhancement --label tool-scout --body-file /tmp/b.md`);
+  });
+
+  test("skill-prune create (skill-prune flag only) is ALLOWED", () => {
+    assertAllow(`${GH_CREATE} --repo gaberoo322/hydra --title "skill-prune: x" --label skill-prune --body-file /tmp/b.md`);
+  });
+
+  test("sibling: the retired stamped form (state label alongside the flag) stays DENIED", () => {
+    assertDeny(`${GH_CREATE} --repo gaberoo322/hydra --title t --label needs-triage --label skill-prune`);
+    assertDeny(`${GH_CREATE} --repo gaberoo322/hydra --title t --label enhancement --label needs-triage --label tool-scout`);
+  });
+});
