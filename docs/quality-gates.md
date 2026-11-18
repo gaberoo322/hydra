@@ -216,6 +216,27 @@ run on at least 10 PRs. If the broader Stryker catalog surfaces no survivors the
 homegrown gate misses, the correct recommendation is **drop**, and that is a
 success outcome for the experiment, not a failure.
 
+### skill-size ratchet (required — via the `test` job)
+
+**What it does.** `scripts/ci/skill-size-ratchet.ts` counts the words in every
+skill source — each frontmattered `docs/operator-playbooks/*.md` body and each
+`docs/operator-playbooks/_fragments/*.md` file — and compares them to
+`scripts/ci/skill-size-baseline.json`. It fails when a body grows past its row,
+when a skill source has no row, when a row's file is gone, or when a frontmatter
+`description` is longer than max(50, its baselined count).
+
+**Where it is enforced.** The required `test` job: the "the real playbooks" case
+in `test/skill-size-ratchet.test.mts` runs the ratchet over the real playbooks
+and baseline, so a violation fails `npm test`. `ci.yml` is not edited for this.
+The `advisory-checks.yml` step still runs the CLI as a readable per-PR report.
+
+**Reviewed growth.** In the same PR that grows a playbook, raise exactly that
+file's row to the measured count (hand-edit — never commit a blanket
+`--write-baseline`) and add a PR-body line
+`Baseline-raise: scripts/ci/skill-size-baseline.json <row-key> - <reason>`
+(STD-BASELINE-EDIT-ROWS). A new playbook or fragment adds its row the same way.
+A description over the cap is shortened, never raised.
+
 ### `scope-check`
 
 **What it does.** Reads the PR body and (when linked) the issue body, extracts

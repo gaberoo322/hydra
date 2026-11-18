@@ -173,9 +173,9 @@ When Step 3 passed AND `--apply` is set, in a fresh worktree:
    and the Pocock-bucketed candidate list as the changelog. The PR edits ONLY
    the one playbook, its regenerated skill, and its baseline entry.
 
-Never push to master. Always a feature branch. CI (including the advisory
-`skill-size-ratchet` and `eval-gate` steps inside `.github/workflows/advisory-checks.yml`,
-a Tier-3 sibling, NOT `ci.yml`) is the merge gate.
+Never push to master. Always a feature branch. CI is the merge gate: the
+required `test` job enforces the skill-size ratchet; `eval-gate` (in
+`advisory-checks.yml`) is advisory.
 
 ## When NOT to run this
 
