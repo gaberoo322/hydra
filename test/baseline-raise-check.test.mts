@@ -78,6 +78,15 @@ describe("evaluateBaselineRaise", () => {
     assert.equal(run({ hits: [el] }, { hits: [] }, ["src/a.ts"]).ok, true);
   });
 
+  test("removed element longer than 120 chars still derives its subject (out-of-diff reported)", () => {
+    const el = `catch\tsrc/a.ts\t${"x".repeat(200)}`;
+    const r = run({ hits: [el] }, { hits: [] }, ["src/b.ts"]);
+    assert.equal(r.findings[0].kind, "removed-element");
+    assert.equal(r.findings[0].outOfDiff, true);
+    // sibling shape: same long element, subject file in the diff, passes silently
+    assert.equal(run({ hits: [el] }, { hits: [] }, ["src/a.ts"]).ok, true);
+  });
+
   test("shrink of an in-diff row and unchanged baseline pass silently", () => {
     assert.deepEqual(run({ "src/a.ts": 5 }, { "src/a.ts": 3 }, ["src/a.ts"]).findings, []);
     const same = run({ a: 1, "src/a.ts": 2 }, { a: 1, "src/a.ts": 2 });

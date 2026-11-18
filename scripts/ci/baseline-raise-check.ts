@@ -68,6 +68,8 @@ interface Row {
   kind: FindingKind;
   from: string;
   to: string;
+  /** Untruncated JSON of the element, for subject derivation (from/to are display-only). */
+  raw?: string;
 }
 
 const LINE_RE = /^Baseline-raise:\s+(\S+)\s+(\S+)\s+[—–-]\s*(.+)$/;
@@ -132,7 +134,7 @@ function diffBaselineShrink(prev: unknown, next: unknown): Row[] {
         const c = JSON.stringify(e);
         const n = right.get(c) ?? 0;
         if (n > 0) right.set(c, n - 1);
-        else rows.push({ path, kind: "removed-element", from: short(c), to: "(absent)" });
+        else rows.push({ path, kind: "removed-element", from: short(c), to: "(absent)", raw: c });
       }
     } else if (ka === "object") {
       const oa = a as Record<string, unknown>;
@@ -153,12 +155,13 @@ const looksLikePath = (s: string): boolean => /^[\w.@-]+(\/[\w.@-]+)+$/.test(s) 
 /** Deterministic subject-file candidates for a row, or null when none is derivable. */
 function subjectCandidates(row: Row): string[] | null {
   if (row.kind === "added-element" || row.kind === "removed-element") {
-    const text = row.kind === "removed-element" ? row.from : row.to;
+    const text = row.raw ?? (row.kind === "removed-element" ? row.from : row.to);
     let el: unknown = text;
     try {
       el = JSON.parse(text);
     } catch {
-      /* intentional: truncated element text is not JSON; fall back to the raw string */
+      /* intentional: truncated display text (growth rows) is not JSON; recover the string prefix */
+      if (text.startsWith('"')) el = text.replace(/^"/, "").replace(/\.\.\.$/, "").replace(/\\t/g, "\t");
     }
     if (typeof el !== "string") return null;
     const fields = el.split("\t");
