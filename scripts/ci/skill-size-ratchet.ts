@@ -388,7 +388,7 @@ function validateBaselineShape(parsed: unknown): BaselineFile {
  * it in the check's regeneration wording; non-SyntaxError errors propagate
  * raw, exactly as the hand-rolled loader behaved.
  */
-async function loadBaseline(): Promise<BaselineFile | null> {
+export async function loadBaseline(): Promise<BaselineFile | null> {
   let parsed: unknown;
   try {
     parsed = await loadJsonBaseline<unknown>(BASELINE_PATH, null, {
