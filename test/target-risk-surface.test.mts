@@ -25,6 +25,7 @@ import {
 } from "../scripts/target/target-risk-surface.ts";
 import {
   collectTargetFacts,
+  parseManifestRootFlag,
   renderShell,
   toRepoRelative,
 } from "../scripts/target/print-target-facts.ts";
@@ -239,6 +240,35 @@ describe("print-target-facts — the playbook identity + risk-surface seam (issu
     assert.ok(surfaceLine, "expected a TARGET_RISK_SURFACE_JSON export line");
     const jsonLiteral = surfaceLine!.slice("export TARGET_RISK_SURFACE_JSON='".length, -1);
     assert.deepEqual(JSON.parse(jsonLiteral), ["web/src/lib/execution/", "web/src/bin/"]);
+  });
+
+  test("the manifest's verify commands are facts: JSON carries them, --sh exports TARGET_VERIFY_* ('' lint when undeclared)", () => {
+    setFixtureEnv();
+    const facts = collectTargetFacts(FIXTURE_ROOT);
+    assert.equal(facts.manifest.ok, true);
+    if (facts.manifest.ok) {
+      assert.deepEqual(facts.manifest.verify, {
+        install: "npm ci --prefer-offline",
+        test: "npm test",
+        typecheck: "npm run typecheck",
+        build: "npm run build",
+        lint: "",
+      });
+    }
+    const rendered = renderShell(facts)!;
+    assert.match(rendered, /^export TARGET_VERIFY_INSTALL='npm ci --prefer-offline'$/m);
+    assert.match(rendered, /^export TARGET_VERIFY_TEST='npm test'$/m);
+    assert.match(rendered, /^export TARGET_VERIFY_TYPECHECK='npm run typecheck'$/m);
+    assert.match(rendered, /^export TARGET_VERIFY_BUILD='npm run build'$/m);
+    assert.match(rendered, /^export TARGET_VERIFY_LINT=''$/m);
+  });
+
+  test("parseManifestRootFlag: absent is undefined, a value is returned, a missing value is null", () => {
+    assert.equal(parseManifestRootFlag(["--sh"]), undefined);
+    assert.equal(parseManifestRootFlag(["--sh", "--manifest-root", "/wt"]), "/wt");
+    assert.equal(parseManifestRootFlag(["--manifest-root"]), null);
+    assert.equal(parseManifestRootFlag(["--manifest-root", "--sh"]), null);
+    assert.equal(parseManifestRootFlag(["--manifest-root", " "]), null);
   });
 
   test("renderShell returns null (nothing exportable) when the manifest is unresolved — fail closed", () => {

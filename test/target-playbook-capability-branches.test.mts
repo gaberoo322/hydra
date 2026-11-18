@@ -143,6 +143,42 @@ describe("print-target-facts CLI (INV-7)", () => {
     assert.equal(probe.stdout, "e2e:smoke||docs/adr/0001-design-language-it's.md");
   });
 
+  test("--manifest-root reads another manifest copy for appSubdir + TARGET_VERIFY_*; TARGET_WS stays the workspace", () => {
+    const wt = mkdtempSync(join(tmpdir(), "target-cli-wt-"));
+    try {
+      mkdirSync(join(wt, ".hydra"), { recursive: true });
+      writeFileSync(
+        join(wt, ".hydra", "manifest.json"),
+        JSON.stringify({
+          version: 1,
+          verify: { install: "wi", test: "wt test", typecheck: "wc", build: "wb", lint: "wl", appSubdir: "app" },
+          riskCritical: { surface: ["src/"], mutationKillFloor: 60 },
+        }),
+      );
+      const r = run(["--sh", "--manifest-root", wt]);
+      assert.equal(r.status, 0, r.stderr);
+      const probe = spawnSync(
+        "sh",
+        ["-c", `${r.stdout}\nprintf '%s|%s|%s|%s|%s' "$TARGET_WS" "$TARGET_APP_SUBDIR" "$TARGET_VERIFY_TEST" "$TARGET_VERIFY_LINT" "$TARGET_VERIFY_INSTALL"`],
+        { encoding: "utf8" },
+      );
+      assert.equal(probe.stdout, `${root}|app|wt test|wl|wi`);
+      // The workspace's own manifest declares no lint gate: the export is the empty string.
+      assert.match(run(["--sh"]).stdout, /^export TARGET_VERIFY_LINT=''$/m);
+    } finally {
+      rmSync(wt, { recursive: true, force: true });
+    }
+  });
+
+  test("--manifest-root without a value, or naming a root with no manifest, exits 1 with nothing on stdout", () => {
+    const noValue = run(["--sh", "--manifest-root"]);
+    assert.equal(noValue.status, 1);
+    assert.equal(noValue.stdout, "");
+    const missing = run(["--sh", "--manifest-root", join(root, "no-such-worktree")]);
+    assert.equal(missing.status, 1);
+    assert.equal(missing.stdout, "");
+  });
+
   test("manifest failure still reports capabilities (bare-workspace probe) in JSON mode", () => {
     const bad = mkdtempSync(join(tmpdir(), "target-cli-bad-"));
     try {
