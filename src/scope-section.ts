@@ -118,6 +118,7 @@ export const MECHANICAL_COMPANIONS: readonly string[] = [
   "scripts/ci/host-probe-seam-baseline.json",
   "scripts/ci/journal-seam-baseline.json",
   "scripts/ci/never-throw-baseline.json",
+  "scripts/ci/playbook-duplicate-baseline.json",
   "scripts/ci/playbook-reference-baseline.json",
   "scripts/ci/playbook-vocabulary-baseline.json",
   "scripts/ci/query-seam-baseline.json",
