@@ -149,7 +149,7 @@ describe("listBaselineFixtures inventory", () => {
   });
 });
 
-describe("QA round-1 fixes (#5553)", () => {
+describe("commit-pinned head reads and nested-row subjects", () => {
   test("nested count row for a file outside the diff is reported", () => {
     const row = "files/docs/operator-playbooks/x.md/issue-cite";
     const r = run({ files: { "docs/operator-playbooks/x.md": { "issue-cite": 5 } } }, { files: { "docs/operator-playbooks/x.md": { "issue-cite": 3 } } }, ["src/other.ts"]);
