@@ -50,7 +50,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { InvalidArgumentError } from "../../src/errors.ts";
 import { attributedSymbols, listPlaybooks } from "./playbook-reference-check.ts";
-import { REPO_ROOT, isCliEntrypoint, loadJsonBaseline, writeJsonBaseline } from "./seam-check-lib.ts";
+import { REPO_ROOT, formatStaleAdvice, isCliEntrypoint, loadJsonBaseline, writeJsonBaseline } from "./seam-check-lib.ts";
 import { HISTORICAL_EXEMPT_RE, classifyFile } from "./target-coupling-check.ts";
 
 export const BASELINE_REL = "scripts/ci/playbook-vocabulary-baseline.json";
@@ -374,7 +374,7 @@ export function formatReport(cmp: Comparison): string {
   if (cmp.stale.length > 0) {
     out.push("Counts now below the baseline (lower the baseline so they cannot creep back):");
     for (const d of cmp.stale) out.push(`  ${d.file}: ${d.shape} count ${d.count} < baseline ${d.baseline}`);
-    out.push(`Fix: ${WRITE_BASELINE_CMD}`);
+    out.push(formatStaleAdvice({ baselineRel: BASELINE_REL, rowAction: "lower the listed counts to the printed values" }));
   }
   return out.join("\n");
 }

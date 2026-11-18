@@ -29,11 +29,11 @@ unset _target_seam_sh _target_seam_rc
 
 This exports:
 
-- `$TARGET_NAME` — the target slug (`getTargetName()`)
-- `$TARGET_GH_REPO` — `owner/repo` (`getTargetGithubRepo()`) — use for every `gh … --repo "$TARGET_GH_REPO"` call, never a literal repo
-- `$TARGET_WS` — the target workspace absolute path (`getTargetWorkspace()`) — the root a per-cycle worktree branches from
-- `$TARGET_SERVICE` — the systemd unit name (`getTargetServiceName()`) — use for `journalctl --user -u "$TARGET_SERVICE"` / `systemctl --user status "$TARGET_SERVICE"`
-- `$TARGET_WEB_URL` — the target's web base URL (`getTargetWebUrl()`) — probe `$TARGET_WEB_URL/api/health` etc., never a hardcoded port
+- `$TARGET_NAME` — the target slug
+- `$TARGET_GH_REPO` — `owner/repo` — use for every `gh … --repo "$TARGET_GH_REPO"` call, never a literal repo
+- `$TARGET_WS` — the target workspace absolute path — the root a per-cycle worktree branches from
+- `$TARGET_SERVICE` — the systemd unit name — use for `journalctl --user -u "$TARGET_SERVICE"` / `systemctl --user status "$TARGET_SERVICE"`
+- `$TARGET_WEB_URL` — the target's web base URL — probe `$TARGET_WEB_URL/api/health` etc., never a hardcoded port
 - `$TARGET_APP_SUBDIR` — the manifest's `verify.appSubdir` (may be empty — the successor Target's declared shape, ADR-0013 amendment)
 - `$TARGET_APP_DIR` — `$TARGET_WS` joined with `$TARGET_APP_SUBDIR` (empty subdir is the identity) — the directory the build/test/typecheck commands run from; never assume a hardcoded subdirectory nesting
 - `$TARGET_RISK_SURFACE_JSON` — the manifest's `riskCritical.surface`, repo-relative-joined against `$TARGET_APP_SUBDIR`, JSON-encoded — the machine-readable carve-out `hydra-wire-or-retire` matches module paths against

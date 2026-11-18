@@ -30,21 +30,18 @@
       "symbol-cite": 1
     },
     "docs/operator-playbooks/_fragments/hydra-dev-child-flow.md": {
-      "issue-cite": 47,
+      "issue-cite": 8,
       "shell-lines": 100,
       "symbol-cite": 3
     },
     "docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md": {
-      "target": 2,
-      "issue-cite": 26,
-      "shell-lines": 78,
-      "symbol-cite": 1
+      "issue-cite": 1,
+      "shell-lines": 76
     },
     "docs/operator-playbooks/_fragments/hydra-qa-reference.md": {
-      "status": 6,
-      "issue-cite": 29,
+      "status": 1,
       "shell-lines": 223,
-      "symbol-cite": 17
+      "symbol-cite": 16
     },
     "docs/operator-playbooks/_fragments/hydra-target-build-anchor-preflight.md": {
       "shell-lines": 161,
@@ -64,8 +61,7 @@
     },
     "docs/operator-playbooks/_fragments/target-seam-preamble.md": {
       "issue-cite": 3,
-      "shell-lines": 17,
-      "symbol-cite": 5
+      "shell-lines": 17
     },
     "docs/operator-playbooks/_fragments/target-self-isolation-preamble.md": {
       "issue-cite": 4,
@@ -103,10 +99,8 @@
       "symbol-cite": 1
     },
     "docs/operator-playbooks/hydra-dev.md": {
-      "status": 2,
-      "issue-cite": 13,
-      "shell-lines": 35,
-      "symbol-cite": 2
+      "shell-lines": 29,
+      "symbol-cite": 1
     },
     "docs/operator-playbooks/hydra-digest.md": {
       "shell-lines": 2
@@ -127,10 +121,7 @@
       "symbol-cite": 1
     },
     "docs/operator-playbooks/hydra-grill.md": {
-      "target": 7,
-      "issue-cite": 7,
-      "back-compat": 1,
-      "shell-lines": 97,
+      "shell-lines": 96,
       "symbol-cite": 9
     },
     "docs/operator-playbooks/hydra-hitl-grill.md": {
@@ -151,11 +142,9 @@
       "symbol-cite": 7
     },
     "docs/operator-playbooks/hydra-qa.md": {
-      "status": 5,
-      "line-cite": 1,
-      "issue-cite": 47,
+      "issue-cite": 4,
       "shell-lines": 87,
-      "symbol-cite": 34
+      "symbol-cite": 43
     },
     "docs/operator-playbooks/hydra-research.md": {
       "status": 2,

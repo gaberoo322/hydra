@@ -58,12 +58,13 @@ import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { loadJsonBaseline, writeJsonBaseline } from "./seam-check-lib.ts";
+import { formatGrowthAdvice, formatStaleAdvice, loadJsonBaseline, writeJsonBaseline } from "./seam-check-lib.ts";
 
 const execFileAsync = promisify(execFile);
 
 const REPO_ROOT = resolve(fileURLToPath(import.meta.url), "../../..");
 const BASELINE_PATH = join(REPO_ROOT, "scripts/ci/test-typecheck-baseline.json");
+const BASELINE_REL = "scripts/ci/test-typecheck-baseline.json";
 const TSCONFIG = "tsconfig.test.json";
 
 const WRITE_BASELINE = process.argv.includes("--write-baseline");
@@ -237,10 +238,13 @@ async function main(): Promise<number> {
     }
     console.error("");
     console.error(
-      "Fix the new error(s). If you are INTENTIONALLY raising the tolerated count,",
-    );
-    console.error(
-      "re-run `npm run typecheck:test -- --write-baseline` and commit the new baseline.",
+      formatGrowthAdvice({
+        cmd: "npm run typecheck:test -- --write-baseline",
+        baselineRel: BASELINE_REL,
+        rowKey: "count",
+        fixVerb: "fix the new error(s)",
+        current,
+      }),
     );
     return 1;
   }
@@ -254,7 +258,10 @@ async function main(): Promise<number> {
     );
     console.error("");
     console.error(
-      "The ratchet only shrinks: re-run `npm run typecheck:test -- --write-baseline` and commit the lowered baseline.",
+      formatStaleAdvice({
+        baselineRel: BASELINE_REL,
+        rowAction: `lower the \`count\` row to ${current}`,
+      }),
     );
     return 1;
   }

@@ -1,0 +1,1 @@
+- fix: ratchet failure messages no longer advise a blanket baseline regenerate; skill-size prints diff-filtered row-can-drop hints (#5552)

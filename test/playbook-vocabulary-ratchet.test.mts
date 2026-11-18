@@ -18,7 +18,6 @@ import { join } from "node:path";
 const {
   SHAPES,
   STANDARD_REL,
-  WRITE_BASELINE_CMD,
   parseAvoidTerms,
   findHits,
   countByShape,
@@ -182,7 +181,8 @@ describe("playbook-vocabulary-ratchet: shrink-only per-file baseline", () => {
     );
     const report = formatReport(cmp);
     assert.match(report, /lower the baseline/);
-    assert.ok(report.includes(WRITE_BASELINE_CMD));
+    assert.match(report, /by hand/);
+    assert.ok(!report.includes("--write-baseline"));
   });
 
   test("buildBaseline is sorted, per file, and omits clean files and zero counts", () => {
@@ -345,6 +345,12 @@ describe("playbook-vocabulary-ratchet: the real playbooks", () => {
   test("no playbook or fragment is above or below its baselined count", async () => {
     const report = formatReport(compareAgainstBaseline(scanRepo(), await loadBaseline()));
     assert.equal(report, "", `\n${report}\n`);
+  });
+
+  test("target-seam-preamble.md carries zero symbol-cite hits (design-concept INV-4)", () => {
+    const rel = "docs/operator-playbooks/_fragments/target-seam-preamble.md";
+    const hits = scanRepo()[rel] ?? [];
+    assert.deepEqual(hits.filter((h) => h.shape === "symbol-cite"), []);
   });
 
   test("the standard the report points at defines the playbook rules", () => {

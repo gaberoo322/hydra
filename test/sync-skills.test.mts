@@ -1134,8 +1134,8 @@ describe("scripts/sync-skills.sh — composed hydra-qa carries the blocking-disp
       );
       assert.match(
         out.slice(mandateIdx, step7Idx),
-        /step 7\.5/,
-        "the restated preface must also point at step 7.5's reviewer-completeness check, not just the spawn flag",
+        /reviewer-completeness check/,
+        "the restated preface must also name the reviewer-completeness check, not just the spawn flag",
       );
     }
   });
