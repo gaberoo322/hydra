@@ -77,9 +77,9 @@ export interface QaVerdictFetchers {
   prBody?(pr: number): Promise<string | null>;
 }
 
-export type QaChecksSource = "branch-protection" | "rollup-only-all-optional";
+type QaChecksSource = "branch-protection" | "rollup-only-all-optional";
 
-export interface QaChecksResult {
+interface QaChecksResult {
   checks: CheckState[] | null;
   red: string[];
   requiredPending: number | null;
@@ -89,7 +89,7 @@ export interface QaChecksResult {
 }
 
 /** The `checks` phase: fetch + fold the required-check state. */
-export async function runChecksPhase(pr: number, f: QaVerdictFetchers): Promise<QaChecksResult> {
+async function runChecksPhase(pr: number, f: QaVerdictFetchers): Promise<QaChecksResult> {
   const rollup = await f.rollup(pr);
   if (rollup === null) {
     return { checks: null, red: [], requiredPending: null, rollup: null, source: null, degraded: ["rollup"] };
@@ -118,7 +118,7 @@ export async function runChecksPhase(pr: number, f: QaVerdictFetchers): Promise<
  * fan-out sizing and admission take the MAXIMAL (code) depth rather than the
  * lightest docs-only classification (fail-closed, not fail-open).
  */
-export const UNREADABLE_CHANGED_PATHS: string[] = ["src/__changed-files-unreadable__.ts"];
+const UNREADABLE_CHANGED_PATHS: string[] = ["src/__changed-files-unreadable__.ts"];
 
 /** Use a supplied fact verbatim; otherwise fetch it, recording a miss in `degraded`. */
 async function resolveFact<T>(
