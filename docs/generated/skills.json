@@ -228,7 +228,7 @@
       "name": "hydra-hitl-grill",
       "path": "docs/operator-playbooks/hydra-hitl-grill.md",
       "stage": "operator-interactive",
-      "description": "Drain the hitl-grill park lane on gaberoo322/hydra — classify every parked agent-filed item (premise still true? duplicate? scoped? which cluster?), dismiss moot clusters in one question, then walk the rest one at a time to Promote / Scope-and-promote / Grill-first / Fold / Dismiss through the board routes. Operator-interactive; never an autopilot dispatch class.",
+      "description": "Drain the hitl-grill park lane on gaberoo322/hydra — classify every parked agent-filed item (premise still true? duplicate? scoped? which cluster?), dismiss moot clusters in one question, then walk the rest one at a time to Promote / Scope-and-promote / Grill-first / Fold / Dismiss via board routes. Operator-interactive; never autopilot-dispatched.",
       "dispatchedBy": [],
       "composedFrom": [],
       "route": "/docs/skill/hydra-hitl-grill",
