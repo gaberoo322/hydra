@@ -33,6 +33,7 @@ const CI_TEXT = readText(".github/workflows/ci.yml") ?? "";
  */
 const REQUIRED_RUNNERS: Record<string, string> = {
   "scripts/ci/fail-loud-ratchet.ts": "test/fail-loud-ratchet.test.mts",
+  "scripts/ci/playbook-duplicate-ratchet.ts": "test/playbook-duplicate-ratchet.test.mts",
   "scripts/ci/playbook-vocabulary-ratchet.ts": "test/playbook-vocabulary-ratchet.test.mts",
   "scripts/ci/test-title-provenance-scan.ts": "test/test-title-provenance-ratchet.test.mts",
 };
