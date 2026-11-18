@@ -220,6 +220,27 @@ export function looksLikeSymbol(ident: string): boolean {
   return /^[a-z]+[A-Z]/.test(ident);
 }
 
+/**
+ * The symbols one prose line ties to a source file through an attribution
+ * phrase (the two attribution regexes above), each in its bare and `()` form.
+ * The vocabulary ratchet's `symbol-cite` shape skips these: an attributed
+ * symbol is resolve-checked by this check, an unattributed one is counted there.
+ */
+export function attributedSymbols(line: string): Set<string> {
+  const out = new Set<string>();
+  const addSym = (ident: string): void => {
+    out.add(ident);
+    out.add(ident.replace("()", ""));
+  };
+  for (const m of line.matchAll(SYMBOL_THEN_PATH)) {
+    if (looksLikeSymbol(m[1]) && SYMBOL_EXT.test(m[2])) addSym(m[1]);
+  }
+  for (const m of line.matchAll(PATH_THEN_SYMBOL)) {
+    if (looksLikeSymbol(m[2]) && SYMBOL_EXT.test(m[1])) addSym(m[2]);
+  }
+  return out;
+}
+
 function isTargetPlaybook(file: string): boolean {
   const base = file.slice(file.lastIndexOf("/") + 1);
   return base.startsWith("hydra-target-") || base.startsWith("target-");
