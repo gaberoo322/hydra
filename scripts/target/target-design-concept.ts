@@ -67,6 +67,9 @@
 
 import { classifyRisk, type RiskSurface } from "../../src/target/risk-critical.ts";
 import { loadRiskSurface } from "./target-risk-surface.ts";
+import { readFileSync, realpathSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 /**
  * One rejected alternative — what was considered and the one-line reason it
@@ -507,4 +510,81 @@ function cleanAlternatives(
     out.push({ alt, why });
   }
   return out;
+}
+
+/**
+ * CLI for the playbook (Steps 3.3 and 4.5): one subcommand per pure function, so
+ * no playbook block carries an inline `node -e` import. The answer goes to
+ * stdout. The exit code is per subcommand:
+ *
+ *   select-decision          stdin: REST comments array  -> OperatorDecision JSON or ""
+ *                            exit 0; stdin that is not JSON exits 1, prints nothing
+ *   should-capture <paths..>                             -> "yes" | "no"; exit 0
+ *   parse <raw>                                          -> artifact JSON or ""
+ *                            exit 0 always: absent or corrupt input prints "" (recapture)
+ *   stale <concept-json> <decision-json>                 -> "stale" | "fresh"
+ *                            exit 0; a concept that does not parse prints "fresh";
+ *                            a decision that is not JSON exits 1, prints nothing
+ *   build <input-json>                                   -> serialized artifact
+ *                            exit 0; input that is not JSON exits 1, prints nothing
+ *   summarize                stdin: artifact JSON        -> two human lines
+ *                            exit 0 for any JSON object with an `invariants` array
+ *                            (even an empty one); stdin that is not JSON, or has no
+ *                            `invariants` array, exits 1, prints nothing
+ *   <anything else>          exit 2, prints nothing
+ *
+ * Every non-zero exit also writes the reason to stderr, so the caller's
+ * fail-open arm fires loudly.
+ */
+export function runCli(argv: string[], readStdin: () => string = () => readFileSync(0, "utf8")): { out: string; code: number } {
+  const [cmd, ...rest] = argv;
+  try {
+    switch (cmd) {
+      case "select-decision": {
+        const sel = selectOperatorDecision(JSON.parse(readStdin()));
+        return { out: sel ? JSON.stringify(sel) : "", code: 0 };
+      }
+      case "should-capture":
+        return { out: shouldCaptureDesignConcept(rest) ? "yes" : "no", code: 0 };
+      case "parse": {
+        const dc = parseDesignConcept(rest[0] ?? "");
+        return { out: dc ? JSON.stringify(dc) : "", code: 0 };
+      }
+      case "stale": {
+        const concept = parseDesignConcept(rest[0]);
+        const decision = JSON.parse(rest[1]);
+        return { out: concept && isStaleAgainstDecision(concept, decision) ? "stale" : "fresh", code: 0 };
+      }
+      case "build":
+        return { out: serializeDesignConcept(buildDesignConcept(JSON.parse(rest[0]))), code: 0 };
+      case "summarize": {
+        const d = JSON.parse(readStdin());
+        return { out: `  scope: ${d.scope}\n  invariants: ${d.invariants.join("; ")}\n`, code: 0 };
+      }
+      default:
+        console.error(`target-design-concept: unknown subcommand ${JSON.stringify(cmd)}`);
+        return { out: "", code: 2 };
+    }
+  } catch (err) {
+    console.error(`target-design-concept ${cmd}: failed:`, err);
+    return { out: "", code: 1 };
+  }
+}
+
+/** True when this file is the process entrypoint; realpath both sides so a symlinked path still matches. */
+function isMain(): boolean {
+  const arg = process.argv[1];
+  if (!arg) return false;
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(resolve(arg));
+  } catch (err) {
+    console.error("target-design-concept: entrypoint check failed:", err);
+    return false;
+  }
+}
+
+if (isMain()) {
+  const { out, code } = runCli(process.argv.slice(2));
+  process.stdout.write(out);
+  process.exit(code);
 }

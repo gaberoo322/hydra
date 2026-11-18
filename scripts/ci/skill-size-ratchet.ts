@@ -35,28 +35,40 @@
  * skills. "Word" = whitespace token (split on /\s+/, drop
  * empties): dependency-free, deterministic, and monotone with token load.
  *
- * # Why a separate workflow, not ci.yml
+ * # Where it is enforced
  *
- * ci.yml is Verifier Core (ADR-0001/ADR-0015). A NEW verification lands as a
- * Tier-3 sibling workflow (.github/workflows/skill-size-ratchet.yml) — the
- * ast-grep-lint / comby-check / test-typecheck precedent. Advisory in the
- * seam-checks sense: the job goes red on violation but is never a required
- * branch-protection check.
+ * REQUIRED, via the required `test` job: the "the real playbooks" case in
+ * test/skill-size-ratchet.test.mts runs this ratchet over the real playbooks
+ * and the committed baseline, and fails `npm test` on any violation (#5631).
+ * ci.yml (Verifier Core, ADR-0001/ADR-0015) is not edited for this — the
+ * check rides the suite ci.yml already requires. The CLI step in
+ * .github/workflows/advisory-checks.yml still runs too, as a readable
+ * per-PR report.
  *
  * Usage:
  *   npx tsx scripts/ci/skill-size-ratchet.ts                    # check
  *   npx tsx scripts/ci/skill-size-ratchet.ts --write-baseline   # (re)seed
  *
- * Update flow when a playbook must deliberately grow: make the change, re-run
- * with --write-baseline, and commit the raised baseline entry alongside it —
- * the reviewed-growth escape valve of the baseline-ratchet idiom.
+ * Update flow when a playbook must deliberately grow (STD-BASELINE-EDIT-ROWS):
+ * make the change, raise exactly that file's row in
+ * scripts/ci/skill-size-baseline.json to the measured count in the same PR
+ * (hand-edit; never commit a blanket --write-baseline), and add a PR-body line
+ * `Baseline-raise: scripts/ci/skill-size-baseline.json <row-key> - <reason>`.
+ * A new playbook or fragment adds its own row the same way. Descriptions are
+ * never raised: shorten them under the cap instead.
  */
 
 import { readFile, readdir } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { frontmatterText, parseFrontmatter } from "../../src/skills/playbook.ts";
-import { loadJsonBaseline, writeJsonBaseline } from "./seam-check-lib.ts";
+import { execFileSync } from "node:child_process";
+import {
+  formatGrowthAdvice,
+  formatStaleAdvice,
+  loadJsonBaseline,
+  writeJsonBaseline,
+} from "./seam-check-lib.ts";
 
 const REPO_ROOT = resolve(fileURLToPath(import.meta.url), "../../..");
 const PLAYBOOKS_DIR = join(REPO_ROOT, "docs/operator-playbooks");
@@ -184,8 +196,14 @@ export function compareAgainstBaseline(
         current: entry.body,
         message:
           `${path} is a skill source with NO baseline entry (new playbook/fragment ` +
-          `makes its size declaration at birth) — run \`${WRITE_BASELINE_CMD}\` ` +
-          `and commit the updated ${BASELINE_REL}.`,
+          `makes its size declaration at birth). ` +
+          formatGrowthAdvice({
+            cmd: WRITE_BASELINE_CMD,
+            baselineRel: BASELINE_REL,
+            rowKey: path,
+            fixVerb: "add a hand-written row for the new playbook",
+            current: entry.body,
+          }),
       });
     } else {
       if (entry.body > base.body) {
@@ -196,8 +214,14 @@ export function compareAgainstBaseline(
           allowed: base.body,
           message:
             `${path} body grew: ${entry.body} words > baseline ${base.body} ` +
-            `(+${entry.body - base.body}). Shrink the file, or for DELIBERATE growth ` +
-            `run \`${WRITE_BASELINE_CMD}\` and commit the raised entry in this PR.`,
+            `(+${entry.body - base.body}). ` +
+            formatGrowthAdvice({
+              cmd: WRITE_BASELINE_CMD,
+              baselineRel: BASELINE_REL,
+              rowKey: path,
+              fixVerb: "shrink the file",
+              current: entry.body,
+            }),
         });
       } else if (entry.body < base.body) {
         shrunk.push({ path, current: entry.body, baseline: base.body });
@@ -229,12 +253,64 @@ export function compareAgainstBaseline(
         rule: "stale-baseline-entry",
         message:
           `baseline entry ${path} has no matching skill source (file deleted or ` +
-          `no longer a skill source) — run \`${WRITE_BASELINE_CMD}\` to prune it.`,
+          `no longer a skill source). ` +
+          formatStaleAdvice({
+            baselineRel: BASELINE_REL,
+            rowAction: `delete the \`${path}\` row`,
+          }),
       });
     }
   }
 
   return { violations, shrunk };
+}
+
+/**
+ * Shrink hints (INV-6): one line per shrunk row whose file is in this PR's
+ * diff; a single skipped line when the diff base could not be resolved
+ * (`diffedFiles === null`). Pure. Never affects the verdict.
+ */
+export function formatShrinkHints(
+  shrunk: CompareResult["shrunk"],
+  diffedFiles: ReadonlySet<string> | null,
+  unresolvableReason = "no git diff base",
+): string[] {
+  if (diffedFiles === null) {
+    return [
+      `[skill-size-ratchet] hint: diff base unresolvable (${unresolvableReason}) — shrink hints skipped`,
+    ];
+  }
+  return shrunk
+    .filter((s) => diffedFiles.has(s.path))
+    .map(
+      (s) =>
+        `[skill-size-ratchet] hint: ${s.path} row can drop ${s.baseline} -> ${s.current} in ${BASELINE_REL} ` +
+        `(file is in this PR's diff; lower only that row — STD-BASELINE-EDIT-ROWS)`,
+    );
+}
+
+/**
+ * Files changed in this PR: `git diff --name-only <merge-base>...HEAD` with the
+ * base from `--diff-base <ref>`, else `PR_BASE_SHA`, else `origin/master`
+ * (mirrors qa-fix-proof). Returns `{files: null, reason}` on any git failure.
+ */
+export function resolveDiffedFiles(
+  argv: readonly string[] = process.argv,
+  env: NodeJS.ProcessEnv = process.env,
+): { files: Set<string> | null; reason: string } {
+  const flag = argv.indexOf("--diff-base");
+  const base =
+    (flag >= 0 ? argv[flag + 1] : undefined) || env.PR_BASE_SHA || "origin/master";
+  try {
+    const git = (args: string[]): string =>
+      execFileSync("git", args, { cwd: REPO_ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    const mergeBase = git(["merge-base", base, "HEAD"]).trim();
+    const out = git(["diff", "--name-only", `${mergeBase}...HEAD`]);
+    return { files: new Set(out.split("\n").filter(Boolean)), reason: "" };
+  } catch (err) {
+    /* intentional: hints are advisory — any git failure degrades to the skipped line, never a verdict change */
+    return { files: null, reason: `${base}: ${(err as Error).message.split("\n")[0]}` };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -318,7 +394,7 @@ function validateBaselineShape(parsed: unknown): BaselineFile {
  * it in the check's regeneration wording; non-SyntaxError errors propagate
  * raw, exactly as the hand-rolled loader behaved.
  */
-async function loadBaseline(): Promise<BaselineFile | null> {
+export async function loadBaseline(): Promise<BaselineFile | null> {
   let parsed: unknown;
   try {
     parsed = await loadJsonBaseline<unknown>(BASELINE_PATH, null, {
@@ -369,12 +445,8 @@ async function main(): Promise<number> {
   const baseline = await loadBaseline();
   const { violations, shrunk } = compareAgainstBaseline(measured, baseline);
 
-  for (const s of shrunk) {
-    console.log(
-      `[skill-size-ratchet] note: ${s.path} shrank (${s.current} < baseline ${s.baseline}) — ` +
-        `green, but consider tightening via \`${WRITE_BASELINE_CMD}\`.`,
-    );
-  }
+  const diff = resolveDiffedFiles();
+  for (const line of formatShrinkHints(shrunk, diff.files, diff.reason)) console.log(line);
 
   if (violations.length > 0) {
     console.error(

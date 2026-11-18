@@ -577,26 +577,79 @@ describe("hydra-target-build playbook wiring (issue #1451, #4526)", () => {
     );
   });
 
-  test("Step 6 verifies lint, typecheck, test AND build from the manifest (#4526 INV-5)", () => {
-    // The verify ladder reads every command from the worktree manifest via
-    // jq — lint is optional (jq '.verify.lint // empty'), the other three
-    // are required — and build is a gate like the rest, not a nice-to-have.
+  test("Step 6 verifies lint, typecheck, test AND build from the manifest, read once through the seam (#4526 INV-5)", () => {
+    // The worktree manifest is read once, by the Step 0.6 re-resolution through
+    // the seam (print-target-facts --manifest-root); the ladder runs its
+    // TARGET_VERIFY_* exports. Lint is optional (an empty export skips the
+    // rung); build is a gate like the rest, not a nice-to-have.
     assert.match(
       PLAYBOOK,
-      /jq -r '\.verify\.lint \/\/ empty' "\$MANIFEST"/,
-      "Step 6 must read the optional lint command from the manifest",
+      /print-target-facts\.ts --sh --manifest-root "\$\{TARGET_WT:\?/,
+      "Step 0.6 must re-resolve the seam against the worktree's own manifest",
     );
-    for (const key of ["test", "typecheck", "build"]) {
-      assert.ok(
-        PLAYBOOK.includes(`jq -r '.verify.${key}' "$MANIFEST"`),
-        `Step 6 must read verify.${key} from the manifest`,
-      );
+    assert.doesNotMatch(PLAYBOOK, /jq -r '\.verify\./, "no playbook block re-reads the manifest's verify block with jq");
+    assert.match(
+      PLAYBOOK,
+      /if \[ -n "\$TARGET_VERIFY_LINT" \]; then eval "\$TARGET_VERIFY_LINT"; fi/,
+      "Step 6 runs the optional lint rung only when the manifest declares it",
+    );
+    for (const key of ["TEST", "TYPECHECK", "BUILD"]) {
+      assert.ok(PLAYBOOK.includes(`eval "$TARGET_VERIFY_${key}"`), `Step 6 must run $TARGET_VERIFY_${key}`);
     }
     // The install decision routes through the mirrored leaf — never a
     // hand-rolled grep in the playbook (#4526 INV-6).
     assert.ok(
       PLAYBOOK.includes("$HYDRA_GATE_DIR/scripts/target/verify-install-decision.ts"),
       "the playbook must invoke the mirrored install-decision leaf",
+    );
+  });
+
+  test("every block that consumes the manifest facts first checks they came from $TARGET_WT, not the serving checkout", () => {
+    // The plain seam preamble exports TARGET_VERIFY_* / TARGET_APP_SUBDIR from
+    // $TARGET_WS's manifest too, so a fresh Bash call that re-runs only the
+    // preamble must fail the provenance check rather than verify with the
+    // serving tree's commands.
+    const main = readFileSync(join(REPO_ROOT, "docs", "operator-playbooks", "hydra-target-build.md"), "utf-8");
+    const PROVENANCE =
+      '[ "${TARGET_MANIFEST_ROOT:-}" = "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}" ] || {';
+    const blocks: string[] = [];
+    let cur: string[] | null = null;
+    for (const line of main.split("\n")) {
+      if (/^\s*```/.test(line)) {
+        if (cur) {
+          blocks.push(cur.join("\n"));
+          cur = null;
+        } else if (/^\s*```bash\s*$/.test(line)) cur = [];
+        continue;
+      }
+      if (cur) cur.push(line);
+    }
+    const code = (b: string) => b.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+    const consumers = blocks.filter((b) => /\$\{?TARGET_VERIFY_|\/\$TARGET_APP_SUBDIR/.test(code(b)) && !b.includes("--manifest-root"));
+    assert.equal(consumers.length, 4, "Steps 1, 4, 6 and 6.6 consume the manifest facts");
+    for (const b of consumers) {
+      assert.ok(b.includes(PROVENANCE), `block lacks the TARGET_MANIFEST_ROOT provenance check:\n${b.slice(0, 200)}`);
+      assert.ok(
+        code(b).indexOf(PROVENANCE) < code(b).search(/\$\{?TARGET_VERIFY_|\/\$TARGET_APP_SUBDIR/),
+        "the provenance check precedes the first consumer line",
+      );
+    }
+  });
+
+  test("the risk gates classify against the SERVING checkout's manifest, not the branch's own copy", () => {
+    // After Step 0.6 the shell exports TARGET_MANIFEST_ROOT=$TARGET_WT (verify
+    // commands come from the worktree). The gate scripts honour that variable,
+    // so each risk-gate call overrides it per command: a diff that narrows
+    // riskCritical.surface must not exempt its own files.
+    assert.match(
+      PLAYBOOK,
+      /\nTARGET_MANIFEST_ROOT="\$TARGET_WS" \\\n\s+npx tsx "\$HYDRA_GATE_DIR\/scripts\/target\/mutation-check\.ts"/,
+      "Step 6.6 runs mutation-check with TARGET_MANIFEST_ROOT=\"$TARGET_WS\"",
+    );
+    assert.match(
+      PLAYBOOK,
+      /CAPTURE=\$\(TARGET_MANIFEST_ROOT="\$TARGET_WS" node --experimental-strip-types "\$DC_CLI" should-capture /,
+      "Step 4.5 runs should-capture with TARGET_MANIFEST_ROOT=\"$TARGET_WS\"",
     );
   });
 

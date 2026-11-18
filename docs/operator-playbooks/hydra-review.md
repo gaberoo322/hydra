@@ -133,10 +133,9 @@ end-of-session phase) and surfaces the two failure modes:
 > ```
 >
 > A row is unshepherded only when every required context is `SUCCESS`. A
-> `MISSING` context (no check run yet) is not green. `advisory-checks` (the
-> shrink-only skill-size ratchet) is **ambient red on master** and is NOT in
-> branch protection — it must NEVER count toward the predicate, or every PR in
-> the repo reports as stalled.
+> `MISSING` context (no check run yet) is not green. `advisory-checks` can be
+> **red on master** and is NOT in branch protection — it must NEVER count
+> toward the predicate, or every PR in the repo reports as stalled.
 
 Gather across the Orchestrator and each Target repo:
 
