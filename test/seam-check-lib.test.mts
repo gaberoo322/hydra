@@ -33,6 +33,8 @@ const {
   writeJsonBaseline,
   diffBaselineGrowth,
   BaselineGrowthRefusedError,
+  formatGrowthAdvice,
+  formatStaleAdvice,
   writeBaselineOrRefuse,
   REPO_ROOT,
 } = await import("../scripts/ci/seam-check-lib.ts");
@@ -364,5 +366,39 @@ describe("seam-check-lib: writeJsonBaseline growth refusal (chokepoint for every
       );
       assert.equal(await readFile(path, "utf8"), before);
     });
+  });
+});
+
+describe("seam-check-lib: ratchet advice formatters", () => {
+  const growth = formatGrowthAdvice({
+    cmd: "npm run foo -- --write-baseline",
+    baselineRel: "test/fixtures/foo-baseline.json",
+    rowKey: "count",
+    fixVerb: "fix the new error(s)",
+    current: 7,
+  });
+
+  test("growth advice names the row, value, --allow-grow, and the Baseline-raise: line", () => {
+    assert.match(growth, /Fix the code first: fix the new error\(s\)/);
+    assert.ok(growth.includes("`count` row in test/fixtures/foo-baseline.json to 7"));
+    assert.ok(growth.includes("`npm run foo -- --write-baseline --allow-grow`"));
+    assert.ok(growth.includes("Baseline-raise: test/fixtures/foo-baseline.json count"));
+    assert.ok(growth.includes("STD-BASELINE-EDIT-ROWS"));
+  });
+
+  test("stale advice names the baseline and rows, and never a writer command", () => {
+    const stale = formatStaleAdvice({
+      baselineRel: "test/fixtures/foo-baseline.json",
+      rowAction: "lower the `count` row to 3",
+    });
+    assert.ok(stale.includes("In test/fixtures/foo-baseline.json, lower the `count` row to 3 by hand"));
+    assert.ok(stale.includes("STD-BASELINE-EDIT-ROWS"));
+    assert.doesNotMatch(stale, /--write-baseline|--allow-grow|Baseline-raise/);
+  });
+
+  test("sibling shape: growth and stale verdicts stay distinct", () => {
+    const stale = formatStaleAdvice({ baselineRel: "b.json", rowAction: "x" });
+    assert.doesNotMatch(stale, /Baseline-raise/);
+    assert.doesNotMatch(growth, /Do not regenerate the whole baseline/);
   });
 });

@@ -33,11 +33,13 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { countTscErrors } from "../scripts/ci/test-typecheck-check.ts";
+import { formatGrowthAdvice, formatStaleAdvice } from "../scripts/ci/seam-check-lib.ts";
 
 const execFileAsync = promisify(execFile);
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
-const BASELINE_PATH = resolve(REPO_ROOT, "scripts/ci/test-typecheck-baseline.json");
+const BASELINE_REL = "scripts/ci/test-typecheck-baseline.json";
+const BASELINE_PATH = resolve(REPO_ROOT, BASELINE_REL);
 
 interface BaselineFile {
   count: number;
@@ -73,6 +75,51 @@ async function runTsc(): Promise<string> {
   }
 }
 
+/** Growth-arm failure text. Option values mirror the call site in
+ * `scripts/ci/test-typecheck-check.ts` so the required job and the advisory
+ * CLI print identical advice. */
+function growthFailureMessage(current: number, baseline: number, diagnostics: string): string {
+  return (
+    `New type error(s) in test/** or scripts/**: current=${current} baseline=${baseline}. ` +
+    formatGrowthAdvice({
+      cmd: "npm run typecheck:test -- --write-baseline",
+      baselineRel: BASELINE_REL,
+      rowKey: "count",
+      fixVerb: "fix the new error(s)",
+      current,
+    }) +
+    `\n\n${diagnostics}`
+  );
+}
+
+/** Stale-arm failure text (hand-edit the row; names no writer command). */
+function staleFailureMessage(current: number, baseline: number): string {
+  return (
+    `Baseline is stale (fewer errors than recorded): current=${current} baseline=${baseline}. ` +
+    formatStaleAdvice({
+      baselineRel: BASELINE_REL,
+      rowAction: `lower the \`count\` row to ${current}`,
+    })
+  );
+}
+
+describe("typecheck drift failure advice", () => {
+  test("growth arm names --allow-grow and the Baseline-raise line, never a bare writer", () => {
+    const msg = growthFailureMessage(3, 1, "x.ts(1,1): error TS1000: boom");
+    assert.ok(msg.includes("--write-baseline --allow-grow"));
+    assert.ok(msg.includes(`Baseline-raise: ${BASELINE_REL} count — <reason>`));
+    assert.equal(msg.replaceAll("--write-baseline --allow-grow", "").includes("--write-baseline"), false);
+    assert.ok(msg.endsWith("x.ts(1,1): error TS1000: boom"));
+  });
+
+  test("stale arm says lower the count row by hand and names no writer command", () => {
+    const msg = staleFailureMessage(0, 2);
+    assert.ok(msg.includes("lower the `count` row to 0"));
+    assert.ok(msg.includes("by hand"));
+    assert.equal(msg.includes("--write-baseline"), false);
+  });
+});
+
 describe("test/scripts type-check does not silently re-accumulate (issue #4046)", () => {
   test("tsc -p tsconfig.test.json error count matches the committed baseline", { timeout: 60_000 }, async () => {
     const baseline = loadBaseline();
@@ -84,18 +131,11 @@ describe("test/scripts type-check does not silently re-accumulate (issue #4046)"
         .split("\n")
         .filter(line => /^\S.*\(\d+,\d+\): error TS\d+:/.test(line))
         .join("\n");
-      assert.fail(
-        `New type error(s) in test/** or scripts/**: current=${current} baseline=${baseline.count}. ` +
-          `Fix the new error(s), or if intentionally raising the tolerated count run ` +
-          `\`npm run typecheck:test -- --write-baseline\` and commit the new baseline.\n\n${diagnostics}`,
-      );
+      assert.fail(growthFailureMessage(current, baseline.count, diagnostics));
     }
 
     if (current < baseline.count) {
-      assert.fail(
-        `Baseline is stale (fewer errors than recorded): current=${current} baseline=${baseline.count}. ` +
-          `Re-run \`npm run typecheck:test -- --write-baseline\` and commit the lowered baseline.`,
-      );
+      assert.fail(staleFailureMessage(current, baseline.count));
     }
 
     assert.equal(current, baseline.count);

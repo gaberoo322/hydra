@@ -152,7 +152,7 @@ enforced-by: reviewer, scripts/ci/playbook-vocabulary-ratchet.ts
 
 A rule two playbooks share lives in one fragment.
 
-enforced-by: reviewer
+enforced-by: reviewer, scripts/ci/playbook-duplicate-ratchet.ts
 
 ### STD-PLAYBOOK-TARGET-SEAM
 

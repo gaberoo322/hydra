@@ -178,13 +178,12 @@ done
     cue to `/api/memory/subagent-friction`.** The merge succeeded; recording
     friction here is spurious noise.
   - Fall through to **Step 8.5** (worktree cleanup + branch delete) and **Step 9**
-    (state sync: move ITEM_ID to done, `tasksMerged:1` metrics record,
-    `cycle:completed` event with `merged:true`, and `/cycle/complete`
-    registration) **identically to a build-performed merge.** Nothing is silently
-    skipped — the post-merge bookkeeping is the same regardless of who landed the
-    squash. The post-merge health steps (7.5 deploy, 8 verify, 8.6 smoke) also
-    run as normal; the Step 7 `pmh-baseline.json` you captured before enabling
-    auto-merge feeds Step 8.6 in delta mode.
+    (state sync: the residual close guard, the `tasksMerged:1` metrics record,
+    the `cycle:completed` event with `merged:true`, and `/cycle/complete`)
+    **identically to a build-performed merge** — the post-merge bookkeeping is
+    the same whoever landed the squash. The post-merge health steps (7.5 deploy,
+    8 verify, 8.6 smoke) also run as normal, with the Step 7 `pmh-baseline.json`
+    feeding Step 8.6 in delta mode.
   - The **post-green qualifier is load-bearing**: an already-merged PR whose CI is
     NOT green / still in progress is NOT a clean success — do not silently treat it
     as one. Wait for CI to conclude before classifying the outcome.
@@ -204,7 +203,7 @@ done
 - **PR is NOT merged, and the fence holds** (the PR itself, any same-repo
   issue it links, or the anchor carries `money-critical` or
   `hold-for-operator` — **or the fence lookup itself failed**) → **STOP: the
-  merge is the operator's**. The emulated automerge deliberately skips fenced
+  merge is the operator's**. The Target's automerge deliberately skips fenced
   PRs — its run log + step summary say "fenced for operator review" — so
   green-but-unmerged here is the fence working, not merge friction.
   **Detect the fence at the source** (the PR's own labels plus the linked
@@ -478,7 +477,7 @@ git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" branch
 TASK_TITLE="${ANCHOR_SUBJECT:-<task title>}"
 ```
 
-**Board close-out — `Closes #N` is the sole terminal signal (ADR-0031 Decision 4/5).** Target tracking lives as GitHub Issues on `$TARGET_GH_REPO`; there is no Redis backlog lane and no `POST/PATCH /backlog` write. When the anchor was a board issue, the PR body's `Closes #$ANCHOR_NUM` (Step 7) is what `automerge.yml` reads to close the issue explicitly on merge (GitHub's native auto-close does not fire on the emulated-automerge path; ADR-0031 Decision 5). That close removes the issue from the open board and IS the terminal state-sync; the in-flight signal is the `in-progress` label the Step 2 claim stamped. Completion is also recorded by the metrics record and `cycle:completed` event below.
+**Board close-out — `Closes #N` is the sole terminal signal (ADR-0031 Decision 4/5).** Target tracking lives as GitHub Issues on `$TARGET_GH_REPO`. When the anchor was a board issue, the PR body's `Closes #$ANCHOR_NUM` (Step 7) is what `automerge.yml` reads to close the issue explicitly on merge (GitHub's native auto-close does not fire when the Target's automerge lands the PR; ADR-0031 Decision 5). That close removes the issue from the open board and IS the terminal state-sync; the in-flight signal is the `in-progress` label the Step 2 claim stamped. Completion is also recorded by the metrics record and `cycle:completed` event below.
 
 ```bash
 # Board anchor: automerge.yml closes the `Closes #$ANCHOR_NUM` issue explicitly
@@ -507,7 +506,7 @@ hydra raw POST /metrics/record "{
 }"
 ```
 
-This endpoint routes through the `recordCycle()` coordinator, so the inline merge-time write is a full cycle record (`hydra:cycle:<id>` hash, index membership, scheduler-counter bump). `reap.py` also fires `POST /autopilot/cycle-record` for this `$CYCLE_ID`; the coordinator's idempotency guard prevents double-counting.
+This endpoint writes the full cycle record. `reap.py` also fires `POST /autopilot/cycle-record` for this `$CYCLE_ID`; the coordinator's idempotency guard prevents double-counting.
 
 Publish event:
 ```bash
@@ -527,7 +526,7 @@ Complete cycle registration:
 hydra raw POST /cycle/complete "{\"cycleId\":\"$CYCLE_ID\",\"source\":\"claude\",\"status\":\"completed\"}"
 ```
 
-On failure — lesson capture for shared learning. This is the only post-cycle writer to `hydra:memory:{agent}:patterns` (agent = executor) for Claude-driven builds; the endpoint forwards to `recordPattern()`.
+On failure — lesson capture for shared learning. This is the only post-cycle writer to `hydra:memory:{agent}:patterns` (agent = executor) for Claude-driven builds.
 ```bash
 # Pick the cue that matches the failure mode:
 #   verification-failure | no-diff | rollback
@@ -604,4 +603,4 @@ fails the build.
 | Verify | test count change (before → after) |
 | Merge | PR number + merge commit SHA |
 | Deploy | main CI run id, deploy job conclusion, deployed-SHA marker match / absent / pending |
-| State sync | backlog item moved / not found |
+| State sync | anchor issue closed by the merge / closed by the residual guard / no board anchor |

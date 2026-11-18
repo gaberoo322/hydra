@@ -72,7 +72,7 @@
   "scripts/ci/redis-seam-check.ts": 2,
   "scripts/ci/schema-seam-check.ts": 1,
   "scripts/ci/scope-check.ts": 1,
-  "scripts/ci/seam-check-lib.ts": 1,
+  "scripts/ci/seam-check-lib.ts": 2,
   "scripts/ci/skill-size-ratchet.ts": 1,
   "scripts/ci/stryker-scan.ts": 1,
   "scripts/ci/target-risk-core-check.ts": 1,
