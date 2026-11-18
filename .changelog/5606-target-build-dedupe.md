@@ -1,0 +1,1 @@
+- refactor: Target build reads its verify commands through the Target facts seam and keeps each bash block in one place (#5606)

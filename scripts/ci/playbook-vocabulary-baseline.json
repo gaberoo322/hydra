@@ -48,12 +48,11 @@
       "symbol-cite": 4
     },
     "docs/operator-playbooks/_fragments/hydra-target-build-inline-mode.md": {
-      "issue-cite": 3,
       "shell-lines": 7
     },
     "docs/operator-playbooks/_fragments/hydra-target-build-merge-flow.md": {
       "shell-lines": 167,
-      "symbol-cite": 8
+      "symbol-cite": 5
     },
     "docs/operator-playbooks/_fragments/reflection-telemetry-deposit.md": {
       "issue-cite": 4,
@@ -171,9 +170,8 @@
       "shell-lines": 28
     },
     "docs/operator-playbooks/hydra-target-build.md": {
-      "issue-cite": 8,
-      "shell-lines": 328,
-      "symbol-cite": 19
+      "shell-lines": 305,
+      "symbol-cite": 16
     },
     "docs/operator-playbooks/hydra-target-cleanup.md": {
       "issue-cite": 16,
