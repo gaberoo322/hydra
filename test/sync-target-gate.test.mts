@@ -636,6 +636,23 @@ describe("hydra-target-build playbook wiring (issue #1451, #4526)", () => {
     }
   });
 
+  test("the risk gates classify against the SERVING checkout's manifest, not the branch's own copy", () => {
+    // After Step 0.6 the shell exports TARGET_MANIFEST_ROOT=$TARGET_WT (verify
+    // commands come from the worktree). The gate scripts honour that variable,
+    // so each risk-gate call overrides it per command: a diff that narrows
+    // riskCritical.surface must not exempt its own files.
+    assert.match(
+      PLAYBOOK,
+      /\nTARGET_MANIFEST_ROOT="\$TARGET_WS" \\\n\s+npx tsx "\$HYDRA_GATE_DIR\/scripts\/target\/mutation-check\.ts"/,
+      "Step 6.6 runs mutation-check with TARGET_MANIFEST_ROOT=\"$TARGET_WS\"",
+    );
+    assert.match(
+      PLAYBOOK,
+      /CAPTURE=\$\(TARGET_MANIFEST_ROOT="\$TARGET_WS" node --experimental-strip-types "\$DC_CLI" should-capture /,
+      "Step 4.5 runs should-capture with TARGET_MANIFEST_ROOT=\"$TARGET_WS\"",
+    );
+  });
+
   test("Step 8.5 removes the sibling gate dir alongside the worktree (#4526 INV-9)", () => {
     assert.match(
       PLAYBOOK,

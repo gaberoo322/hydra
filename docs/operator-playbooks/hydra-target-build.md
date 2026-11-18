@@ -143,7 +143,7 @@ bash ~/hydra/scripts/sync-target-gate.sh "$TARGET_WT"
 export HYDRA_GATE_DIR="${TARGET_WT}.hydra-gate"
 ```
 
-**Manifest re-resolution.** The worktree is this cycle's canonical checkout, so the verify commands and `appSubdir` come from its own `.hydra/manifest.json` (ADR-0026), read once through the seam. Steps 1, 4, 6 and 6.6 read `$TARGET_APP_SUBDIR` and `$TARGET_VERIFY_TEST` / `_TYPECHECK` / `_BUILD` / `_LINT` / `_INSTALL` from it; `$TARGET_WS` and `$TARGET_APP_DIR` stay the main checkout. The plain seam preamble exports the same variables from the serving checkout's manifest, so each consuming block first checks that `$TARGET_MANIFEST_ROOT` (the root the seam read) is `$TARGET_WT`; re-running only the preamble fails that check. Run this block again first in any later Bash call that reads those variables:
+**Manifest re-resolution.** The worktree is this cycle's canonical checkout, so the verify commands and `appSubdir` come from its own `.hydra/manifest.json` (ADR-0026), read once through the seam. Steps 1, 4, 6 and 6.6 read `$TARGET_APP_SUBDIR` and `$TARGET_VERIFY_TEST` / `_TYPECHECK` / `_BUILD` / `_LINT` / `_INSTALL` from it; `$TARGET_WS` and `$TARGET_APP_DIR` stay the main checkout. Risk and gating facts (the `riskCritical.surface` that Steps 4.5 and 6.6 classify against) still come from the serving checkout: those two gate calls set `$TARGET_MANIFEST_ROOT` to `$TARGET_WS` per command. The plain seam preamble exports the same variables from the serving checkout's manifest, so each consuming block first checks that `$TARGET_MANIFEST_ROOT` (the root the seam read) is `$TARGET_WT`; re-running only the preamble fails that check. Run this block again first in any later Bash call that reads those variables:
 
 ```bash
 # Fail closed: a missing or malformed manifest prints nothing exportable and
@@ -484,7 +484,8 @@ DC_KEY="hydra:target:design-concept:${ANCHOR_REF}"
 
 DC_CLI="${HYDRA_GATE_DIR:-}/scripts/target/target-design-concept.ts"
 if [ -f "$DC_CLI" ]; then
-  CAPTURE=$(node --experimental-strip-types "$DC_CLI" should-capture $EXPECTED_PATHS)
+  # Risk surface from the SERVING checkout's manifest, never the branch's own copy.
+  CAPTURE=$(TARGET_MANIFEST_ROOT="$TARGET_WS" node --experimental-strip-types "$DC_CLI" should-capture $EXPECTED_PATHS)
 else
   # Fail CLOSED: this step only runs for risk-critical builds, so a missing
   # mirror must not silently skip the artifact. Treat as capture-required and
@@ -719,18 +720,16 @@ Handle it as follows:
 
 ```bash
 cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}"
-# CHANGED_FILES is the newline-separated diff against origin/main's merge base,
-# in raw repo-rooted form — the gate strips the manifest's appSubdir itself,
-# do NOT strip it.
-# Guard-compatible form: the worktree-isolation Bash guard refuses
-# nested command substitution `$( ... $(...) ...)`. Resolve the merge base into a
-# plain variable first, then pass it to `git diff`.
+# CHANGED_FILES: the raw repo-rooted diff (the gate strips appSubdir itself).
+# The merge base is resolved first: the Bash guard refuses nested `$( $( ) )`.
 MERGE_BASE=$(git merge-base origin/main HEAD)
 CHANGED_FILES=$(git diff --name-only "${MERGE_BASE}"...HEAD)
 # $TARGET_APP_SUBDIR comes from the Step 0.6 manifest re-resolution ('' = repo-root app).
 [ "${TARGET_MANIFEST_ROOT:-}" = "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}" ] || { echo "ABORT: manifest facts not read from \$TARGET_WT - re-run the Step 0.6 manifest re-resolution in this Bash call" >&2; exit 1; }
+# The risk surface comes from the SERVING checkout's manifest, so a diff that narrows it cannot exempt itself.
 CHANGED_FILES="$CHANGED_FILES" \
 TARGET_PROJECT_DIR="$TARGET_WT/$TARGET_APP_SUBDIR" \
+TARGET_MANIFEST_ROOT="$TARGET_WS" \
   npx tsx "$HYDRA_GATE_DIR/scripts/target/mutation-check.ts"
 ```
 
