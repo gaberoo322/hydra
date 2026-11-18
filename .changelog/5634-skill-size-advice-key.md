@@ -1,0 +1,1 @@
+- fix: skill-size ratchet growth advice emits the Baseline-raise key the guard clears (#5634)
