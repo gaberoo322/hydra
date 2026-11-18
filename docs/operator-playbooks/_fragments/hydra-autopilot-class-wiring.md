@@ -48,7 +48,7 @@ prevent that gate-re-parsing round-trip:
   constant in `board-saturation.ts`. It is the anti-feedback-loop guard: a board
   that already holds enough proposal-grade architecture work suppresses the scan.
 - **`orch_backfill_idle`** is the "nothing else to do, go deepen" trigger,
-  shared with `discover_orch` (`BACKFILL_SIGNAL_CLASSES`). `foldBoardSignals`
+  shared with `discover_orch`. `foldBoardSignals`
   (`src/autopilot/turn-snapshot/board-saturation.ts`) sets it when
   `readyForAgent`, `needsResearch`, `needsTriage` are 0.
 
