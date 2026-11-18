@@ -38,7 +38,7 @@ export interface BucketRead {
 export async function settle<T>(fn: () => Promise<T>): Promise<PromiseSettledResult<T>> {
   try {
     return { status: "fulfilled", value: await fn() };
-  } catch (reason) {
+  } catch (reason) { /* intentional: the rejection is returned as a settled value; every caller names the failed source in sourceErrors */
     return { status: "rejected", reason };
   }
 }

@@ -77,7 +77,6 @@
     "fail-loud-catch-src\tsrc/api/health.ts\tcatch (err: any) { console.error(`[API] /health autopilot-pause read failed: ${err?.message ?? err}`); }",
     "fail-loud-catch-src\tsrc/api/health.ts\tcatch (err: any) { console.error(`[API] /health emergency-brake read failed: ${err?.message ?? err}`); }",
     "fail-loud-catch-src\tsrc/api/health.ts\tcatch (err: any) { console.error(`[API] /health originMasterSha read failed: ${err?.message ?? err}`); }",
-    "fail-loud-catch-src\tsrc/attention.ts\tcatch (reason) { return { status: \"rejected\", reason }; }",
     "fail-loud-catch-src\tsrc/autopilot/cycle-close.ts\tcatch (err: any) { return errRedis(err); }",
     "fail-loud-catch-src\tsrc/autopilot/dispatch-pr-link.ts\tcatch (err: any) { return errRedis(err); }",
     "fail-loud-catch-src\tsrc/autopilot/run-reads.ts\tcatch (err: any) { return errRedis(err); }",
