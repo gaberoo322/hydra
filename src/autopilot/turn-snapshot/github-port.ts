@@ -28,7 +28,7 @@ export const PR_GATE_PR_FIELDS = "number,headRefName,body,mergeStateStatus,statu
 export const READY_FOR_AGENT_ISSUE_FIELDS = "number,updatedAt,body,labels,title";
 
 /** The branch whose protection defines the required status contexts. */
-export const PROTECTED_BRANCH = "master";
+const PROTECTED_BRANCH = "master";
 
 /**
  * A JSON read as the collector sees it: parsed data, an EMPTY read (the call
@@ -43,12 +43,12 @@ export type GhJsonRead =
   | { readonly kind: "unparseable" };
 
 /** The #4812 re-poll read plus the first line of `gh`'s stderr (quoted in the FAILED note). */
-export interface MergeStateRepollRead {
+interface MergeStateRepollRead {
   readonly read: GhJsonRead;
   readonly stderrHead: string;
 }
 
-export type WorkflowRunEvent = "push" | "pull_request";
+type WorkflowRunEvent = "push" | "pull_request";
 
 /** The reads the inflight-PR + PR-gate collectors need — one method each. */
 export interface TurnSnapshotGithub {
@@ -127,7 +127,7 @@ export function wayfinderFrontierQuery(repo: string): string {
 }
 
 /** The `--json` field list of the degraded orch board read — exactly what `deriveBoardState` buckets on. */
-export const ORCH_BOARD_ROW_FIELDS = "number,labels,updatedAt";
+const ORCH_BOARD_ROW_FIELDS = "number,labels,updatedAt";
 
 /**
  * The `--json` field list of the Target board's degraded-arm read (issue
@@ -137,7 +137,7 @@ export const ORCH_BOARD_ROW_FIELDS = "number,labels,updatedAt";
  * the stale lists, so fetching every row's timestamp is dead weight) and NOT
  * the shared `number,labels` of {@link listOpenIssueLabelRows} (no body).
  */
-export const TARGET_FALLBACK_ROW_FIELDS = "number,labels,body";
+const TARGET_FALLBACK_ROW_FIELDS = "number,labels,body";
 
 /** The raw `gh` invocation the production port is built on (injectable for argv tests). */
 export type GhTransport = (
@@ -154,7 +154,7 @@ const GH_TIMEOUT_MS = 60_000;
  * and reset its ladder. The bash collectors this replaces never touched the gate,
  * so the read-only Turn Snapshot port stays out of it too (PR #4940 review).
  */
-export const ghExecTransport: GhTransport = async (args) => {
+const ghExecTransport: GhTransport = async (args) => {
   const raw = await runExec(ghBin(), args, { timeout: GH_TIMEOUT_MS });
   if (raw.exitCode === 0 && !raw.timedOut && !raw.spawnErrorCode) {
     return { ok: true, stdout: raw.stdout, stderr: raw.stderr };

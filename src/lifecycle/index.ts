@@ -23,11 +23,9 @@ export {
   type OpenState,
   type OperatorTarget,
   type OperatorTransition,
-  type Transition,
 } from "./transitions.ts";
 export {
   ADR5_REASONS,
-  TRIAGE_REASONS,
   isAdr5Reason,
   isAllowedReason,
 } from "./reasons.ts";
@@ -56,8 +54,6 @@ export {
   type GateRecords,
   type GateResult,
   type PrRecord,
-  type ResearchTrailer,
-  type StateEntryRecord,
 } from "./gates.ts";
 export {
   HOLD_EXIT_ALERT_WINDOW_DAYS,
@@ -69,7 +65,6 @@ export {
   countReviewedFailRoundsSinceReset,
   evaluateCaps,
   latestResetMs,
-  resolveCapLimits,
   type TimedBody,
 } from "./caps.ts";
 export {
@@ -85,15 +80,13 @@ export {
   MAX_STALE_CLAIM_CLOSES,
   STALE_CLAIM_AGE_MS,
   isZeroStateExempt,
-  resolveQaPr,
   runReconcile,
   type ReconcileDeps,
   type ReconcileOptions,
   type ReconcileReport,
 } from "./reconcile.ts";
-export { parkForCap, postCapReset, renderParkComment, type CapResetResult, type ParkResult } from "./park.ts";
+export { parkForCap, postCapReset, type CapResetResult, type ParkResult } from "./park.ts";
 export {
-  LIFECYCLE_ROLLOUT_CONFIG_PATH,
   advance,
   defaultSeamDeps,
   journalEntry,
@@ -115,7 +108,5 @@ export {
   type ClaimInput,
   type ClaimResult,
   type LifecycleMode,
-  type ModeReason,
-  type ResolvedMode,
   type SeamDeps,
 } from "./seam.ts";

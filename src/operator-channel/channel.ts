@@ -44,7 +44,7 @@ import {
 import { renderMessage, type RenderVariant } from "./render.ts";
 
 export const REMINDER_INTERVAL_MS = 6 * 60 * 60 * 1000;
-export const OPERATOR_CHANNEL_REDIS_TIMEOUT_MS = 1500;
+const OPERATOR_CHANNEL_REDIS_TIMEOUT_MS = 1500;
 
 /** The persistence the channel needs; production binds `src/redis/operator-channel.ts`. */
 export interface OperatorChannelStore {

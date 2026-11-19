@@ -34,7 +34,7 @@ import { logger } from "../logger.ts";
 import { briefItemFromStored, type BriefItem } from "./brief-lines.ts";
 
 /** The subset of the usage snapshot the brief reads. */
-export interface UsageLike {
+interface UsageLike {
   calibrated?: boolean;
   percentLast5h?: number | null;
   percentSinceReset?: number;
@@ -49,7 +49,7 @@ export interface StagnationLike {
 }
 
 /** The subset of the builder-health scorecard the brief reads. */
-export interface BuilderHealthLike {
+interface BuilderHealthLike {
   autonomyRate?: { autonomous: number; total: number; window: number } | null;
   stagnation?: StagnationLike | null;
 }
@@ -80,12 +80,12 @@ export function sectionValue<T>(read: SectionRead<T>): T {
   return (read as { value: T }).value;
 }
 
-export interface AutopilotRead {
+interface AutopilotRead {
   paused: AutopilotPauseState;
   latestRun: { id: string; status: string; startedEpoch: number } | null;
 }
 
-export interface WaitingItem {
+interface WaitingItem {
   title: string;
   url: string;
   bucket: string;
