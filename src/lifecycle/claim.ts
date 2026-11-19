@@ -266,6 +266,13 @@ export async function dispatch(input: DispatchInput, deps: SeamDeps): Promise<Di
     return await claimThenAdvance(input, deps);
   } catch (err) {
     logger.error({ err, issue: input.issue }, "[lifecycle] dispatch crashed");
+    // A throw after openClaim succeeded would leave the no-TTL claim open and
+    // every retry would answer `claim-held`; release best-effort (no-op if none).
+    try {
+      await releaseClaim(input.issue, input.dispatchId, deps, input.actor ?? "cli", "released");
+    } catch (relErr) {
+      logger.error({ err: relErr, issue: input.issue }, "[lifecycle] dispatch crash cleanup release failed");
+    }
     return { ok: false, code: "redis-failed" };
   }
 }
