@@ -29,8 +29,9 @@
  * with at most one best-effort `QA-Verdict-Error` comment and `needs-qa` untouched.
  * `--defer` is the only path that posts without a verdict.
  *
- * Issue-state moves ride the lifecycle seam (`scripts/lifecycle.ts advance`, ADR-0047
- * D3, #5317) via `ports.advance`: this file performs NO direct state-label write.
+ * Issue-state moves ride the lifecycle seam in-process (ADR-0047 D3, #5317): `ports.advance`
+ * for qa-passed / ready-for-human, `ports.qaBounce` for every FAIL / defer exit (the seam
+ * picks the lane from one live PR read, #5659). This file performs NO direct state-label write.
  * A PASS enters `qa-passed` AFTER its verdict comment (the seam's `qa-verdict` gate
  * reads the trailer at head); the 3rd reviewed FAIL is parked by the seam. `--dry-run` computes the identical effect plan and
  * performs no write.
@@ -53,9 +54,10 @@ import {
   isRecord,
   runCli,
   tryParse,
-  type AdvanceResult,
   type PlumbingPorts,
+  type SeamMoveResult,
 } from "./_lib.ts";
+import type { QaBounceResult } from "../../src/lifecycle/qa-bounce.ts";
 import { readPreflight } from "./packet.ts";
 import {
   PacketResultSchema,
@@ -138,6 +140,9 @@ export const bodies = {
 
 /** `$REVIEW_REPORT` of the step-6.6 skip-required-failed path (no reviewer ran). */
 export const SKIP_REVIEW_REPORT = `_${QA_ADMISSION_SKIP_MARKER} (issue #3815): a required CI check already failed, so the review verdict cannot change the FAIL \`classifyVerdict\` returns regardless of the reviewers' finding._`;
+
+/** The lifecycle-seam actor of every QA state move (the trailer-less defer arm admits only this one). */
+const QA_ACTOR = "hydra-qa";
 
 const ESC_FALLBACK_SUMMARY = "See the PR thread for the round-by-round findings.";
 
@@ -264,23 +269,53 @@ async function runRouteImpl(
    * not an error: the PR merged under us and reconcile owns needs-qa -> closed, so it
    * stops the remaining effects with exit 0 (the #974 busy-loop guard).
    */
-  const advance = async (to: string, evidence: string[], kind: string, extra: string[] = []): Promise<AdvanceResult> => {
-    const args = [String(issue), to, ...evidence.flatMap((e) => ["--evidence", e]), ...extra, "--actor", "hydra-qa"];
+  const advance = async (
+    to: string,
+    evidence: Record<string, string>,
+    kind: string,
+    extra: { reason?: string; rationale?: string } = {},
+  ): Promise<SeamMoveResult> => {
     if (opts.dryRun) {
       effects.push({ kind, target: `issue#${issue}`, ok: true });
-      return { rc: 0, code: "", wouldPark: "" };
+      return { ok: true };
     }
-    const res = await ports.advance(args);
-    effects.push({ kind, target: `issue#${issue}`, ok: res.rc === 0 });
-    if (res.rc !== 0 && res.code === "pr-merged") throw new PrMergedStop();
-    if (res.rc !== 0) console.error(`[hydra-qa] WARN: lifecycle advance ${to} on issue#${issue} refused (${res.code || "unknown"})`);
+    const res = await ports.advance({ issue, to, evidence, ...extra, actor: QA_ACTOR });
+    effects.push({ kind, target: `issue#${issue}`, ok: res.ok });
+    if (!res.ok && res.code === "pr-merged") throw new PrMergedStop();
+    if (!res.ok) console.error(`[hydra-qa] WARN: lifecycle advance ${to} on issue#${issue} refused (${res.code || "unknown"})`);
     return res;
   };
   /** An advance whose refusal ends the route (exit 1): never a by-hand label edit (ADR-0047 D4). */
-  const advanceOrThrow = async (to: string, evidence: string[], kind: string, extra: string[] = []): Promise<AdvanceResult> => {
+  const advanceOrThrow = async (
+    to: string,
+    evidence: Record<string, string>,
+    kind: string,
+    extra: { reason?: string; rationale?: string } = {},
+  ): Promise<void> => {
     const res = await advance(to, evidence, kind, extra);
-    if (res.rc !== 0) throw new Error(`lifecycle advance ${to} refused (${res.code || "unknown"}) - not editing labels by hand`);
+    if (!res.ok) throw new Error(`lifecycle advance ${to} refused (${res.code || "unknown"}) - not editing labels by hand`);
+  };
+  /**
+   * A QA exit off `needs-qa` (FAIL, or the trailer-less `defer`): the seam picks the target from its one
+   * live PR read, so this file never names a bounce lane. `pr-merged` is not an error (see `advance`).
+   * A dry run cannot read the PR, so it reports the OPEN-PR lane.
+   */
+  const bounce = async (kind: string, defer = false): Promise<QaBounceResult> => {
+    if (opts.dryRun) {
+      effects.push({ kind, target: `issue#${issue}`, ok: true });
+      return { ok: true, to: "needs-dev-resume" };
+    }
+    const res = await ports.qaBounce({ issue, pr, actor: QA_ACTOR, ...(defer ? { defer: true } : {}) });
+    effects.push({ kind, target: `issue#${issue}`, ok: res.ok });
+    if (!res.ok && res.code === "pr-merged") throw new PrMergedStop();
+    if (!res.ok) console.error(`[hydra-qa] WARN: lifecycle bounce on issue#${issue} refused (${res.code || "unknown"})`);
     return res;
+  };
+  /** A bounce whose refusal ends the route (exit 1), returning the lane the seam chose. */
+  const bounceOrThrow = async (kind: string, defer = false): Promise<"needs-dev-resume" | "ready-for-agent"> => {
+    const res = await bounce(kind, defer);
+    if (!res.ok) throw new Error(`lifecycle advance bounce refused (${res.code || "unknown"}) - not editing labels by hand`);
+    return res.to;
   };
   /**
    * PASS entry to `qa-passed`, with a deterministic exit on every refusal (#5317 round 3): a
@@ -288,13 +323,13 @@ async function runRouteImpl(
    * whether qa-passed was entered.
    */
   const passAdvance = async (kind: string): Promise<boolean> => {
-    const res = await advance("qa-passed", [`pr=${pr}`], kind);
-    if (res.rc === 0) return true;
+    const res = await advance("qa-passed", { pr: String(pr) }, kind);
+    if (res.ok) return true;
     await prComment(
       `QA-Verdict-Error: verdict=PASS pr=${pr} reason=lifecycle advance to qa-passed refused (${res.code || "unknown"}); routing the issue off needs-qa through the seam`,
       "pass-refusal-error-comment",
     );
-    await advanceOrThrow(await bounceLabel(), [`pr=${pr}`, "defer=1"], "pass-refusal-defer");
+    await bounceOrThrow("pass-refusal-defer", true);
     degraded.push("qa-passed-refused");
     return false;
   };
@@ -307,13 +342,6 @@ async function runRouteImpl(
     if (await disarm()) return;
     // A FAILed PR must never stay auto-merge-armed: the playbook treats this tag as a HARD STOP.
     degraded.push("disarm-failed");
-  };
-
-  /** The bounce lane: a LIVE per-call read; ready-for-agent only on a confirmed CLOSED/MERGED PR (#4766). */
-  const bounceLabel = async (): Promise<"needs-dev-resume" | "ready-for-agent"> => {
-    const res = await ports.gh(["pr", "view", String(pr), "--repo", repo, "--json", "state", "--jq", '.state // ""']);
-    const state = res.ok ? res.stdout.trim() : "";
-    return state === "CLOSED" || state === "MERGED" ? "ready-for-agent" : "needs-dev-resume";
   };
 
   /** The live PR head sha (`headRefOid`), or "" when unreadable. */
@@ -374,9 +402,8 @@ async function runRouteImpl(
   // ---- --defer: PR comment -> bounce relabel -> issue comment, no verdict. ----
   if (deferring) {
     await prComment(bodies.deferPr(pre.gate.reason), "defer-pr-comment");
-    const label = await bounceLabel();
     try {
-      await advanceOrThrow(label, [`pr=${pr}`, "defer=1"], "defer-relabel");
+      const label = await bounceOrThrow("defer-relabel", true);
       if (label === "needs-dev-resume") {
         await issueComment(
           pre.pr.glmAuthored ? bodies.deferGlm(pre.gate.reason, redList) : bodies.deferOpen(pre.gate.reason, redList),
@@ -631,14 +658,13 @@ async function runRouteImpl(
       await disarmChecked();
       await prComment(bodies.t4Review(report, verdict, verdictReason, marker, failNo, checksBlock, trailer), "t4-review-comment");
       if (action === "block-and-escalate") {
-        await advanceOrThrow("ready-for-human", [], "t4-escalate-advance", [
-          "--reason", "t4-deep-qa-exhausted",
-          "--rationale", `T4 deep-QA failed twice consecutively on PR #${pr} (fail #${failNo})`,
-        ]);
+        await advanceOrThrow("ready-for-human", {}, "t4-escalate-advance", {
+          reason: "t4-deep-qa-exhausted",
+          rationale: `T4 deep-QA failed twice consecutively on PR #${pr} (fail #${failNo})`,
+        });
         await issueComment(bodies.t4Blocked(verdict, pr, failNo, summary, trailer), "t4-blocked-comment");
       } else {
-        const label = await bounceLabel();
-        await advanceOrThrow(label, [`pr=${pr}`], "t4-bounce-advance");
+        const label = await bounceOrThrow("t4-bounce-advance");
         await issueComment(bodies.t4Bounce(verdict, pr, summary, label, trailer), "t4-bounce-comment");
       }
     } else {
@@ -646,13 +672,15 @@ async function runRouteImpl(
       // (carrying this round's trailer) goes FIRST; the seam owns the 3rd-reviewed-FAIL cap.
       await disarmChecked();
       await prComment(bodies.fail(report, verdict, verdictReason, checksBlock, trailer));
-      const label = await bounceLabel();
       let escalate = false;
-      const adv = await advance(label, [`pr=${pr}`], "fail-bounce-advance");
-      if (adv.rc !== 0) {
+      let label: "needs-dev-resume" | "ready-for-agent" = "needs-dev-resume";
+      const adv = await bounce("fail-bounce-advance");
+      if (adv.ok) {
+        label = adv.to;
+      } else {
         // The seam parks the 3rd reviewed FAIL in enforce AND shadow (qa-fail-rounds is a live arm), posting
         // the unified park comment itself; any other refusal ends the route.
-        if (adv.code !== "parked:qa-fail-rounds") throw new Error(`lifecycle advance ${label} refused (${adv.code || "unknown"}) - not editing labels by hand`);
+        if (adv.code !== "parked:qa-fail-rounds") throw new Error(`lifecycle advance bounce refused (${adv.code || "unknown"}) - not editing labels by hand`);
         escalate = true;
       }
       if (escalate) {

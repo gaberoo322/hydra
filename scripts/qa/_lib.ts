@@ -12,7 +12,10 @@
  * script from a test adds no ioredis/pino edge to the static graph.
  */
 
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { CapCount } from "../../src/lifecycle/caps.ts";
+import type { QaBounceInput, QaBounceResult } from "../../src/lifecycle/qa-bounce.ts";
 import { runQaVerdictPhase, type QaVerdictFetchers } from "../../src/qa/phases.ts";
 import type { QaVerdictPhase } from "../../src/schemas/qa-verdict-cli.ts";
 
@@ -29,21 +32,24 @@ export interface HttpResult {
   body: string;
 }
 
-/**
- * Outcome of one lifecycle-seam `advance` call (ADR-0047 D3, #5317): the CLI
- * exit code plus the two JSON fields the routing reads. `rc === 0` is accepted.
- */
-export interface AdvanceResult {
-  rc: number;
-  /** The refusal / outcome `code` from the CLI JSON ("" when absent). */
-  code: string;
-  /** `wouldPark` (shadow-mode cap report) from the CLI JSON ("" when absent). */
-  wouldPark: string;
+/** One in-process lifecycle-seam move (ADR-0047 D3, #5317); `qaBounce` covers the FAIL/defer exits. */
+export interface SeamMoveInput {
+  issue: number;
+  to: string;
+  evidence?: Record<string, string>;
+  reason?: string;
+  rationale?: string;
+  actor: string;
 }
 
+/** Outcome of one seam move: accepted, or the refusal `code` (`parked:<arm>` carries `counts`). */
+export type SeamMoveResult = { ok: true } | { ok: false; code: string; counts?: readonly CapCount[] };
+
 export interface PlumbingPorts {
-  /** `npx tsx scripts/lifecycle.ts advance <args>` — the ONLY state-label writer (no leading `advance`). */
-  advance(args: string[]): Promise<AdvanceResult>;
+  /** The lifecycle seam's `advance`, in-process: the ONLY state-label writer. */
+  advance(input: SeamMoveInput): Promise<SeamMoveResult>;
+  /** A QA FAIL / defer exit off `needs-qa`: the seam picks the target from one live PR read. */
+  qaBounce(input: QaBounceInput): Promise<QaBounceResult>;
   /** `gh <args>` (no leading `gh`). */
   gh(args: string[]): Promise<CmdResult>;
   /** `git <args>` (no leading `git`), run in the process cwd. */
@@ -98,28 +104,15 @@ export async function createProductionPorts(repo: string, apiBase: string): Prom
   const fetchers = createGhQaVerdictFetchers(repo);
   const toCmd = (r: { ok: boolean; data?: { stdout: string }; stderr?: string }): CmdResult =>
     r.ok ? { ok: true, stdout: (r.data as { stdout: string }).stdout } : { ok: false, stderr: r.stderr ?? "" };
-  const { execFile } = await import("node:child_process");
+  const { advance, qaBounce, defaultSeamDeps } = await import("../../src/lifecycle/index.ts");
+  const seamDeps = defaultSeamDeps(resolve(fileURLToPath(new URL("../..", import.meta.url))));
   return {
-    advance(args) {
-      return new Promise((resolve) => {
-        execFile(
-          "npx",
-          ["tsx", fileURLToPath(new URL("../lifecycle.ts", import.meta.url)), "advance", ...args],
-          { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 },
-          (err, stdout) => {
-            const parsed = tryParse(stdout.trim().split("\n").at(-1) ?? "");
-            const j = isRecord(parsed) ? parsed : {};
-            const rc = err === null ? 0 : typeof err.code === "number" ? err.code : 1;
-            if (rc !== 0) console.error("[qa-plumbing] lifecycle advance exited", rc, stdout.slice(0, 300));
-            resolve({
-              rc,
-              code: typeof j.code === "string" ? j.code : "",
-              wouldPark: typeof j.wouldPark === "string" ? j.wouldPark : "",
-            });
-          },
-        );
-      });
+    async advance(input) {
+      const res = await advance(input, seamDeps);
+      if (res.ok === true) return { ok: true };
+      return res.counts !== undefined ? { ok: false, code: res.code, counts: res.counts } : { ok: false, code: res.code };
     },
+    qaBounce: (input) => qaBounce(input, seamDeps),
     async gh(args) {
       return toCmd(await ghExec(args));
     },
