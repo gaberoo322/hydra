@@ -99,8 +99,9 @@ session."""
 ADMISSION_RULE = (
     "Admission rule (operator directive 2026-08-19): any issue you file about "
     "Hydra's own machinery (autopilot loop, CI/test harness, gates, dashboard, "
-    "cost accounting, drainer, watchdog) is labelled `hitl-grill` — NEVER "
-    "`ready-for-agent` or `needs-triage`. Only the operator promotes such work "
+    "cost accounting, drainer, watchdog) ends in `hitl-grill` — NEVER `ready-for-agent`. "
+    "File it with flag labels only, then `advance <N> needs-triage`, then `advance <N> hitl-grill "
+    "--reason scope-negotiation --rationale \"<one line>\"`. Only the operator promotes such work "
     "into the dispatch queue. Dedupe against open AND recently closed issues "
     "before filing; filing nothing is an acceptable outcome."
 )
@@ -118,9 +119,7 @@ LABEL_API_RULE = (
 LIFECYCLE_LABEL_RULE = (
     "Issue STATE labels (the 13 lifecycle states) move only through "
     "`npx tsx scripts/lifecycle.ts advance <N> <to> ...`; a refusal exits non-zero and is "
-    "final — never fall back to `gh issue edit`/`gh api` for a state. A newly filed issue "
-    "is created with FLAG labels only, then `advance <N> needs-triage --actor <class>` (from none); "
-    "a hitl-grill filing then `advance <N> hitl-grill --reason design-decision --rationale '<one line>'`. FLAG labels "
+    "final — never fall back to `gh issue edit`/`gh api` for a state. FLAG labels "
     "(provenance, `conflict-fix-attempted`, `needs-design-concept`, `glm-*`): " + LABEL_API_RULE
 )
 

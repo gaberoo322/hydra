@@ -81,6 +81,8 @@ worktree-fence violations are safety failures.
 
 @include _fragments/blocked-slice-labelling.md
 
+@include _fragments/issue-first-state.md
+
 ## Never end a turn on a pending wait
 
 A backgrounded wait is structurally unrecoverable: end the turn while a

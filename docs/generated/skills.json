@@ -125,6 +125,7 @@
         "docs/operator-playbooks/_fragments/hydra-dev-child-flow.md",
         "docs/operator-playbooks/_fragments/lifecycle-seam-writes.md",
         "docs/operator-playbooks/_fragments/blocked-slice-labelling.md",
+        "docs/operator-playbooks/_fragments/issue-first-state.md",
         "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
       ],
       "route": "/docs/skill/hydra-dev",
@@ -338,6 +339,7 @@
         }
       ],
       "composedFrom": [
+        "docs/operator-playbooks/_fragments/issue-first-state.md",
         "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
       ],
       "route": "/docs/skill/hydra-retro",

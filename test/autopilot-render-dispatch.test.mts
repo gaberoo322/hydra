@@ -829,6 +829,9 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
     const retro = render("retro_orch", action("retro_orch", "hydra-retro", { prompt_args: { apply: true } }));
     assert.match(retro.prompt, /`apply: true` — this is a REAL run, not a dry run/);
     assert.match(retro.prompt, /Admission rule \(operator directive 2026-08-19\)/);
+    assert.match(retro.prompt, /advance <N> needs-triage/);
+    assert.match(retro.prompt, /advance <N> hitl-grill --reason scope-negotiation/);
+    assert.doesNotMatch(retro.prompt, /NEVER `ready-for-agent` or `needs-triage`/);
     assert.match(retro.prompt, /Invoke the `hydra-retro` skill \(via the Skill tool; apply: true\)/);
     const sweep = render("sweep_orch", action("sweep_orch", "hydra-sweep", { prompt_args: { scope: "orch", anchor: "issue-4823" } }));
     assert.match(sweep.prompt, /match by closing ref, not by title/);
@@ -836,7 +839,6 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
     assert.match(sweep.prompt, /scripts\/lifecycle\.ts advance <N> <to>/);
     assert.match(retro.prompt, /Issue STATE labels .* move only through `npx tsx scripts\/lifecycle\.ts advance <N> <to> \.\.\.`/);
     assert.match(retro.prompt, /refusal exits non-zero and is final/);
-    assert.match(retro.prompt, /created with FLAG labels only, then `advance <N> needs-triage --actor <class>` \(from none\)/);
     // QA round 2: a Target sweep keeps the flag-label mechanics but NOT the
     // orchestrator-seam state rule (the Target board is outside the seam).
     const tsweep = render("sweep_target", action("sweep_target", "hydra-target-sweep"));
