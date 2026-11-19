@@ -419,6 +419,7 @@
   "test/qa-verdict-trailer.test.mts": 4,
   "test/quality-gate-metrics.test.mts": 1,
   "test/query-seam-check.test.mts": 4,
+  "test/ratchet.test.mts": 5,
   "test/reap-stale-test-procs.test.mts": 7,
   "test/reap-stale-tmp.test.mts": 1,
   "test/recommendation-cap.test.mts": 10,

@@ -1,14 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  scanSource,
-  diffKeys,
-  findingKey,
-  formatFailure,
-} from "../scripts/ci/never-throw-scan.ts";
+import { scanSource, findingKey, neverThrowRatchet } from "../scripts/ci/never-throw-scan.ts";
 
 function kinds(src: string): string[] {
   const r = scanSource("x.ts", src);
@@ -109,19 +105,29 @@ describe("never-throw-scan advisory wiring", () => {
   });
 });
 
-describe("never-throw-scan baseline helpers", () => {
+describe("never-throw-scan baseline", () => {
   it("keys carry no line numbers", () => {
     const k = findingKey("a.ts", { kind: "unguarded-await", fnName: "f", text: "await g()" });
     assert.equal(k, "unguarded-await\ta.ts\tf\tawait g()");
   });
 
-  it("diffKeys reports added and removed", () => {
-    assert.deepEqual(diffKeys(["a", "b"], ["b", "c"]), { added: ["a"], removed: ["c"] });
+  it("is a counted ceiling ratchet that stays advisory", () => {
+    const p = neverThrowRatchet.policy;
+    assert.deepEqual([p.shape, p.polarity, p.enforcement], ["counted", "ceiling", "advisory"]);
   });
 
-  it("formatFailure names the fix", () => {
-    const out = formatFailure(["unguarded-await\ta.ts\tf\tawait g()"]);
-    assert.match(out, /a\.ts f\(\): unguarded-await/);
-    assert.match(out, /no annotation escape/);
+  it("verdict() reports a second identical finding as added", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "never-throw-"));
+    try {
+      const key = findingKey("a.ts", { kind: "unguarded-await", fnName: "f", text: "await g()" });
+      writeFileSync(join(dir, "b.json"), JSON.stringify({ [key]: 1 }));
+      const { defineRatchet } = await import("../scripts/ci/ratchet.ts");
+      const r = defineRatchet({ ...neverThrowRatchet.policy, baseline: "b.json", measure: async () => [key, key] });
+      const v = await r.verdict(dir);
+      assert.deepEqual(v.added, [key]);
+      assert.match(v.advice, /a\.ts \| f \| await g\(\)/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

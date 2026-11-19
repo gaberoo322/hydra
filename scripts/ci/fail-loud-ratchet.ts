@@ -17,24 +17,19 @@
  * Fails closed: if ast-grep cannot be spawned, exits non-zero, or emits
  * unparsable JSON the scan reports an error — never a skip.
  *
+ * The baseline is a sorted {key: count} object and the comparison lives in
+ * scripts/ci/ratchet.ts (shape `counted`, ceiling).
+ *
  * CLI (convenience only):
  *   npx tsx scripts/ci/fail-loud-ratchet.ts                  # report
- *   npx tsx scripts/ci/fail-loud-ratchet.ts --write-baseline # shrink the baseline
- *   npx tsx scripts/ci/fail-loud-ratchet.ts --init           # alias of --write-baseline (seed); growth needs --allow-grow
- *
- * `--write-baseline` refuses to add keys that are not already in the baseline.
+ *   npx tsx scripts/ci/fail-loud-ratchet.ts --write-baseline # shrink the baseline (refuses growth; --allow-grow to seed)
  */
 
 import { spawnSync } from "node:child_process";
-import { join } from "node:path";
 import { AST_GREP_SPEC } from "../ast-search.ts";
-import {
-  REPO_ROOT,
-  isCliEntrypoint,
-  listTrackedFiles,
-  loadJsonBaseline,
-  writeBaselineOrRefuse,
-} from "./seam-check-lib.ts";
+import { GateInvariantError } from "../../src/errors.ts";
+import { defineRatchet, runIfCli } from "./ratchet.ts";
+import { REPO_ROOT, listTrackedFiles } from "./seam-check-lib.ts";
 
 export const FAIL_LOUD_BASELINE_REL = "test/fixtures/fail-loud-baseline.json";
 export const FAIL_LOUD_RULE_IDS = [
@@ -43,8 +38,6 @@ export const FAIL_LOUD_RULE_IDS = [
   "fail-loud-except-py",
   "fail-loud-devnull-sh",
 ] as const;
-export const FAIL_LOUD_WRITE_COMMAND =
-  "npx tsx scripts/ci/fail-loud-ratchet.ts --write-baseline";
 
 /** A single hit, keyed independently of line numbers. */
 export interface FailLoudHit {
@@ -91,37 +84,6 @@ export function buildScanArgs(files: string[]): string[] {
   ];
 }
 
-/** Multiset of keys (key -> count). */
-function countKeys(keys: string[]): Map<string, number> {
-  const m = new Map<string, number>();
-  for (const k of keys) m.set(k, (m.get(k) ?? 0) + 1);
-  return m;
-}
-
-export interface RatchetDiff {
-  /** Keys present in the scan beyond what the baseline tolerates. */
-  newKeys: string[];
-  /** Baseline keys no longer hit (fixed) — a shrink opportunity. */
-  staleKeys: string[];
-}
-
-/** Multiset diff of scanned keys against the baseline keys. Pure. */
-export function diffKeys(scanned: string[], baseline: string[]): RatchetDiff {
-  const have = countKeys(scanned);
-  const allowed = countKeys(baseline);
-  const newKeys: string[] = [];
-  const staleKeys: string[] = [];
-  for (const [k, n] of have) {
-    const extra = n - (allowed.get(k) ?? 0);
-    for (let i = 0; i < extra; i++) newKeys.push(k);
-  }
-  for (const [k, n] of allowed) {
-    const missing = n - (have.get(k) ?? 0);
-    for (let i = 0; i < missing; i++) staleKeys.push(k);
-  }
-  return { newKeys: newKeys.sort(), staleKeys: staleKeys.sort() };
-}
-
 export type ScanResult = { ok: true; keys: string[] } | { ok: false; error: string };
 
 /** Run ast-grep over the tracked files. Never throws; failures are returned. */
@@ -158,69 +120,18 @@ export async function scanTrackedFiles(): Promise<ScanResult> {
   return { ok: true, keys: toHits(raw).map(hitKey) };
 }
 
-interface BaselineShape {
-  note?: string;
-  hits: string[];
-}
+export const failLoudRatchet = defineRatchet({
+  id: "fail-loud-ratchet",
+  baseline: FAIL_LOUD_BASELINE_REL,
+  shape: "counted",
+  polarity: "ceiling",
+  stale: "hint",
+  enforcement: "required",
+  async measure() {
+    const scan = await scanTrackedFiles();
+    if (scan.ok === false) throw new GateInvariantError(`ast-grep scan failed: ${scan.error}`);
+    return scan.keys;
+  },
+});
 
-export async function loadFailLoudBaseline(): Promise<BaselineShape> {
-  return loadJsonBaseline<BaselineShape>(join(REPO_ROOT, FAIL_LOUD_BASELINE_REL), { hits: [] });
-}
-
-/** Human message for a failing diff; names the fix. Pure. */
-export function formatFailure(diff: RatchetDiff): string {
-  return [
-    `STD-CATCH-FAIL-LOUD ratchet: ${diff.newKeys.length} new silent catch/except/\`|| true\` hit(s) not in ${FAIL_LOUD_BASELINE_REL}:`,
-    ...diff.newKeys.map((k) => `  - ${k.split("\t").join(" | ").slice(0, 300)}`),
-    "Fix: log with context or rethrow, or annotate `/* intentional: <reason> */` (TS) / `# intentional: <reason>` (Python, shell).",
-    `Do NOT add the hit to the baseline. After fixing legacy hits, shrink it with: ${FAIL_LOUD_WRITE_COMMAND}`,
-  ].join("\n");
-}
-
-async function main(): Promise<number> {
-  const args = process.argv.slice(2);
-  const write = args.includes("--write-baseline") || args.includes("--init");
-  const scan = await scanTrackedFiles();
-  if (scan.ok === false) {
-    console.error(`fail-loud-ratchet: ${scan.error}`);
-    return 2;
-  }
-  const baseline = await loadFailLoudBaseline();
-  const diff = diffKeys(scan.keys, baseline.hits);
-  if (write) {
-    const code = await writeBaselineOrRefuse(
-      join(REPO_ROOT, FAIL_LOUD_BASELINE_REL),
-      {
-        note: `Shrink-only STD-CATCH-FAIL-LOUD baseline (issue #5424). Regenerate with: ${FAIL_LOUD_WRITE_COMMAND}`,
-        hits: [...scan.keys].sort(),
-      },
-      {
-        allowGrow: args.includes("--allow-grow") || undefined,
-        onRefusal: () => {
-          if (diff.newKeys.length > 0) console.error(formatFailure(diff));
-        },
-      },
-    );
-    if (code !== 0) return code;
-    console.log(`fail-loud-ratchet: wrote ${scan.keys.length} baseline hit(s).`);
-    return 0;
-  }
-  if (diff.newKeys.length > 0) {
-    console.error(formatFailure(diff));
-    return 1;
-  }
-  console.log(
-    `fail-loud-ratchet: OK (${scan.keys.length} tolerated legacy hit(s)${diff.staleKeys.length ? `, ${diff.staleKeys.length} stale — run ${FAIL_LOUD_WRITE_COMMAND}` : ""}).`,
-  );
-  return 0;
-}
-
-if (isCliEntrypoint(import.meta.url)) {
-  main().then(
-    (code) => process.exit(code),
-    (err) => {
-      console.error("fail-loud-ratchet: crashed:", err);
-      process.exit(2);
-    },
-  );
-}
+runIfCli(import.meta.url, failLoudRatchet);

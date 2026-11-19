@@ -12,12 +12,9 @@ const { AST_GREP_SPEC } = await import("../scripts/ast-search.ts");
 const {
   FAIL_LOUD_RULE_IDS,
   buildScanArgs,
-  diffKeys,
-  formatFailure,
   hitKey,
-  loadFailLoudBaseline,
   normaliseText,
-  scanTrackedFiles,
+  failLoudRatchet,
   toHits,
 } = await import("../scripts/ci/fail-loud-ratchet.ts");
 
@@ -29,17 +26,6 @@ describe("fail-loud-ratchet: pure semantics", () => {
     assert.notEqual(a, hitKey({ ruleId: "r", file: "g.py", text: "except X:\n    pass" }));
     assert.notEqual(a, hitKey({ ruleId: "s", file: "f.py", text: "except X:\n    pass" }));
     assert.equal(normaliseText("  a \n b\t"), "a b");
-  });
-
-  test("a hit absent from the baseline is new; a fixed hit is stale; shrink passes", () => {
-    assert.deepEqual(diffKeys(["a", "b"], ["a"]).newKeys, ["b"]);
-    assert.deepEqual(diffKeys(["a"], ["a", "b"]).newKeys, []);
-    assert.deepEqual(diffKeys(["a"], ["a", "b"]).staleKeys, ["b"]);
-  });
-
-  test("duplicate identical hits are a multiset: a second copy is new", () => {
-    assert.deepEqual(diffKeys(["a", "a"], ["a"]).newKeys, ["a"]);
-    assert.deepEqual(diffKeys(["a"], ["a", "a"]).newKeys, []);
   });
 
   test("toHits drops rows without ruleId/file", () => {
@@ -59,20 +45,12 @@ describe("fail-loud-ratchet: pure semantics", () => {
     assert.ok(FAIL_LOUD_RULE_IDS.includes("fail-loud-catch-src" as never));
     assert.ok(FAIL_LOUD_RULE_IDS.includes("fail-loud-catch"));
   });
-
-  test("failure message names the fix", () => {
-    const msg = formatFailure({ newKeys: ["r\tf\tt"], staleKeys: [] });
-    assert.match(msg, /intentional/);
-    assert.match(msg, /--write-baseline/);
-  });
 });
 
 describe("fail-loud-ratchet: live tree vs committed baseline", () => {
   test("no new silent catch/except/`|| true` hits (fails closed on tool error)", async () => {
-    const scan = await scanTrackedFiles();
-    if (scan.ok === false) assert.fail(`ast-grep scan failed (fail closed): ${scan.error}`);
-    const baseline = await loadFailLoudBaseline();
-    const diff = diffKeys(scan.keys, baseline.hits);
-    assert.equal(diff.newKeys.length, 0, formatFailure(diff));
+    const v = await failLoudRatchet.verdict();
+    assert.equal(v.ok, true, v.advice);
+    assert.equal(v.added.length, 0, v.advice);
   });
 });
