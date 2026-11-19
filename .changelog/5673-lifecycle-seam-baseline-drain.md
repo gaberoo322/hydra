@@ -1,0 +1,1 @@
+- refactor: drain the lifecycle-seam lint baseline to zero; pair-graduation flip item and the dark-outcome alarm now write their state through the seam (#5673)

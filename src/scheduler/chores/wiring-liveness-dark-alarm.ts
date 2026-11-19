@@ -28,7 +28,10 @@
  * is the thin coordinator that runs detection, then hands the dark verdicts here.
  */
 
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { ghExec } from "../../github/gh.ts";
+import { advance, defaultSeamDeps } from "../../lifecycle/index.ts";
 import type {
   OutcomeVerdict,
   DarkAlarmOutcome,
@@ -78,6 +81,9 @@ type FilerFail = { ok: false; code: string; stderr: string };
 /** Injectable gh filer (defaults to the real `ghExec`) so tests avoid a real gh spawn. */
 type IssueFiler = (args: string[]) => Promise<FilerOk | FilerFail>;
 
+/** Injectable lifecycle first-state writer (defaults to the seam's `advance`). */
+type AdvanceState = (issue: number, to: string) => Promise<{ ok: true } | { ok: false; code: string }>;
+
 /**
  * Type guard narrowing a gh filer result to its failure arm. The orchestrator's
  * `strict: false` tsconfig cannot discriminate this union on the boolean `ok`
@@ -103,6 +109,8 @@ export interface DarkAlarmDeps {
   now?: () => number;
   /** Injectable gh filer; defaults to the real {@link ghExec}. */
   fileIssue?: IssueFiler;
+  /** Injectable first-state writer; defaults to the lifecycle seam's `advance`. */
+  advanceState?: AdvanceState;
   /** Injectable first-seen-dark reader; defaults to {@link getDarkSince}. */
   readDarkSince?: (name: string) => Promise<number | null>;
   /** Injectable first-seen-dark writer (SET NX); defaults to {@link markDarkSince}. */
@@ -145,6 +153,7 @@ function buildBody(verdict: DarkVerdict, darkForMs: number): string {
  */
 async function fileNeedsTriage(
   fileIssue: IssueFiler,
+  advanceState: AdvanceState,
   verdict: DarkVerdict,
   darkForMs: number,
 ): Promise<{ ok: true; issueNumber: number } | { ok: false; reason: string }> {
@@ -157,8 +166,6 @@ async function fileNeedsTriage(
     buildTitle(verdict.name),
     "--body",
     buildBody(verdict, darkForMs),
-    "--label",
-    "needs-triage",
   ]);
   if (isFilerFailure(result)) {
     logger.error(
@@ -168,7 +175,40 @@ async function fileNeedsTriage(
     return { ok: false, reason: result.code };
   }
   const m = result.data.stdout.match(/\/issues\/(\d+)/);
-  return { ok: true, issueNumber: m ? parseInt(m[1], 10) : 0 };
+  const issueNumber = m ? parseInt(m[1], 10) : 0;
+  // First state through the lifecycle seam (ADR-0047 D3/D4): the create carries no state label.
+  if (issueNumber === 0) {
+    logger.warn(
+      { name: verdict.name },
+      "wiring-liveness dark-alarm: issue number not parseable, skipping first-state advance",
+    );
+  } else {
+    try {
+      const adv = await advanceState(issueNumber, "needs-triage");
+      if (adv.ok === false) {
+        logger.warn(
+          { issueNumber, code: adv.code },
+          "wiring-liveness dark-alarm: first-state advance to needs-triage refused",
+        );
+      }
+    } catch (err) {
+      logger.warn({ issueNumber, err }, "wiring-liveness dark-alarm: first-state advance threw");
+    }
+  }
+  return { ok: true, issueNumber };
+}
+
+/** Default first-state writer: the lifecycle seam's `advance` over `defaultSeamDeps`. */
+async function defaultAdvanceState(
+  issue: number,
+  to: string,
+): Promise<{ ok: true } | { ok: false; code: string }> {
+  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+  const res = await advance(
+    { issue, to, actor: "wiring-liveness-dark-alarm" },
+    defaultSeamDeps(repoRoot),
+  );
+  return res.ok === false ? { ok: false, code: res.code } : { ok: true };
 }
 
 /**
@@ -191,6 +231,7 @@ export async function runDarkOutcomeAlarm(
   const darkAlarmMs = deps.darkAlarmMs ?? DEFAULT_DARK_ALARM_MS;
   const nowMs = (deps.now ?? Date.now)();
   const fileIssue = deps.fileIssue ?? ghExec;
+  const advanceState = deps.advanceState ?? defaultAdvanceState;
   const readDarkSince = deps.readDarkSince ?? getDarkSince;
   const writeDarkSince = deps.writeDarkSince ?? markDarkSince;
   const readFiled = deps.readFiled ?? isDarkOutcomeFiled;
@@ -232,7 +273,7 @@ export async function runDarkOutcomeAlarm(
         continue;
       }
 
-      const fileResult = await fileNeedsTriage(fileIssue, verdict, darkForMs);
+      const fileResult = await fileNeedsTriage(fileIssue, advanceState, verdict, darkForMs);
       if (isFileResultFailure(fileResult)) {
         // Do NOT set the filed marker on failure — a transient gh outage retries
         // next tick rather than silently never filing.

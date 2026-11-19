@@ -122,12 +122,12 @@ describe("assessPairGraduation readiness", () => {
 describe("planFlipItem", () => {
   const ready = () => assessPairGraduation(inputs()).report;
 
-  test("files one ready-for-human item when ready and none open", () => {
+  test("files one graduation-flip item when ready and none open", () => {
     const plan = planFlipItem(ready(), []);
     assert.equal(plan.file, true);
     if (plan.file === true) {
       assert.equal(plan.title, FLIP_ITEM_TITLE);
-      assert.deepEqual(plan.labels, ["ready-for-human"]);
+      assert.deepEqual(plan.labels, ["graduation-flip"]);
       assert.equal(plan.body.includes(FLIP_ITEM_MARKER), true);
       assert.equal(plan.body.includes('"two-way-pair": "on"'), true);
     }

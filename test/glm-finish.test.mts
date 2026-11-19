@@ -380,9 +380,14 @@ function makeFinishDeps(opts: FakeOpts = {}): { deps: FinishDeps; calls: string[
     repoRoot: REPO_ROOT,
     now: () => NOW_MS,
     log: (msg) => { logs.push(msg); },
-    editIssueLabels: async (issue, labels) => {
-      if (reject.has("editIssueLabels")) throw new Error("injected editIssueLabels rejection");
-      calls.push(`label:${issue}:r=${(labels.remove ?? []).join("+") ?? ""}:a=${(labels.add ?? []).join("+") ?? ""}`);
+    withholdIssue: async (issue) => {
+      if (reject.has("withholdIssue")) throw new Error("injected withholdIssue rejection");
+      calls.push(`label:${issue}:r=:a=${WITHHOLD}`);
+      return { ok: true };
+    },
+    markAuthored: async (number) => {
+      if (reject.has("markAuthored")) throw new Error("injected markAuthored rejection");
+      calls.push(`label:${number}:r=:a=${GLM_LABEL_AUTHORED}`);
       return { ok: true };
     },
     advanceState: async (issue, to, opts) => {
@@ -726,7 +731,7 @@ describe("runFinish — the post-author arms, in order (issue #4337 D13, issue #
     assert.doesNotMatch(journal, /ERROR gh pr create failed/);
     // Delta (b): the glm-authored re-apply rides gh ISSUE edit on the PR
     // number (gh pr edit is broken for labels here, ADR-0034 §7) — in the
-    // fake that is the SAME editIssueLabels seam, called with the PR number.
+    // fake that is the SAME markAuthored seam, called with the PR number.
     assert.ok(h.calls.includes(`label:999:r=:a=${GLM_LABEL_AUTHORED}`), `expected the adopted-PR relabel:\n${h.calls.join("\n")}`);
     assert.ok(h.calls.includes(`advance:77:in-progress->needs-qa:pr=999`), "adoption must still advance the issue to needs-qa");
     assert.equal(h.files.get(CAP_FILE), "1\n", "an adopted PR counts against the daily cap like a fresh one");
@@ -1021,8 +1026,12 @@ describe("runFinish — provider attribution + per-provider 429 (INV-7/8/10)", (
       repoRoot: "/repo",
       now: () => NOW_MS,
       log: () => {},
-      editIssueLabels: async (issue, labels) => {
-        calls.push(`label:${issue}:a=${(labels.add ?? []).join("+")}`);
+      withholdIssue: async (issue) => {
+        calls.push(`label:${issue}:a=${WITHHOLD}`);
+        return { ok: true };
+      },
+      markAuthored: async (number) => {
+        calls.push(`label:${number}:a=${GLM_LABEL_AUTHORED}`);
         return { ok: true };
       },
       advanceState: async (issue, to, opts) => {
