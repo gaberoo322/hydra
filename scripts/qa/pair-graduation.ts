@@ -5,9 +5,10 @@
  * A READ-ONLY, zero-token graduation check for the `two-way-pair` switch. It
  * folds `QA-Shadow:` lines (parsed by src/qa/shadow-fold.ts, never
  * re-implemented) into a readiness report and plans — at most once — the
- * flip item (a `graduation-flip` flag, first state needs-triage, then parked). It never calls a model, writes Redis only through the lifecycle seam journal,
+ * flip item (a `graduation-flip` flag, first state needs-triage, then parked). It never calls a model,
  * never edits config/orchestrator/qa-rollout.json or any repo file; its only
- * side effect is `gh issue create` under `--apply`. The flip itself is an
+ * side effects are, under `--apply`, `gh label create --force`, `gh issue create`
+ * and two lifecycle-seam `advance` writes (needs-triage, then parked). The flip itself is an
  * operator-merged config PR (ADR-0046 D6).
  *
  * It also owns the pair-cohort rule (`findOnWindow`, `pairCohortOf`) that
@@ -44,6 +45,8 @@ export const FLIP_ITEM_TITLE = "Flip two-way-pair: shadow → on (pair graduatio
 export const FLIP_ITEM_MARKER = "<!-- pair-graduation-flip two-way-pair -->";
 /** Flag label (ADR-0047 D2: free-write, outside the seam): dedup key for the flip item across state moves. */
 export const FLIP_ITEM_LABEL = "graduation-flip";
+/** Pre-#5673 label the flip item was filed under; still searched for dedup. */
+export const LEGACY_FLIP_ITEM_LABEL = "ready-for-human";
 export const ROLLOUT_CONFIG_PATH = "config/orchestrator/qa-rollout.json";
 const DEFAULT_SINCE = "2026-10-06T21:25:53Z";
 const COHORT_FIXTURE_PATH = "test/fixtures/qa-cohort-baseline.json";
@@ -275,6 +278,52 @@ export function planFlipItem(report: GraduationReport, openIssues: OpenIssue[]):
   return { file: true, title: FLIP_ITEM_TITLE, body: renderFlipItemBody(report), labels: [FLIP_ITEM_LABEL] };
 }
 
+export interface ApplyDeps {
+  orchestratorRepo: string;
+  ensureLabel: (label: string, repo: string) => void;
+  createIssue: (title: string, body: string, label: string, repo: string) => string;
+  advance: (a: {
+    issue: number;
+    to: string;
+    reason?: string;
+    rationale?: string;
+  }) => Promise<{ ok: true } | { ok: false; code: string }>;
+}
+
+export type ApplyResult =
+  | { ok: true; url: string; state: Record<string, string> }
+  | { ok: false; code: "wrong-repo"; expected: string };
+
+/**
+ * The `--apply` step (injectable so the call order is testable): refuse a non-orchestrator repo
+ * (the seam binds the orchestrator board), ensure the flag label, create flag-only, then first
+ * state `needs-triage`, then `parked` (ADR-0047 D4: an off-list escalation lands in `parked`; the
+ * flip is an operator-merged config PR, ADR-0046 D6). A refused advance is recorded, never thrown.
+ */
+export async function applyFlipItem(
+  plan: Extract<FlipPlan, { file: true }>,
+  repo: string,
+  deps: ApplyDeps,
+): Promise<ApplyResult> {
+  if (repo !== deps.orchestratorRepo) return { ok: false, code: "wrong-repo", expected: deps.orchestratorRepo };
+  deps.ensureLabel(FLIP_ITEM_LABEL, repo);
+  const url = deps.createIssue(plan.title, plan.body, FLIP_ITEM_LABEL, repo);
+  const num = Number(/\/issues\/(\d+)/.exec(url)?.[1] ?? 0);
+  const state: Record<string, string> = {};
+  if (num > 0) {
+    const first = await deps.advance({ issue: num, to: "needs-triage" });
+    state.needsTriage = first.ok === false ? first.code : "ok";
+    const parked = await deps.advance({
+      issue: num,
+      to: "parked",
+      reason: "off-list-escalation",
+      rationale: "two-way-pair flip is an operator-merged config PR (ADR-0046 D6); not an ADR-0005 reason",
+    });
+    state.parked = parked.ok === false ? parked.code : "ok";
+  }
+  return { ok: true, url, state };
+}
+
 // ---------------------------------------------------------------------------
 // CLI helpers (git / gh) — the pure folds above are the tested surface
 // ---------------------------------------------------------------------------
@@ -393,15 +442,18 @@ if (isMain) {
         cohortTrip: readCohortTrip(repoRoot),
       };
       const { ghJson } = await import("../../src/github/gh.ts");
-      const res = await ghJson<OpenIssue[]>(
-        [
-          "issue", "list", "--repo", repo, "--label", FLIP_ITEM_LABEL, "--state", "open",
-          "--limit", "200", "--json", "number,title,body",
-        ],
-        { timeout: 60_000 },
-      );
-      if (res.ok === false) throw new Error(`gh issue list failed: ${res.code}`);
-      openIssues = res.data;
+      // The flip item was filed under `ready-for-human` before the flag label existed: look under both.
+      for (const label of [FLIP_ITEM_LABEL, LEGACY_FLIP_ITEM_LABEL]) {
+        const res = await ghJson<OpenIssue[]>(
+          [
+            "issue", "list", "--repo", repo, "--label", label, "--state", "open",
+            "--limit", "200", "--json", "number,title,body",
+          ],
+          { timeout: 60_000 },
+        );
+        if (res.ok === false) throw new Error(`gh issue list failed: ${res.code}`);
+        openIssues.push(...res.data);
+      }
     } catch (err) {
       console.error("[pair-graduation] harvest failed:", err);
       process.exit(1);
@@ -419,45 +471,32 @@ if (isMain) {
     try {
       const { advance, defaultSeamDeps } = await import("../../src/lifecycle/index.ts");
       const { resolveGithubRepo } = await import("../../src/github/issues.ts");
-      if (repo !== resolveGithubRepo()) {
-        // defaultSeamDeps binds the orchestrator repo: refuse to write seam state for another board.
-        console.error(`[pair-graduation] --apply requires the orchestrator repo (${resolveGithubRepo()}), got ${repo}`);
+      const seamDeps = defaultSeamDeps(repoRoot);
+      const res = await applyFlipItem(plan, repo, {
+        orchestratorRepo: resolveGithubRepo(),
+        ensureLabel: (label, r) => {
+          execFileSync(
+            "gh",
+            ["label", "create", FLIP_ITEM_LABEL, "--repo", r, "--description", "Two-way-pair graduation flip item", "--color", "0E8A16", "--force"],
+            { encoding: "utf8" },
+          );
+        },
+        createIssue: (title, body, label, r) =>
+          execFileSync("gh", ["issue", "create", "--repo", r, "--title", title, "--body", body, "--label", FLIP_ITEM_LABEL], {
+            encoding: "utf8",
+          }).trim(),
+        advance: async (a) => {
+          const out = await advance({ ...a, actor: "pair-graduation" }, seamDeps);
+          return out.ok === false ? { ok: false, code: out.code } : { ok: true };
+        },
+      });
+      if (res.ok === false) {
+        console.error(`[pair-graduation] --apply requires the orchestrator repo (${res.expected}), got ${repo}`);
         process.exit(2);
       }
-      // The flag label is the dedup key; ensure it exists, then create with the flag only.
-      execFileSync(
-        "gh",
-        ["label", "create", FLIP_ITEM_LABEL, "--repo", repo, "--description", "Two-way-pair graduation flip item", "--color", "0E8A16", "--force"],
-        { encoding: "utf8" },
-      );
-      const url = execFileSync(
-        "gh",
-        ["issue", "create", "--repo", repo, "--title", plan.title, "--body", plan.body, "--label", FLIP_ITEM_LABEL],
-        { encoding: "utf8" },
-      ).trim();
-      const num = Number(/\/issues\/(\d+)/.exec(url)?.[1] ?? 0);
-      const state: Record<string, string> = {};
-      if (num > 0) {
-        // First state, then park (ADR-0047 D4: an off-list escalation lands in `parked`; the flip is
-        // an operator-merged config PR, ADR-0046 D6, not an ADR-0005 reason for ready-for-human).
-        const seamDeps = defaultSeamDeps(repoRoot);
-        const first = await advance({ issue: num, to: "needs-triage", actor: "pair-graduation" }, seamDeps);
-        state.needsTriage = first.ok === false ? first.code : "ok";
-        const parked = await advance(
-          {
-            issue: num,
-            to: "parked",
-            reason: "off-list-escalation",
-            rationale: "two-way-pair flip is an operator-merged config PR (ADR-0046 D6); not an ADR-0005 reason",
-            actor: "pair-graduation",
-          },
-          seamDeps,
-        );
-        state.parked = parked.ok === false ? parked.code : "ok";
-      }
-      flipItem = { filed: true, url, state };
+      flipItem = { filed: true, url: res.url, state: res.state };
     } catch (err) {
-      console.error("[pair-graduation] gh issue create failed:", err);
+      console.error("[pair-graduation] --apply failed (label create / issue create / seam advance):", err);
       process.exit(1);
     }
   }

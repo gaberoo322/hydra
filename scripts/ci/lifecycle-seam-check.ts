@@ -225,17 +225,12 @@ function inCreateContext(text: string, idx: number, matched = ""): boolean {
   return CREATE_CMD_RE.test(win);
 }
 
-/** `issues/$PR/labels`, `issues/${PR_NUMBER}/labels`, `issues/{pr_number}/labels`: PR-identifier label path (#5428). */
-const PR_LABEL_PATH_RE = /issues\/(?:\$\{?|\{)(?:PR|PR_NUMBER|PR_NUM|PR_ID|pr|pr_number|pr_num|pr_id)\}?\/labels/;
-
 /**
- * Is the flag at `idx` inside a `gh pr <subcmd>` command (shell or argv form)? PR labels are flags
- * (ADR-0047 D2). Same command bound as `-l`: the nearest `gh pr|issue` start before the flag must be
- * `pr`, with no unquoted `;` / `&&` / `||` / `|` / unbracketed newline between (#5428).
+ * Start offsets of the nearest `gh pr` / `gh issue` command before the end of `win` (shell or argv
+ * form), or -1. Shared by the PR-context and Target-repo carve-outs so the command-start rule has
+ * one definition.
  */
-function inPrContext(text: string, idx: number): boolean {
-  // Unbounded walk-back (operator ruling, PR #5431 rounds 2-3): no fixed lookback constant to outgrow.
-  const win = text.slice(0, idx);
+function lastGhCommandStarts(win: string): { pr: number; issue: number } {
   let pr = -1;
   let issue = -1;
   for (const m of win.matchAll(/\bgh["',\s[]+(?:(?:-R|--repo)["',\s=]+[\w./-]+["',\s[]+)*(pr|issue)\b/g)) {
@@ -248,6 +243,21 @@ function inPrContext(text: string, idx: number): boolean {
     if (m[2] === "pr") pr = Math.max(pr, at);
     else issue = Math.max(issue, at);
   }
+  return { pr, issue };
+}
+
+/** `issues/$PR/labels`, `issues/${PR_NUMBER}/labels`, `issues/{pr_number}/labels`: PR-identifier label path (#5428). */
+const PR_LABEL_PATH_RE = /issues\/(?:\$\{?|\{)(?:PR|PR_NUMBER|PR_NUM|PR_ID|pr|pr_number|pr_num|pr_id)\}?\/labels/;
+
+/**
+ * Is the flag at `idx` inside a `gh pr <subcmd>` command (shell or argv form)? PR labels are flags
+ * (ADR-0047 D2). Same command bound as `-l`: the nearest `gh pr|issue` start before the flag must be
+ * `pr`, with no unquoted `;` / `&&` / `||` / `|` / unbracketed newline between (#5428).
+ */
+function inPrContext(text: string, idx: number): boolean {
+  // Unbounded walk-back (operator ruling, PR #5431 rounds 2-3): no fixed lookback constant to outgrow.
+  const win = text.slice(0, idx);
+  const { pr, issue } = lastGhCommandStarts(win);
   if (pr < 0 || issue > pr) return false;
   // `gh issue edit $(gh pr view ...) --add-label x`: the `gh pr` is nested in the issue command's args (INV-3).
   if (issue >= 0 && !hasUnquotedBoundary(win.slice(issue, pr), win[issue - 1] ?? "")) return false;
@@ -273,18 +283,7 @@ const REPO_FLAG_RE = /(?<![\w-])(?:--repo|-R)(?:["']?\s*,\s*|[ \t=]+)(?:"([^"]*)
  */
 function inTargetRepoContext(text: string, idx: number): boolean {
   const win = text.slice(0, idx);
-  let pr = -1;
-  let issue = -1;
-  for (const m of win.matchAll(/\bgh["',\s[]+(?:(?:-R|--repo)["',\s=]+[\w./-]+["',\s[]+)*(pr|issue)\b/g)) {
-    const at = (m.index ?? 0) + m[0].length - m[1]!.length;
-    if (m[1] === "pr") pr = at;
-    else issue = at;
-  }
-  for (const m of win.matchAll(/(["'])(pr|issue)\1\s*,\s*["']\w+["']/g)) {
-    const at = (m.index ?? 0) + 1;
-    if (m[2] === "pr") pr = Math.max(pr, at);
-    else issue = Math.max(issue, at);
-  }
+  const { pr, issue } = lastGhCommandStarts(win);
   if (issue < 0 || pr > issue) return false;
   const lead = text[issue - 1] ?? "";
   // Is the command inside an open bracket (a call or argv list)? Walk back to the nearest unmatched opener.

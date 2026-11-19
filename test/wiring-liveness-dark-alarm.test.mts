@@ -120,6 +120,27 @@ describe("runDarkOutcomeAlarm (#2805)", () => {
     assert.equal((res.outcomes[0] as any).issueNumber, 9001);
   });
 
+  test("a non-illegal-transition refusal is retried once, then the pass still reports filed (#5673)", async () => {
+    const { deps, darkSince, filed, advanced } = fakes({ advanceResult: { ok: false, code: "gh-timeout" } });
+    darkSince.set("brier", NOW_MS - (DEFAULT_DARK_ALARM_MS + 1000));
+    const res = await runDarkOutcomeAlarm([darkVerdict("brier")], [], deps);
+    assert.equal(advanced.length, 2, "one retry, no more");
+    assert.ok(filed.has("brier"), "marker stays set: a re-file would duplicate the created issue");
+    assert.equal(res.outcomes[0]!.action, "filed");
+  });
+
+  test("a transient advance failure that succeeds on retry stops after the second attempt (#5673)", async () => {
+    const { deps, darkSince, advanced } = fakes();
+    let n = 0;
+    deps.advanceState = async (issue, to) => {
+      advanced.push([issue, to]);
+      return ++n === 1 ? { ok: false, code: "gh-timeout" } : { ok: true };
+    };
+    darkSince.set("brier", NOW_MS - (DEFAULT_DARK_ALARM_MS + 1000));
+    await runDarkOutcomeAlarm([darkVerdict("brier")], [], deps);
+    assert.equal(advanced.length, 2);
+  });
+
   test("a thrown first-state advance is logged, never aborts the pass", async () => {
     const { deps, darkSince } = fakes();
     deps.advanceState = async () => {

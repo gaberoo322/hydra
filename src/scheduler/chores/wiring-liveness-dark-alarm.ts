@@ -183,16 +183,26 @@ async function fileNeedsTriage(
       "wiring-liveness dark-alarm: issue number not parseable, skipping first-state advance",
     );
   } else {
-    try {
-      const adv = await advanceState(issueNumber, "needs-triage");
-      if (adv.ok === false) {
-        logger.warn(
-          { issueNumber, code: adv.code },
-          "wiring-liveness dark-alarm: first-state advance to needs-triage refused",
-        );
+    // `illegal-transition` means the reconcile zero-state backstop already stamped the issue (it has
+    // a state): done. Any other refusal or throw is retried once, then logged loud with the issue
+    // number so a stateless issue is discoverable (the filed marker stays set: a re-file would
+    // duplicate the already-created issue).
+    let landed = false;
+    let lastFailure = "";
+    for (let attempt = 1; attempt <= 2 && !landed; attempt++) {
+      try {
+        const adv = await advanceState(issueNumber, "needs-triage");
+        if (adv.ok === true || adv.code === "illegal-transition") landed = true;
+        else lastFailure = adv.code;
+      } catch (err: any) {
+        lastFailure = `threw: ${err?.message || err}`;
       }
-    } catch (err) {
-      logger.warn({ issueNumber, err }, "wiring-liveness dark-alarm: first-state advance threw");
+    }
+    if (!landed) {
+      logger.error(
+        { issueNumber, failure: lastFailure },
+        "wiring-liveness dark-alarm: first-state advance to needs-triage failed after retry; issue is stateless",
+      );
     }
   }
   return { ok: true, issueNumber };

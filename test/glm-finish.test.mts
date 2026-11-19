@@ -800,6 +800,27 @@ describe("runFinish — the post-author arms, in order (issue #4337 D13, issue #
     assert.ok(h.calls.includes(`advance:77:in-progress->ready-for-agent`), "the release must still run");
   });
 
+  test("effect isolation: a REJECTING withholdIssue WARNs and the release still happens (#5673 INV-6)", async () => {
+    const h = makeFinishDeps({ commitCount: 1, preflightRejects: true, rejectEffects: ["withholdIssue"] });
+    const r = await runFinish(h.deps, ranInput());
+    assert.equal(r.action, "withhold-preflight-blocked");
+    assert.match(h.logs.join("\n"), /WARN add glm-withhold to issue #77 threw \(non-fatal\)/);
+    assert.ok(h.calls.includes(`advance:77:in-progress->ready-for-agent`), "the release must still run");
+  });
+
+  test("effect isolation: a REJECTING markAuthored on the adopt path WARNs and the adoption still advances (#5673 INV-6)", async () => {
+    const h = makeFinishDeps({
+      commitCount: 1,
+      createPr: { ok: false, stderr: "already exists" },
+      openPrs: [{ number: 999, url: "https://github.com/gaberoo322/hydra/pull/999", headRefName: BRANCH }],
+      rejectEffects: ["markAuthored"],
+    });
+    const r = await runFinish(h.deps, ranInput());
+    assert.equal(r.action, "open-pr");
+    assert.match(h.logs.join("\n"), /threw \(non-fatal\)/);
+    assert.ok(h.calls.includes(`advance:77:in-progress->needs-qa:pr=999`), "adoption must still advance");
+  });
+
   test("effect isolation: a throwing evidence dep on the ran path degrades, never crashes (finish-fault backstop)", async () => {
     // countCommits reads through the guarded runGit; make it throw so the
     // top-level catch fires and the best-effort plain release still lands.
