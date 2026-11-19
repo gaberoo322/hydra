@@ -60,7 +60,7 @@ async function readLifecycleReconcileDefault(): Promise<InvalidStateRead> {
   return { ok: true, ts: res.report === null ? null : res.ts, invalid };
 }
 
-export const DAY_MS = 24 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
 /** Dispatch-outcome window the reframe attempt count reads (the record TTL). */
 export const REFRAME_WINDOW_MS = 90 * DAY_MS;
 /** A reframe is a Target build that failed 2+ times (the label's own definition). */
