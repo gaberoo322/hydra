@@ -1,0 +1,1 @@
+- refactor: demote 20 unused exports in src/lifecycle (#5624)

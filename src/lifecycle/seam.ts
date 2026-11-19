@@ -105,9 +105,9 @@ import {
 // Rollout switch
 // ---------------------------------------------------------------------------
 
-export const LIFECYCLE_ROLLOUT_CONFIG_PATH = "config/orchestrator/lifecycle-rollout.json";
+const LIFECYCLE_ROLLOUT_CONFIG_PATH = "config/orchestrator/lifecycle-rollout.json";
 export type LifecycleMode = "shadow" | "enforce";
-export type ModeReason = "config-missing" | "key-missing" | "value-malformed";
+type ModeReason = "config-missing" | "key-missing" | "value-malformed";
 
 export interface ResolvedMode {
   mode: LifecycleMode;
@@ -206,7 +206,7 @@ export interface SeamDeps {
 }
 
 /** One `gh api` read of an issue comment; binds repo + issue from `issue_url`. Never throws. */
-export async function fetchComment(repo: string, commentId: number): Promise<Fetched<CommentRecord>> {
+async function fetchComment(repo: string, commentId: number): Promise<Fetched<CommentRecord>> {
   try {
     const res = await ghJson<{ id?: unknown; body?: unknown; created_at?: unknown; issue_url?: unknown }>([
       "api",
@@ -228,7 +228,7 @@ export async function fetchComment(repo: string, commentId: number): Promise<Fet
 }
 
 /** Latest `labeled` event for `state` from the issue's paginated events. Never throws. */
-export async function fetchStateEntry(
+async function fetchStateEntry(
   repo: string,
   issue: number,
   state: string,
@@ -256,7 +256,7 @@ export async function fetchStateEntry(
 }
 
 /** Issue comment bodies in order. Never throws. */
-export async function fetchIssueComments(repo: string, issue: number): Promise<Fetched<string[]>> {
+async function fetchIssueComments(repo: string, issue: number): Promise<Fetched<string[]>> {
   try {
     const res = await ghJson<unknown>(["api", `repos/${repo}/issues/${issue}/comments`, "--paginate", "--slurp"]);
     if (isGhFailure(res) || !Array.isArray(res.data)) return { ok: false };
@@ -269,7 +269,7 @@ export async function fetchIssueComments(repo: string, issue: number): Promise<F
 }
 
 /** The issue timeline reduced to label events. Never throws. */
-export async function fetchLabelTimeline(repo: string, issue: number): Promise<Fetched<TimelineLabelEvent[]>> {
+async function fetchLabelTimeline(repo: string, issue: number): Promise<Fetched<TimelineLabelEvent[]>> {
   try {
     const res = await ghJson<unknown>(["api", `repos/${repo}/issues/${issue}/timeline`, "--paginate", "--slurp"]);
     if (isGhFailure(res) || !Array.isArray(res.data)) return { ok: false };
@@ -297,7 +297,7 @@ export async function fetchLabelTimeline(repo: string, issue: number): Promise<F
  * (`createdAt` for comments, `submittedAt` for reviews; null when missing or
  * unparseable, which the count treats as newer than any reset). Never throws.
  */
-export async function fetchPrBodies(repo: string, prNumber: number): Promise<Fetched<TimedBody[]>> {
+async function fetchPrBodies(repo: string, prNumber: number): Promise<Fetched<TimedBody[]>> {
   try {
     const res = await ghJson<{ comments?: unknown; reviews?: unknown }>([
       "pr", "view", String(prNumber), "--repo", repo, "--json", "comments,reviews",
@@ -325,7 +325,7 @@ export async function fetchPrBodies(repo: string, prNumber: number): Promise<Fet
  * unmerged PR -> unknown; closed -> closed; open -> open; any failure ->
  * unknown. Never throws.
  */
-export async function fetchBlockerRefs(repo: string, refs: number[]): Promise<Fetched<BlockerRecord[]>> {
+async function fetchBlockerRefs(repo: string, refs: number[]): Promise<Fetched<BlockerRecord[]>> {
   try {
     const out: BlockerRecord[] = [];
     for (const n of refs) {
@@ -347,7 +347,7 @@ export async function fetchBlockerRefs(repo: string, refs: number[]): Promise<Fe
  * contexts are read, never guessed; an unreadable set folds to `unknown`.
  * Never throws.
  */
-export async function fetchQaLive(repo: string, prNumber: number): Promise<Fetched<QaLivePr>> {
+async function fetchQaLive(repo: string, prNumber: number): Promise<Fetched<QaLivePr>> {
   try {
     const res = await ghJson<Record<string, unknown>>([
       "pr", "view", String(prNumber), "--repo", repo, "--json",
@@ -472,7 +472,7 @@ export function defaultSeamDeps(repoRoot: string): SeamDeps {
 // cap check (ADR-0047 D6, issue #5314)
 // ---------------------------------------------------------------------------
 
-export type CapCheck =
+type CapCheck =
   | { status: "skipped" }
   | { status: "checked"; evaluation: CapEvaluation };
 

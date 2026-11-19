@@ -164,6 +164,6 @@ enforced-by: scripts/ci/playbook-vocabulary-ratchet.ts
 
 ### STD-BASELINE-EDIT-ROWS
 
-Move only the baseline rows for files the PR changes. Lower a row for a file you shrank. Never commit a blanket writer's output. A raised row needs a PR-body line `Baseline-raise: <fixture-path> <row-key> — <reason>`. An undisclosed raise, or a row moved for a file outside the diff, is a medium finding, reviewer-fixable as ADR-0046 class A.
+Move only rows for changed files. A row a manifest test forces counts as changed. Never commit a blanket writer's output. A raised or seeded row needs a PR-body line `Baseline-raise: <fixture-path> <row-key> — <reason>`. An undisclosed raise, or a row for a file outside the diff, is a medium finding, reviewer-fixable as ADR-0046 class A.
 
-enforced-by: reviewer
+enforced-by: reviewer, scripts/ci/baseline-raise-check.ts (advisory)
