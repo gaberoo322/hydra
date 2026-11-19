@@ -255,3 +255,64 @@ describe("review-findings Redis seam (live round trip)", () => {
     assert.deepEqual(await readReviewFindingRows(), []);
   });
 });
+
+describe("review-findings rule validation against the catalogue", () => {
+  const known = new Set(["STD-DESIGN-NO-REIMPLEMENT"]);
+  const stored = (row: ReviewFindingRow): StoredReviewFindingRow => ({ id: reviewFindingRowId(row), row });
+  const foldOf = (text: string) =>
+    foldReviewFindings({
+      tier: 3,
+      findings: [{ severity: "low", axis: "standards", reviewer: "reviewer-A-standards", location: "src/a.ts:10", finding: text, fix: "x" }],
+    });
+
+  test("a bare family token is never stored as a rule, catalogue or not", () => {
+    const row = finding({ finding: "STD-PLAYBOOK rules overstate coverage" });
+    assert.equal(row.kind === "finding" ? row.rule : "x", null);
+  });
+
+  test("an unknown ID keeps the finding with rule null and adds a sibling detector-gap row", () => {
+    const rows = rowsFromFold(foldOf("STD-NOPE-THING: bogus"), { pr: 5, round: 1, sha: "abc" }, { at: iso(1), knownRules: known });
+    assert.equal(rows.length, 2);
+    const f = rows.find((r) => r.row.kind === "finding");
+    assert.ok(f && f.row.kind === "finding" && f.row.rule === null && f.row.finding.includes("bogus"));
+    const gap = rows.find((r) => r.row.kind === "detector-gap");
+    assert.ok(gap && gap.row.kind === "detector-gap");
+    assert.equal(gap.row.gapClass, "unknown-rule-id:STD-NOPE-THING");
+    assert.equal(gap.row.key, "src/a.ts:10");
+  });
+
+  test("conforming rows keep byte-identical ids with or without the catalogue", () => {
+    const fold = foldOf("STD-DESIGN-NO-REIMPLEMENT: dup");
+    const withCat = rowsFromFold(fold, { pr: 5, round: 1, sha: "abc" }, { at: iso(1), knownRules: known });
+    const without = rowsFromFold(fold, { pr: 5, round: 1, sha: "abc" }, { at: iso(1) });
+    assert.deepEqual(withCat.map((r) => r.id), without.map((r) => r.id));
+    assert.equal(withCat.length, 1);
+  });
+
+  test("route and reconcile feeders agree on unknown-rule rows", () => {
+    const fold = foldOf("STD-NOPE-THING: bogus");
+    const trailer = renderQaVerdictTrailer({ verdict: "PASS", pr: 5, round: 1, sha: "abcdef123456", blockers: 0, maxSeverity: "low" });
+    const body = `${renderReviewReport({ fold, standardsSummary: "s", specSummary: "p" })}\n\n${trailer}`;
+    const routed = rowsFromFold(fold, { pr: 5, round: 1, sha: "abcdef123456" }, { at: iso(1), knownRules: known });
+    const parsed = parseReviewFindingsComment(body, { at: iso(1), knownRules: known });
+    assert.deepEqual(parsed.map((p) => p.id).sort(), routed.map((r) => r.id).sort());
+  });
+
+  test("reconcile never prunes unknown-rule rows by default (other-repo / removed-rule rows survive)", () => {
+    const bad = stored(finding({ finding: "STD-NOPE-THING: x", location: "src/b.ts:1" }));
+    const dflt = reconcileReviewFindings([bad], [], { now: NOW, knownRules: known });
+    assert.deepEqual(dflt.pruned, []);
+    assert.equal(dflt.unknownRule, 0);
+  });
+
+  test("reconcile prunes stored findings citing an unknown rule and counts them", () => {
+    const bad = stored(finding({ finding: "STD-NOPE-THING: x", location: "src/b.ts:1" }));
+    const good = stored(finding());
+    const res = reconcileReviewFindings([bad, good], [], { now: NOW, knownRules: known, pruneUnknownRule: true });
+    assert.deepEqual(res.pruned, [bad.id]);
+    assert.equal(res.unknownRule, 1);
+    const noCat = reconcileReviewFindings([bad, good], [], { now: NOW });
+    assert.deepEqual(noCat.pruned, []);
+    assert.equal(noCat.unknownRule, 0);
+  });
+});

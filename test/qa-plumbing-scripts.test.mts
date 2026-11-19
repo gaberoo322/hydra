@@ -1100,6 +1100,25 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
     assert.equal(failing.writes().length, 4, "the gh and seam effects were all performed");
   });
 
+  test("route: a throwing or missing loadStandards degrades to grammar-only and still appends rows", async () => {
+    const mk = () => harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "medium" }) });
+    const thrown: unknown[][] = [];
+    const r = await runRoute(ROUTE_OPTS, readyPre(), mk().ports, {
+      ...realDeps(thrown),
+      loadStandards: async () => {
+        throw new Error("fs down");
+      },
+    });
+    assert.equal(thrown.length, 1, "loader throw must not skip the append");
+    assert.ok(!r.degraded.includes("review-findings"));
+    const missing: unknown[][] = [];
+    await runRoute(ROUTE_OPTS, readyPre(), mk().ports, {
+      ...realDeps(missing),
+      loadStandards: async () => ({ ok: true, found: false }) as never,
+    });
+    assert.equal(missing.length, 1, "found:false keeps the grammar-only append");
+  });
+
   test("route: a Merge-danger finding row is added to the findings map and the gap line is appended to the report", async () => {
     const packetPath = join(routeFiles, "packet.json");
     writeFileSync(

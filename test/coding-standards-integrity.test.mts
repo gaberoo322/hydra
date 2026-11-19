@@ -8,6 +8,7 @@ import {
   checkStandardsIntegrity,
   compareWordBaseline,
   countWords,
+  isStandardsRuleId,
   loadCodingStandards,
   parseCodingStandards,
 } from "../src/qa/standards-loader.ts";
@@ -309,5 +310,14 @@ describe("loadCodingStandards", () => {
   it("loads the live repo root file", async () => {
     const r = await loadCodingStandards(ROOT);
     assert.ok(r.ok && r.found);
+  });
+});
+
+describe("isStandardsRuleId grammar predicate", () => {
+  it("rejects bare family tokens and accepts 2+ segment IDs", () => {
+    assert.equal(isStandardsRuleId("STD-PLAYBOOK"), false);
+    assert.equal(isStandardsRuleId("STD-DESIGN-NO-REIMPLEMENT"), true);
+    assert.equal(isStandardsRuleId("STD-LOG-PINO-SEAM"), true);
+    assert.equal(isStandardsRuleId("std-log-pino"), false);
   });
 });
