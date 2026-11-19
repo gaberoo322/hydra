@@ -5,7 +5,7 @@
  */
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 
 import { getAttentionFeed, type AttentionFeedDeps } from "../src/attention.ts";
 import { DEFAULT_THRESHOLDS } from "../src/aggregators/stuck-items.ts";
@@ -130,8 +130,14 @@ describe("rank 3 target-items — wired and parameterised", () => {
     assert.equal(item.action.key, "target-items:ready-for-human");
   });
 
-  test("src/attention.ts and issues-waiting.ts carry no Target repo literal", () => {
-    for (const f of ["src/attention.ts", "src/aggregators/issues-waiting.ts"]) {
+  test("src/attention.ts, src/attention/*.ts and issues-waiting.ts carry no Target repo literal", () => {
+    const dir = new URL("../src/attention/", import.meta.url);
+    const bucketFiles = existsSync(dir)
+      ? readdirSync(dir)
+          .filter((f) => f.endsWith(".ts"))
+          .map((f) => `src/attention/${f}`)
+      : [];
+    for (const f of ["src/attention.ts", ...bucketFiles, "src/aggregators/issues-waiting.ts"]) {
       const src = readFileSync(new URL(`../${f}`, import.meta.url), "utf8");
       assert.doesNotMatch(src, /claw-street-bets|hydra-betting/, f);
     }
