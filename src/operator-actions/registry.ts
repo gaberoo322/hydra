@@ -1443,11 +1443,14 @@ const RAW_ENTRIES = [
         consequence: "reads body, comments and labels without entering the interactive walk",
       },
       {
-        kind: "terminal-skill",
-        command: "gh issue edit {number} --repo {repo} --add-label blocked",
+        kind: "in-dashboard",
+        route: "/autopilot/board/relabel",
+        method: "POST",
+        confirmTier: "immediate-undo",
         label: "Mark blocked instead",
         preconditions: ["a real blocking issue exists to reference"],
-        consequence: "moves the item to the stale-blocked admission line until the blocker resolves",
+        consequence:
+          "swaps the state label to blocked through the board route (never a second state label), moving the item to the stale-blocked admission line until the blocker resolves",
       },
     ],
     rationale:
@@ -1600,13 +1603,16 @@ const RAW_ENTRIES = [
     key: "waiting-on-you:stale-blocked",
     reviewBucket: "Stale-blocked",
     recommended: {
-      kind: "terminal-skill",
-      command: "gh issue edit {number} --repo {repo} --remove-label blocked --add-label ready-for-agent",
+      kind: "in-dashboard",
+      route: "/autopilot/board/promote",
+      method: "POST",
+      confirmTier: "confirm-first",
       label: "Unblock",
       preconditions: [
         "the issue body has a ## Files in scope section (issue-label-validation reverts ready-for-agent without one)",
       ],
-      consequence: "removes the blocked label and returns the issue to the agent queue",
+      consequence:
+        "promotes the issue to ready-for-agent through the board promote gate, which refuses a closed issue, an already-ready issue, a missing ## Files in scope section and an open strict blocker",
     },
     alternatives: [
       {
@@ -1646,11 +1652,13 @@ const RAW_ENTRIES = [
         consequence: "walks it alongside other operator-attention issues",
       },
       {
-        kind: "terminal-skill",
-        command: "gh issue edit {number} --repo {repo} --remove-label needs-info --add-label wontfix",
+        kind: "in-dashboard",
+        route: "/autopilot/board/close",
+        method: "POST",
+        confirmTier: "immediate-undo",
         label: "Close as won't-fix",
         preconditions: [],
-        consequence: "drops the issue rather than continuing to wait on an answer",
+        consequence: "closes the issue as not planned (no label is written) rather than continuing to wait on an answer",
       },
     ],
     rationale:
@@ -1705,11 +1713,14 @@ const RAW_ENTRIES = [
         consequence: "reads the blocked-by reference and current state without entering the interactive walk",
       },
       {
-        kind: "terminal-skill",
-        command: "gh issue edit {number} --repo {repo} --add-label ready-for-human",
+        kind: "in-dashboard",
+        route: "/autopilot/board/relabel",
+        method: "POST",
+        confirmTier: "immediate-undo",
         label: "Escalate to ready-for-human",
         preconditions: [],
-        consequence: "moves the item ahead in drain order once a live blocker needs an operator decision now",
+        consequence:
+          "swaps the state label to ready-for-human through the board route (never a second state label), moving the item ahead in drain order once a live blocker needs an operator decision now",
       },
     ],
     rationale:
@@ -1827,10 +1838,10 @@ const RAW_ENTRIES = [
       },
       {
         kind: "terminal-skill",
-        command: "gh issue edit {number} --repo {repo} --remove-label needs-info --add-label wontfix",
+        command: 'gh issue close {number} --repo {repo} --reason "not planned"',
         label: "Close as won't-fix",
         preconditions: [],
-        consequence: "drops the Target issue rather than continuing to wait on an answer",
+        consequence: "closes the Target issue as not planned (no label is written) rather than continuing to wait on an answer",
       },
     ],
     rationale:
@@ -1857,10 +1868,10 @@ const RAW_ENTRIES = [
       },
       {
         kind: "terminal-skill",
-        command: "gh issue edit {number} --repo {repo} --add-label ready-for-human",
-        label: "Escalate to ready-for-human",
+        command: 'gh issue close {number} --repo {repo} --reason "not planned"',
+        label: "No longer relevant",
         preconditions: [],
-        consequence: "moves the Target item ahead in drain order once a live blocker needs an operator decision now",
+        consequence: "closes the Target issue as not planned (no label is written) once its blocker no longer applies",
       },
     ],
     rationale:

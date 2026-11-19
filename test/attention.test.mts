@@ -410,6 +410,7 @@ describe("getAttentionFeed — signal wiring onto the common item shape", () => 
     assert.equal(blocked.threshold, DEFAULT_THRESHOLDS.blockedDays);
     assert.equal(blocked.thresholdLabel, `blocked ≥ ${DEFAULT_THRESHOLDS.blockedDays}d`);
     assert.equal(blocked.url, "https://github.com/gaberoo322/hydra/issues/11");
+    assert.equal(blocked.issue, 11, "a per-issue row carries its issue number for board-route bodies");
 
     const info = result.items.find((i) => i.id === "needs-info-issue-12")!;
     assert.equal(info.signal, "blocked-on-human");

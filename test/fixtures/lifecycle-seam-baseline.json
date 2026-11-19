@@ -7,7 +7,6 @@
     "scripts/ci/hydra-target-wire-or-retire-emit.ts": 2,
     "scripts/qa/pair-graduation.ts": 1,
     "src/glm/finish.ts": 1,
-    "src/operator-actions/registry.ts": 6,
     "src/pattern-memory/escalation.ts": 1,
     "src/scheduler/chores/glm-eligibility-sweep.ts": 1,
     "src/scheduler/chores/wiring-liveness-dark-alarm.ts": 1
