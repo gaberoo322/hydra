@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { resolve } from "node:path";
 
 import { countTscErrors } from "../scripts/ci/test-typecheck-check.ts";
 
@@ -55,4 +57,17 @@ test("does not count an indented continuation line as a diagnostic", () => {
     "    Object literal may only specify known properties.",
   ].join("\n");
   assert.equal(countTscErrors(out), 1);
+});
+
+test("importing the module runs no CLI: no tsc, no process.exit, no check output", () => {
+  const modPath = resolve(import.meta.dirname, "../scripts/ci/test-typecheck-check.ts");
+  const script = `await import(${JSON.stringify(modPath)}); process.stdout.write("IMPORTED");`;
+  const res = spawnSync(
+    process.execPath,
+    ["--no-warnings", "--experimental-strip-types", "--input-type=module", "-e", script],
+    { encoding: "utf8", timeout: 20_000 },
+  );
+  assert.equal(res.status, 0, `child exit: ${res.status} ${res.stderr}`);
+  assert.equal(res.stdout, "IMPORTED");
+  assert.doesNotMatch(res.stdout + res.stderr, /\[test-typecheck-check\]/);
 });

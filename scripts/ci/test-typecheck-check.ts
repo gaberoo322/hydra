@@ -58,7 +58,7 @@ import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { formatGrowthAdvice, formatStaleAdvice, loadJsonBaseline, writeJsonBaseline } from "./seam-check-lib.ts";
+import { formatGrowthAdvice, formatStaleAdvice, isCliEntrypoint, loadJsonBaseline, writeJsonBaseline } from "./seam-check-lib.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -272,10 +272,12 @@ async function main(): Promise<number> {
   return 0;
 }
 
-main().then(
-  code => process.exit(code),
-  err => {
-    console.error("[test-typecheck-check] crash:", err);
-    process.exit(2);
-  },
-);
+if (isCliEntrypoint(import.meta.url)) {
+  main().then(
+    code => process.exit(code),
+    err => {
+      console.error("[test-typecheck-check] crash:", err);
+      process.exit(2);
+    },
+  );
+}
