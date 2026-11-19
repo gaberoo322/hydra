@@ -21,7 +21,7 @@ export type Adr5Reason = (typeof ADR5_REASONS)[number];
  * parks with `cap:<arm>`, so `parked` accepts the `cap:` prefix as well (see
  * {@link isAllowedReason}).
  */
-export const TRIAGE_REASONS: Partial<Record<LifecycleState, readonly string[]>> = {
+const TRIAGE_REASONS: Partial<Record<LifecycleState, readonly string[]>> = {
   "needs-info": ["missing-repro", "missing-acceptance", "ambiguous-scope", "awaiting-answer"],
   "needs-research": ["unknown-root-cause", "unknown-prior-art", "unknown-feasibility"],
   "hitl-grill": ["design-decision", "vision-question", "scope-negotiation"],
@@ -34,7 +34,7 @@ export const TRIAGE_REASONS: Partial<Record<LifecycleState, readonly string[]>> 
 };
 
 /** Reason prefix a cap exhaustion carries into `parked` (ADR-0047 D6). */
-export const CAP_REASON_PREFIX = "cap:";
+const CAP_REASON_PREFIX = "cap:";
 
 /** True when `reason` is a member of the closed list for `to`. */
 export function isAllowedReason(to: LifecycleState, reason: string): boolean {

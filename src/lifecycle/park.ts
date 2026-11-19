@@ -44,7 +44,7 @@ function parkEvidence(over: CapCount, pr: number | null): Record<string, string>
 }
 
 /** The `Hydra-Cap-Park:` machine line plus the human-readable unified comment. */
-export function renderParkComment(input: ParkInput, nowIso: string): string {
+function renderParkComment(input: ParkInput, nowIso: string): string {
   const { over, counts, pr } = input;
   const rows = counts.map((c) => `| ${c.arm} | ${c.count} | ${c.limit} | ${c.unit} |`);
   return [
