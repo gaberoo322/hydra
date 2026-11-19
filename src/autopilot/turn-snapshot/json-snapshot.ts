@@ -98,7 +98,7 @@ export interface BuiltTurnSnapshot {
 // ---------------------------------------------------------------------------
 
 /** `int(str(raw).strip())`, else `0`. */
-export function intOrZero(raw: string | null | undefined): number {
+function intOrZero(raw: string | null | undefined): number {
   if (raw === null || raw === undefined) return 0;
   const m = /^\s*([+-]?\d+(?:_\d+)*)\s*$/.exec(raw);
   return m ? Number((m[1] as string).replace(/_/g, "")) : 0;
