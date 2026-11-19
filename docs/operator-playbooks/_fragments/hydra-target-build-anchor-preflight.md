@@ -90,12 +90,9 @@ non-empty.
 
 ```bash
 # --- 0. Populate SCOPE_IN from the plan's scopeBoundary.in ---
-# SUBSTITUTE the real plan scope here: one $TARGET_APP_SUBDIR-relative file OR
-# directory prefix per line, exactly as computed for scopeBoundary.in in Step
-# 3. This MUST be assigned before the intersection loops below use it — an
-# empty SCOPE_IN makes both read loops iterate once on a blank line, so every
-# hit list comes back empty and the preflight silently PASSES (a no-op). The
-# two lines below are a placeholder EXAMPLE — replace them with your plan's scope:
+[ "${TARGET_MANIFEST_ROOT:-}" = "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}" ] || { echo "ABORT: manifest facts not read from \$TARGET_WT - re-run the Step 0.6 manifest re-resolution in this Bash call" >&2; exit 1; }
+# SUBSTITUTE the plan's scopeBoundary.in (Step 3): one path or directory prefix
+# per line. An empty SCOPE_IN silently PASSES; these two lines are an EXAMPLE:
 SCOPE_IN="${TARGET_APP_SUBDIR:+$TARGET_APP_SUBDIR/}src/example-module/example-file.ts
 ${TARGET_APP_SUBDIR:+$TARGET_APP_SUBDIR/}src/example-module/other-file.ts"
 

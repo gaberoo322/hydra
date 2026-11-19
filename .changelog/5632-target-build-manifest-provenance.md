@@ -1,0 +1,1 @@
+- docs: Target build playbook names the serving checkout's manifest as the risk-surface source and guards the anchor-preflight SCOPE_IN block with the manifest provenance check (#5632)

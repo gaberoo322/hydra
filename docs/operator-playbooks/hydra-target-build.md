@@ -471,9 +471,8 @@ path cannot reach it) — never from `~/hydra`.
 **Gate on risk-critical first — safe-path builds skip this step entirely.**
 `shouldCaptureDesignConcept()` routes on the keystone classifier
 (`classifyRisk` in `src/target/risk-critical.ts`): a path is
-risk-critical iff it touches the Target's own declared risk surface
-(`riskCritical.surface` in `<TARGET_WT>/.hydra/manifest.json`, ADR-0026 — the Target-specific risk vocabulary lives only in the target repo,
-never hardcoded here). If no
+risk-critical iff it touches the Target's declared risk surface
+(`riskCritical.surface` in the serving checkout's `$TARGET_WS/.hydra/manifest.json`, ADR-0026; a branch cannot narrow it). If no
 expected path is risk-critical, there is no artifact to create, persist, or
 diff against — proceed straight to Step 5.
 
