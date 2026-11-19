@@ -836,6 +836,7 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
     assert.match(sweep.prompt, /scripts\/lifecycle\.ts advance <N> <to>/);
     assert.match(retro.prompt, /Issue STATE labels .* move only through `npx tsx scripts\/lifecycle\.ts advance <N> <to> \.\.\.`/);
     assert.match(retro.prompt, /refusal exits non-zero and is final/);
+    assert.match(retro.prompt, /created with FLAG labels only, then `advance <N> needs-triage --actor <class>` \(from none\)/);
     // QA round 2: a Target sweep keeps the flag-label mechanics but NOT the
     // orchestrator-seam state rule (the Target board is outside the seam).
     const tsweep = render("sweep_target", action("sweep_target", "hydra-target-sweep"));

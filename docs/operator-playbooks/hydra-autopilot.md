@@ -795,6 +795,8 @@ The replay contract in `test/turn-snapshot-json.test.mts` (#5085) is the only gu
 
 **When you discover a defect in Hydra's own machinery, you file it as `hitl-grill`, never as `ready-for-agent`.**
 
+File with no state label, then `advance <N> needs-triage --actor <class>` (from none), then `advance <N> hitl-grill --reason design-decision --rationale "<one line>"` through `scripts/lifecycle.ts` (ADR-0047 D2/D4); never a direct label write.
+
 You may file freely — noticing defects is valuable and nothing here discourages it.
 What you may NOT do is promote your own finding into the dispatch queue. Only the
 operator moves an issue from `hitl-grill` to `ready-for-agent`. The `/work` inbox

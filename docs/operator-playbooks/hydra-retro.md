@@ -296,7 +296,7 @@ Without `--apply` print the plan and write the artifact only.
    with `recordRetroSeen({...entry, at: <now ISO>})` so the due signal does not
    re-fire daily (next check in 7 days); `fence` is
    terminal. Caps are independent of the run pass: at most **2** check issues
-   (`needs-triage`, body names the arm, PRs, rounds and the proposed
+   (created with no state label, then `advance <N> needs-triage --actor hydra-retro` as in the run pass; body names the arm, PRs, rounds and the proposed
    deterministic check) and **1** PR (a standard or fence rung).
 3. **Cohort trip.** `loadRolloutSwitches(repoRoot)` reporting a trip yields one
    mechanical issue via `planCohortTripIssue(baseline generatedAt, seen)`,
