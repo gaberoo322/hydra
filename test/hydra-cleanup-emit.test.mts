@@ -793,6 +793,27 @@ describe("hydra-cleanup-emit filing lane (#5616)", () => {
     assert.equal(quietly(() => fileCleanupIssue("t", "b", "hitl-grill", exec)), "filed as #777 in hitl-grill");
   });
 
+  test("first advance: illegal-transition with issue already in needs-triage continues to the lane advance", () => {
+    const { exec, calls } = fakeExec({
+      advanceFail: (to) => (to === "needs-triage" ? "illegal-transition" : null),
+      viewLabels: ["needs-triage", "cleanup-scan"],
+    });
+    assert.equal(quietly(() => fileCleanupIssue("t", "b", "hitl-grill", exec)), "filed as #777 in hitl-grill");
+    assert.equal(calls.filter((c) => c.file === "npx").length, 2, "lane advance still attempted");
+  });
+
+  test("first advance: illegal-transition with issue NOT in needs-triage stays refused", () => {
+    const { exec, calls } = fakeExec({
+      advanceFail: (to) => (to === "needs-triage" ? "illegal-transition" : null),
+      viewLabels: ["cleanup-scan"],
+    });
+    assert.equal(
+      quietly(() => fileCleanupIssue("t", "b", "hitl-grill", exec)),
+      "filed as #777 (state write refused: illegal-transition)",
+    );
+    assert.equal(calls.filter((c) => c.file === "npx").length, 1);
+  });
+
   test("inbox cap truncates in plan order and states the arithmetic", () => {
     const planned = ["a", "b", "c", "d", "e", "f", "g", "h"];
     const seven = applyLanePolicy(planned, "hitl-grill", false, 7);

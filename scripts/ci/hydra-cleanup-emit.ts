@@ -657,7 +657,11 @@ export function fileCleanupIssue(title: string, body: string, lane: CleanupLane,
   const n = Number(m[1]);
 
   const tri = seamAdvance(exec, n, "needs-triage", []);
-  if (tri !== null) return `filed as #${n} (state write refused: ${tri})`;
+  // A reconcile backstop may have already put the issue in needs-triage (race):
+  // an illegal-transition whose observed state equals the target is success.
+  if (tri !== null && !(tri === "illegal-transition" && alreadyInState(exec, n, "needs-triage"))) {
+    return `filed as #${n} (state write refused: ${tri})`;
+  }
 
   const laneArgs =
     lane === "hitl-grill"
