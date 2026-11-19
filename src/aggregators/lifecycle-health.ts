@@ -26,7 +26,7 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
 import { CAP_ARMS, type CapArm } from "../lifecycle/caps.ts";
-import { loadLifecycleMode, type LifecycleMode } from "../lifecycle/seam.ts";
+import { loadLifecycleMode, type LifecycleMode } from "../lifecycle/index.ts";
 import { listCapEvents, type CapEventRecord, type ListCapEventsResult } from "../redis/lifecycle-journal.ts";
 import { listAutopilotRunsSince } from "../redis/autopilot-runs.ts";
 import { readRunTurns, sanitizeParentExceptions, type TurnParentException, type TurnRow } from "../autopilot/turn-row.ts";

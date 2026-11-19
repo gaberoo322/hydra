@@ -358,7 +358,13 @@ describe("no TTL, no force path (INV-1, INV-2)", () => {
   });
 
   test("there is no force-release path: no release --held, no releaseHeldClaim", () => {
-    const files = ["../scripts/lifecycle.ts", "../src/lifecycle/seam.ts", "../src/lifecycle/reconcile.ts"];
+    const files = [
+      "../scripts/lifecycle.ts",
+      "../src/lifecycle/seam.ts",
+      "../src/lifecycle/claim.ts",
+      "../src/lifecycle/operator.ts",
+      "../src/lifecycle/reconcile.ts",
+    ];
     for (const f of files) {
       const src = readFileSync(new URL(f, import.meta.url), "utf8");
       assert.equal(/releaseHeldClaim|"held"|--held/.test(src), false, f);

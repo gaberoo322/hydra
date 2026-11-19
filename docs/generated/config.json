@@ -214,7 +214,7 @@
       "path": "config/orchestrator/lifecycle-rollout.json",
       "section": null,
       "readBy": [
-        "src/lifecycle/seam.ts"
+        "src/lifecycle/seam-deps.ts"
       ],
       "unread": false,
       "source": {

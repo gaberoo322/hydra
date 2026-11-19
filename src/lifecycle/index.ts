@@ -100,28 +100,27 @@ export {
   type ReconcileReport,
 } from "./reconcile.ts";
 export { parkForCap, postCapReset, type CapResetResult, type ParkResult } from "./park.ts";
+export { advance, journalEntry, type AdvanceInput, type AdvanceResult } from "./seam.ts";
 export {
-  advance,
   defaultSeamDeps,
-  journalEntry,
   loadLifecycleMode,
-  openClaim,
-  operatorAdvance,
-  operatorReopen,
-  releaseClaim,
-  releaseClaimByDispatch,
-  dispatch,
-  type DispatchInput,
-  type DispatchResult,
-  CLAIM_OUTCOMES,
-  type ClaimOutcome,
-  type ClaimPurpose,
   resolveLifecycleMode,
-  type OperatorAdvanceInput,
-  type AdvanceInput,
-  type AdvanceResult,
-  type ClaimInput,
-  type ClaimResult,
   type LifecycleMode,
   type SeamDeps,
-} from "./seam.ts";
+} from "./seam-deps.ts";
+export {
+  CLAIM_OUTCOMES,
+  CLAIM_PURPOSES,
+  LEGACY_BACKFILL_CLASS,
+  dispatch,
+  openClaim,
+  releaseClaim,
+  releaseClaimByDispatch,
+  type ClaimInput,
+  type ClaimOutcome,
+  type ClaimPurpose,
+  type ClaimResult,
+  type DispatchInput,
+  type DispatchResult,
+} from "./claim.ts";
+export { operatorAdvance, operatorReopen, type OperatorAdvanceInput } from "./operator.ts";

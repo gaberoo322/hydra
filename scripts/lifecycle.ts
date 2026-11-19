@@ -29,7 +29,7 @@ import {
   type ClaimOutcome,
   type ClaimPurpose,
 } from "../src/lifecycle/index.ts";
-import { CLAIM_PURPOSES } from "../src/lifecycle/seam.ts";
+import { CLAIM_PURPOSES } from "../src/lifecycle/index.ts";
 
 const USAGE =
   "[lifecycle] usage: advance <issue> <to> | claim <issue> --dispatch <id> ... | " +

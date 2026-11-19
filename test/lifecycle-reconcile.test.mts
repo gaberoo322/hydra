@@ -8,7 +8,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { advance, type SeamDeps } from "../src/lifecycle/seam.ts";
+import { advance, type SeamDeps } from "../src/lifecycle/index.ts";
 import {
   MAX_QA_EXIT_EVALS,
   MAX_TIMELINE_FETCHES,
