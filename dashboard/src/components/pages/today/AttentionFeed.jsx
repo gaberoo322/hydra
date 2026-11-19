@@ -89,13 +89,19 @@ function altTitle(alt) {
  * Do: <affordance>, the unchecked preconditions, → consequence, then the
  * alternatives as TEXT.
  */
-function ActionColumn({ entry, onFired, onResult }) {
+function ActionColumn({ entry, issue, onFired, onResult }) {
   const a = entry.recommended;
   return (
     <div className="grid content-start gap-1.5 text-xs">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-zinc-500">Do:</span>
-        <ActionAffordance action={a} doc={entry.doc} onFired={onFired} onResult={onResult} />
+        <ActionAffordance
+          action={a}
+          doc={entry.doc}
+          context={issue === undefined ? undefined : { number: issue }}
+          onFired={onFired}
+          onResult={onResult}
+        />
       </div>
       {a.preconditions.length > 0 && (
         <ul className="grid gap-0.5">
@@ -187,7 +193,7 @@ function FeedItem({ item, onFired, onResult, onDismissStart }) {
         {item.detail && <div className="mt-0.5 text-[11px] text-zinc-500">{item.detail}</div>}
         <DismissControl item={item} onDismissStart={onDismissStart} />
       </div>
-      <ActionColumn entry={item.action} onFired={onFired} onResult={onResult} />
+      <ActionColumn entry={item.action} issue={item.issue} onFired={onFired} onResult={onResult} />
     </div>
   );
 }
@@ -222,7 +228,7 @@ function AggregateWell({ item, onFired, onResult, onDismissStart }) {
               <ActionColumn entry={sub.action} onFired={onFired} onResult={onResult} />
             </div>
           ))
-        : <ActionColumn entry={item.action} onFired={onFired} onResult={onResult} />}
+        : <ActionColumn entry={item.action} issue={item.issue} onFired={onFired} onResult={onResult} />}
     </div>
   );
 }
