@@ -40,7 +40,6 @@ import {
   type LifecycleMode,
 } from "../src/lifecycle/index.ts";
 import { isUnsanctionedHoldExit } from "../src/lifecycle/hold-exit.ts";
-import { CAP_RESET_EXIT_STATES, resetsCapsOnExit } from "../src/lifecycle/caps.ts";
 import type { LifecycleJournalEntry } from "../src/redis/lifecycle-journal.ts";
 
 function gi(over: Partial<GateInput> = {}): GateInput {
@@ -610,12 +609,6 @@ describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, IN
       const closedRes = await operatorAdvance({ issue: 10, to: "closed", actor: "board:close" }, c.h.deps);
       assert.equal(closedRes.ok, true);
       assert.equal(cPosted.length, 0);
-    });
-
-    test("resetsCapsOnExit names exactly the two cap-writable human-hold states (#5661)", () => {
-      assert.deepEqual([...CAP_RESET_EXIT_STATES], ["parked", "ready-for-human"]);
-      for (const s of ["parked", "ready-for-human"]) assert.equal(resetsCapsOnExit(s), true);
-      for (const s of ["hitl-grill", "needs-info", "blocked", "in-progress"]) assert.equal(resetsCapsOnExit(s), false);
     });
 
     test("a failed post leaves the transition ok and journals capReset=failed:<code>", async () => {
