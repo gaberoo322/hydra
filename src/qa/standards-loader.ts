@@ -24,9 +24,18 @@ export const CODING_STANDARDS_WORD_CEILING = 2000;
 
 export const CODING_STANDARDS_FILENAME = "CODING_STANDARDS.md";
 
-const RULE_ID_RE = /^STD-[A-Z]+(-[A-Z0-9]+)+$/;
+/**
+ * The one home of the STD rule-ID grammar: two or more segments, so a bare
+ * family token such as `STD-PLAYBOOK` is never a rule ID.
+ */
+export const STD_RULE_ID_RE = /^STD-[A-Z]+(-[A-Z0-9]+)+$/;
+const RULE_ID_RE = STD_RULE_ID_RE;
 const ADVISORY_MARKER_RE = /^(\S+) \(advisory\)$/;
 const ID_TOKEN_RE = /\bSTD-[A-Z]+(?:-[A-Z0-9]+)+\b/g;
+
+export function isStandardsRuleId(token: string): boolean {
+  return STD_RULE_ID_RE.test(token);
+}
 
 export interface StandardsRule {
   id: string;

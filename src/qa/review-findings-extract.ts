@@ -24,19 +24,21 @@ import type {
 } from "../redis/review-findings.ts";
 import { canonicalLocationKey, FOLLOW_UPS_HEADING, QA_FINDINGS_HEADING, type FoldedFinding } from "./fold.ts";
 import { parseQaVerdictTrailers } from "./verdict-trailer.ts";
+import { STD_RULE_ID_RE } from "./standards-loader.ts";
 
 const DEFAULT_WINDOW_DAYS = 30;
 export const RETENTION_DAYS = 90;
 const DAY_MS = 24 * 60 * 60 * 1000;
-const STD_RULE_RE = /STD-[A-Z0-9]+(?:-[A-Z0-9]+)*/;
+// The grammar's one home is standards-loader (`STD_RULE_ID_RE`); this is its unanchored token form.
+const STD_RULE_TOKEN_RE = new RegExp(STD_RULE_ID_RE.source.slice(1, -1));
 
 function oneLine(raw: unknown): string {
   return String(raw ?? "").replace(/\s+/g, " ").trim();
 }
 
-/** The first `STD-*` stable rule ID in a finding's text, or null. */
+/** The first grammar-valid `STD-*` rule token in a finding's text, or null. */
 function extractRule(finding: string): string | null {
-  const m = STD_RULE_RE.exec(finding);
+  const m = STD_RULE_TOKEN_RE.exec(finding);
   return m ? m[0] : null;
 }
 
@@ -83,9 +85,13 @@ export function makeFindingRow(input: {
   location: string;
   finding: string;
   reviewers: readonly string[];
+  /** The reviewed repo's catalogue rule IDs; a cited token outside it is stored as `rule: null`. */
+  knownRules?: ReadonlySet<string>;
 }): FindingRow {
   const location = oneLine(input.location);
   const finding = oneLine(input.finding);
+  const token = extractRule(finding);
+  const rule = token !== null && input.knownRules && !input.knownRules.has(token) ? null : token;
   return {
     kind: "finding",
     pr: input.pr,
@@ -97,10 +103,38 @@ export function makeFindingRow(input: {
     axis: input.axis,
     location,
     file: fileOfLocation(location),
-    rule: extractRule(finding),
+    rule,
     finding,
     reviewers: [...input.reviewers],
   };
+}
+
+type FindingRowInput = Parameters<typeof makeFindingRow>[0];
+
+/**
+ * The finding row plus, when it cites a rule token absent from the catalogue,
+ * a sibling `detector-gap` row (`unknown-rule-id:<TOKEN>`) so the retro's
+ * existing gap arm names the bogus ID. The finding itself is never dropped.
+ */
+function storedRowsForFinding(input: FindingRowInput): StoredReviewFindingRow[] {
+  const row = makeFindingRow(input);
+  const out: StoredReviewFindingRow[] = [{ id: reviewFindingRowId(row), row }];
+  const token = extractRule(row.finding);
+  if (token !== null && row.rule === null) {
+    const gap: ReviewFindingRow = {
+      kind: "detector-gap",
+      pr: row.pr,
+      round: row.round,
+      sha: row.sha,
+      at: row.at,
+      source: row.source,
+      gapClass: `unknown-rule-id:${token}`,
+      key: row.location,
+      note: `${token} cited by ${row.reviewers.join(",")} in ${row.severity} ${row.axis} finding`,
+    };
+    out.push({ id: reviewFindingRowId(gap), row: gap });
+  }
+  return out;
 }
 
 /**
@@ -110,11 +144,11 @@ export function makeFindingRow(input: {
 export function rowsFromFold(
   fold: { blocking: readonly FoldedFinding[]; followUps: readonly FoldedFinding[] },
   trailer: { pr: number; round: number; sha: string },
-  opts: { at: string; source?: ReviewFindingSource },
+  opts: { at: string; source?: ReviewFindingSource; knownRules?: ReadonlySet<string> },
 ): StoredReviewFindingRow[] {
   const source = opts.source ?? "route";
-  return [...fold.blocking, ...fold.followUps].map((f) => {
-    const row = makeFindingRow({
+  return [...fold.blocking, ...fold.followUps].flatMap((f) =>
+    storedRowsForFinding({
       pr: trailer.pr,
       round: trailer.round,
       sha: trailer.sha,
@@ -125,9 +159,9 @@ export function rowsFromFold(
       location: f.location,
       finding: f.finding,
       reviewers: f.reviewers,
-    });
-    return { id: reviewFindingRowId(row), row };
-  });
+      knownRules: opts.knownRules,
+    }),
+  );
 }
 
 /** Split a markdown table line on unescaped pipes, unescaping `\|`. */
@@ -146,7 +180,7 @@ function splitTableCells(line: string): string[] {
  */
 export function parseReviewFindingsComment(
   body: string | null | undefined,
-  opts: { at: string; source?: ReviewFindingSource },
+  opts: { at: string; source?: ReviewFindingSource; knownRules?: ReadonlySet<string> },
 ): StoredReviewFindingRow[] {
   if (typeof body !== "string") return [];
   const trailer = parseQaVerdictTrailers(body)[0];
@@ -166,7 +200,7 @@ export function parseReviewFindingsComment(
     const [severity, axis, reviewers, location, finding] = cells as [string, string, string, string, string, string];
     if (severity !== "high" && severity !== "medium" && severity !== "low") continue;
     if (axis !== "standards" && axis !== "spec") continue;
-    const row = makeFindingRow({
+    out.push(...storedRowsForFinding({
       pr: trailer.pr,
       round: trailer.round,
       sha: trailer.sha,
@@ -177,8 +211,8 @@ export function parseReviewFindingsComment(
       location,
       finding,
       reviewers: reviewers.split(",").map((r) => r.trim()).filter((r) => r !== ""),
-    });
-    out.push({ id: reviewFindingRowId(row), row });
+      knownRules: opts.knownRules,
+    }));
   }
   return out;
 }
@@ -192,14 +226,16 @@ export interface ReconcileResult {
   upserts: StoredReviewFindingRow[];
   /** Harvested rows already stored (route rows always win; same id = same row). */
   unchanged: number;
-  /** Stored ids older than the retention window (HDEL these). */
+  /** Stored ids older than the retention window, or citing an unknown rule (HDEL these). */
   pruned: string[];
+  /** How many of `pruned` are stored `finding` rows whose `rule` is outside the catalogue. */
+  unknownRule: number;
 }
 
 export function reconcileReviewFindings(
   existing: readonly StoredReviewFindingRow[],
   harvested: readonly StoredReviewFindingRow[],
-  opts: { now: number; retentionDays?: number },
+  opts: { now: number; retentionDays?: number; knownRules?: ReadonlySet<string> },
 ): ReconcileResult {
   const cutoff = opts.now - (opts.retentionDays ?? RETENTION_DAYS) * DAY_MS;
   const have = new Set(existing.map((e) => e.id));
@@ -214,13 +250,22 @@ export function reconcileReviewFindings(
     seen.add(h.id);
     upserts.push(h);
   }
-  const pruned = existing
-    .filter((e) => {
-      const at = Date.parse(e.row?.at);
-      return Number.isFinite(at) && at < cutoff;
-    })
-    .map((e) => e.id);
-  return { upserts, unchanged, pruned };
+  const isUnknownRule = (e: StoredReviewFindingRow): boolean =>
+    opts.knownRules !== undefined &&
+    e.row?.kind === "finding" &&
+    typeof e.row.rule === "string" &&
+    !opts.knownRules.has(e.row.rule);
+  const pruned: string[] = [];
+  let unknownRule = 0;
+  for (const e of existing) {
+    const at = Date.parse(e.row?.at);
+    if (Number.isFinite(at) && at < cutoff) pruned.push(e.id);
+    else if (isUnknownRule(e)) {
+      pruned.push(e.id);
+      unknownRule++;
+    }
+  }
+  return { upserts, unchanged, pruned, unknownRule };
 }
 
 // ---------------------------------------------------------------------------

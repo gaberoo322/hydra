@@ -70,6 +70,7 @@ import { QA_ADMISSION_SKIP_MARKER, annotateReviewerFixedReport } from "../../src
 import { COHORT_BASELINE_PATH, QA_ROLLOUT_CONFIG_PATH, resolveReviewerCommitsStageFromTexts, type ReviewerCommitsValue } from "../../src/qa/rollout-switches.ts";
 import { parseQaFixCommitTrailer, parseQaVerdictTrailer } from "../../src/qa/verdict-trailer.ts";
 import { rowsFromFold } from "../../src/qa/review-findings-extract.ts";
+import { loadCodingStandards, type LoadResult } from "../../src/qa/standards-loader.ts";
 import type { StoredReviewFindingRow } from "../../src/redis/review-findings.ts";
 
 type Severity = "high" | "medium" | "low" | "none";
@@ -91,6 +92,8 @@ export interface RouteDeps {
   readText: (path: string) => string | null;
   /** The review-findings Redis seam (`await import()`ed in production). */
   appendRows: (rows: StoredReviewFindingRow[]) => Promise<unknown>;
+  /** The reviewed repo's catalogue (`loadCodingStandards(process.cwd())` in production); optional. */
+  loadStandards?: () => Promise<LoadResult>;
   now: () => Date;
   /** Backoff between the disarm attempts (defaults to a real timer). */
   sleep?: (ms: number) => Promise<void>;
@@ -690,10 +693,16 @@ async function runRouteImpl(
   const parsedTrailer = parseQaVerdictTrailer(trailer);
   if (foldResult !== null && parsedTrailer !== null && !opts.dryRun) {
     try {
+      let knownRules: ReadonlySet<string> | undefined;
+      if (deps.loadStandards) {
+        const std = await deps.loadStandards();
+        if (std.ok && std.found) knownRules = new Set(std.parsed.rules.map((r) => r.id));
+        else console.error("[hydra-qa] WARN: no usable CODING_STANDARDS.md; review-findings rule validation skipped");
+      }
       const rows = rowsFromFold(
         foldResult.fold as Parameters<typeof rowsFromFold>[0],
         { pr, round: parsedTrailer.round, sha: parsedTrailer.sha },
-        { at: deps.now().toISOString(), source: "route" },
+        { at: deps.now().toISOString(), source: "route", knownRules },
       );
       await deps.appendRows(rows);
     } catch (err) {
@@ -765,6 +774,7 @@ if (isEntrypoint(import.meta.url)) {
             new Promise((_, reject) => setTimeout(() => reject(new Error("review-findings append timed out")), APPEND_TIMEOUT_MS)),
           ]);
         },
+        loadStandards: () => loadCodingStandards(process.cwd()),
         now: () => new Date(),
       },
     );

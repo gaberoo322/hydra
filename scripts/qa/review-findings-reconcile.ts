@@ -5,7 +5,7 @@
  * comments writes nothing new. The weekly trigger is R2's (#5271); this CLI is
  * the unit of work.
  *
- *   npx tsx scripts/qa/review-findings-reconcile.ts [--since <iso>] [--repo o/r] [--dry-run]
+ *   npx tsx scripts/qa/review-findings-reconcile.ts [--since <iso>] [--repo o/r] [--repo-root <path>] [--dry-run]
  *
  * Default --since is 7 days ago. It reads issue comments (verdict comments are
  * issue comments) in one paginated GitHub CLI Adapter call, parses each with
@@ -16,6 +16,7 @@
 
 import { parseReviewFindingsComment, reconcileReviewFindings } from "../../src/qa/review-findings-extract.ts";
 import type { StoredReviewFindingRow } from "../../src/redis/review-findings.ts";
+import { loadCodingStandards } from "../../src/qa/standards-loader.ts";
 import { withRetry } from "./cohort-baseline.ts";
 
 interface RestComment {
@@ -23,7 +24,19 @@ interface RestComment {
   created_at: string;
 }
 
-export async function harvestReviewFindingRows(repo: string, since: string): Promise<StoredReviewFindingRow[]> {
+/** The repo's catalogue rule IDs, or undefined (grammar-only validation) when it cannot be loaded. */
+export async function loadKnownRules(repoRoot: string): Promise<ReadonlySet<string> | undefined> {
+  const res = await loadCodingStandards(repoRoot);
+  if (res.ok && res.found) return new Set(res.parsed.rules.map((r) => r.id));
+  console.error(`[review-findings-reconcile] WARN: no usable CODING_STANDARDS.md under ${repoRoot}; skipping catalogue validation`);
+  return undefined;
+}
+
+export async function harvestReviewFindingRows(
+  repo: string,
+  since: string,
+  knownRules?: ReadonlySet<string>,
+): Promise<StoredReviewFindingRow[]> {
   const { ghJson } = await import("../../src/github/gh.ts");
   const path = `repos/${repo}/issues/comments?since=${encodeURIComponent(since)}&per_page=100`;
   const res = await withRetry(() =>
@@ -38,7 +51,7 @@ export async function harvestReviewFindingRows(repo: string, since: string): Pro
   return res.data
     .flat()
     .filter((c) => typeof c.body === "string" && c.body.includes("QA-Verdict:"))
-    .flatMap((c) => parseReviewFindingsComment(c.body, { at: c.created_at, source: "reconcile" }));
+    .flatMap((c) => parseReviewFindingsComment(c.body, { at: c.created_at, source: "reconcile", knownRules }));
 }
 
 const isMain = (() => {
@@ -65,11 +78,12 @@ if (isMain) {
   let code = 0;
   try {
     const seam = await import("../../src/redis/review-findings.ts");
-    const harvested = await harvestReviewFindingRows(repo, since);
+    const knownRules = await loadKnownRules(arg("--repo-root") ?? process.cwd());
+    const harvested = await harvestReviewFindingRows(repo, since, knownRules);
     const existing = await seam.readReviewFindingRows();
-    const plan = reconcileReviewFindings(existing, harvested, { now: Date.now() });
+    const plan = reconcileReviewFindings(existing, harvested, { now: Date.now(), knownRules });
     console.error(
-      `[review-findings-reconcile] harvested=${harvested.length} upserts=${plan.upserts.length} unchanged=${plan.unchanged} pruned=${plan.pruned.length}${dryRun ? " (dry-run)" : ""}`,
+      `[review-findings-reconcile] harvested=${harvested.length} upserts=${plan.upserts.length} unchanged=${plan.unchanged} pruned=${plan.pruned.length} unknown-rule=${plan.unknownRule}${dryRun ? " (dry-run)" : ""}`,
     );
     if (!dryRun) {
       await seam.appendReviewFindingRows(plan.upserts);
