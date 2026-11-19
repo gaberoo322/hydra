@@ -1,0 +1,1 @@
+- fix: leaving ready-for-human now restarts the Cap Arms like un-parking does (#5661)

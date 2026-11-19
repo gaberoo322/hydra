@@ -10,7 +10,7 @@
  *   - `qa-passed` exits (read live at head by the shared `classifyQaPassedExit`)
  *   - zero state labels -> `needs-triage` (epics, `keep-open`, `wayfinder:*` exempt)
  *   - 2+ state labels -> journaled once as invalid, never edited, surfaced on attention
- *   - an external `parked ->` exit -> one `Hydra-Cap-Reset:` marker
+ *   - an external `parked ->` or `ready-for-human ->` exit -> one `Hydra-Cap-Reset:` marker
  *   - external close / reopen -> journal entries (+ retention clock)
  *   - `ready-for-agent` covered by exactly one open PR -> `needs-qa` (#5489; skipped after a QA-FAIL bounce)
  *
@@ -26,7 +26,7 @@ import type {
   JournalWriteResult,
   LifecycleJournalEntry,
 } from "../redis/lifecycle-journal.ts";
-import { latestResetMs } from "./caps.ts";
+import { latestResetMs, resetsCapsOnExit } from "./caps.ts";
 import {
   bodyClosesIssue,
   classifyQaPassedExit,
@@ -360,7 +360,7 @@ export async function runReconcile(deps: ReconcileDeps, opts: ReconcileOptions =
         } else {
           const moves = externalMoves(tl.value, known, current);
           let parkExitMs: number | null = null;
-          for (const m of moves) if (m.from === "parked" && m.tsMs > 0) parkExitMs = m.tsMs;
+          for (const m of moves) if (resetsCapsOnExit(m.from) && m.tsMs > 0) parkExitMs = m.tsMs;
           // Marker first: if it cannot be confirmed, append nothing so the diff
           // (journal != GitHub) fires again next tick and the marker is retried.
           if (parkExitMs !== null && !(await postResetOnce(issue.number, parkExitMs))) return;
@@ -463,7 +463,7 @@ export async function runReconcile(deps: ReconcileDeps, opts: ReconcileOptions =
       }
     }
 
-    // One cap-reset marker per external un-park, keyed by the event's own timestamp.
+    // One cap-reset marker per external exit from a human-hold state (parked / ready-for-human), keyed by the event's own timestamp.
     // Resolves true when the marker is posted or already present (safe to journal the move).
     async function postResetOnce(issue: number, eventMs: number): Promise<boolean> {
       const comments = await deps.seam.fetch.issueComments(issue);

@@ -40,6 +40,7 @@ import {
   type LifecycleMode,
 } from "../src/lifecycle/index.ts";
 import { isUnsanctionedHoldExit } from "../src/lifecycle/hold-exit.ts";
+import { CAP_RESET_EXIT_STATES, resetsCapsOnExit } from "../src/lifecycle/caps.ts";
 import type { LifecycleJournalEntry } from "../src/redis/lifecycle-journal.ts";
 
 function gi(over: Partial<GateInput> = {}): GateInput {
@@ -593,6 +594,28 @@ describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, IN
       assert.equal(posted[0].number, 10);
       assert.match(posted[0].body, /^Hydra-Cap-Reset: by=board:promote ts=\S+$/);
       assert.equal(o.h.journal.at(-1)!.evidence.capReset, "posted");
+    });
+
+    test("leaving ready-for-human posts exactly one marker; leaving to closed posts none (#5661)", async () => {
+      const o = operatorHarness(["ready-for-human"], "enforce");
+      const posted = recording(o);
+      const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+      assert.equal(res.ok, true);
+      assert.equal(posted.length, 1);
+      assert.match(posted[0].body, /^Hydra-Cap-Reset: by=board:promote ts=\S+$/);
+      assert.equal(o.h.journal.at(-1)!.evidence.capReset, "posted");
+
+      const c = operatorHarness(["ready-for-human"], "enforce");
+      const cPosted = recording(c);
+      const closedRes = await operatorAdvance({ issue: 10, to: "closed", actor: "board:close" }, c.h.deps);
+      assert.equal(closedRes.ok, true);
+      assert.equal(cPosted.length, 0);
+    });
+
+    test("resetsCapsOnExit names exactly the two cap-writable human-hold states (#5661)", () => {
+      assert.deepEqual([...CAP_RESET_EXIT_STATES], ["parked", "ready-for-human"]);
+      for (const s of ["parked", "ready-for-human"]) assert.equal(resetsCapsOnExit(s), true);
+      for (const s of ["hitl-grill", "needs-info", "blocked", "in-progress"]) assert.equal(resetsCapsOnExit(s), false);
     });
 
     test("a failed post leaves the transition ok and journals capReset=failed:<code>", async () => {
