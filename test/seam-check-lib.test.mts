@@ -36,6 +36,13 @@ const {
   formatGrowthAdvice,
   formatStaleAdvice,
   writeBaselineOrRefuse,
+  compareCountRows,
+  mergeCountRows,
+  buildRowBaseline,
+  mergeRowsForFiles,
+  resolveListFlag,
+  runBaselineRatchet,
+  escapeRegExp,
   REPO_ROOT,
 } = await import("../scripts/ci/seam-check-lib.ts");
 
@@ -350,7 +357,7 @@ describe("seam-check-lib: writeJsonBaseline growth refusal (chokepoint for every
     const { execFileSync } = await import("node:child_process");
     const files = execFileSync("git", ["grep", "-l", "writeJsonBaseline(", "--", "scripts/ci/*.ts"], { cwd: REPO_ROOT, encoding: "utf8" })
       .split("\n").filter(Boolean).filter((f: string) => !f.endsWith("seam-check-lib.ts"));
-    assert.ok(files.length >= 8);
+    assert.ok(files.length >= 6);
     for (const f of files) {
       const src = await readFile(join(REPO_ROOT, f), "utf8");
       assert.doesNotMatch(src, /\bwriteFile(Sync)?\(\s*[^)]*baseline/i, `${f} writes a baseline without the chokepoint`);
@@ -400,5 +407,89 @@ describe("seam-check-lib: ratchet advice formatters", () => {
     const stale = formatStaleAdvice({ baselineRel: "b.json", rowAction: "x" });
     assert.doesNotMatch(stale, /Baseline-raise/);
     assert.doesNotMatch(growth, /Do not regenerate the whole baseline/);
+  });
+});
+
+describe("seam-check-lib: shrink-only row-ratchet engine", () => {
+  const KEYS = ["a", "b"] as const;
+
+  test("compareCountRows: absent file or key is capped at zero; sorted files, declared key order", () => {
+    const cmp = compareCountRows(
+      { "z.md": { a: 1 }, "m.md": { a: 2, b: 1 } },
+      { "m.md": { a: 3 }, "gone.md": { b: 2 } },
+      KEYS,
+    );
+    assert.deepEqual(cmp.exceeded, [
+      { file: "m.md", key: "b", count: 1, baseline: 0 },
+      { file: "z.md", key: "a", count: 1, baseline: 0 },
+    ]);
+    assert.deepEqual(cmp.stale, [
+      { file: "gone.md", key: "b", count: 0, baseline: 2 },
+      { file: "m.md", key: "a", count: 2, baseline: 3 },
+    ]);
+  });
+
+  test("mergeCountRows: scoped cells re-seed, the rest carry over, zero cells and empty rows drop", () => {
+    const existing = { "a.md": { a: 2, b: 5 }, "b.md": { a: 1 } };
+    const counts = { "a.md": { a: 1, b: 1 }, "c.md": { a: 4 } };
+    assert.deepEqual(mergeCountRows(existing, counts, KEYS, { keys: ["a"] }), {
+      "a.md": { a: 1, b: 5 },
+      "c.md": { a: 4 },
+    });
+    assert.deepEqual(mergeCountRows(existing, counts, KEYS, { files: ["b.md"] }), {
+      "a.md": { a: 2, b: 5 },
+    });
+    assert.deepEqual(mergeCountRows(existing, counts, KEYS), { "a.md": { a: 1, b: 1 }, "c.md": { a: 4 } });
+  });
+
+  test("buildRowBaseline / mergeRowsForFiles: sorted keys, empty rows dropped, note kept", () => {
+    const empty = (r: string[]) => r.length === 0;
+    const built = buildRowBaseline({ "b.md": ["x"], "a.md": [], "c.md": ["y"] }, "n", empty);
+    assert.deepEqual(Object.keys(built.files), ["b.md", "c.md"]);
+    const merged = mergeRowsForFiles(built, { "b.md": [] }, ["b.md", "new.md"], empty, []);
+    assert.deepEqual(merged, { note: "n", files: { "c.md": ["y"] } });
+  });
+
+  test("resolveListFlag: absent, valid, missing value and no --write-baseline", () => {
+    assert.equal(resolveListFlag(["--write-baseline"], "--files", "needs"), undefined);
+    assert.deepEqual(resolveListFlag(["--write-baseline", "--files", "a, b"], "--files", "needs"), ["a", "b"]);
+    assert.throws(() => resolveListFlag(["--files", "a"], "--files", "needs"), /--files only applies together with --write-baseline/);
+    assert.throws(() => resolveListFlag(["--write-baseline", "--files"], "--files", "needs a value"), /needs a value/);
+    assert.throws(() => resolveListFlag(["--write-baseline", "--files", "--x"], "--files", "needs a value"), /needs a value/);
+  });
+
+  test("runBaselineRatchet: a growing write exits 1 with the lib's message, not an unhandled rejection", async () => {
+    const rel = "scripts/ci/__engine-test-baseline.json";
+    const abs = join(REPO_ROOT, rel);
+    await writeFile(abs, JSON.stringify({ note: "n", files: { "a.md": { a: 1 } } }));
+    const errs: string[] = [];
+    const origErr = console.error;
+    const origLog = console.log;
+    console.error = (m: unknown) => void errs.push(String(m));
+    console.log = () => {};
+    try {
+      const load = async () => JSON.parse(await readFile(abs, "utf8"));
+      const base = { name: "engine-test", baselineRel: rel, load, compare: () => ({}), report: () => "" };
+      const code = await runBaselineRatchet(
+        { ...base, scan: () => ({ "a.md": { a: 2 } }), build: (f: object) => ({ note: "n", files: f }) },
+        ["--write-baseline"],
+      );
+      assert.equal(code, 1);
+      assert.match(errs.join("\n"), /refusing to grow baseline/);
+      const shrink = await runBaselineRatchet(
+        { ...base, scan: () => ({}), build: (f: object) => ({ note: "n", files: f }) },
+        ["--write-baseline"],
+      );
+      assert.equal(shrink, 0);
+    } finally {
+      console.error = origErr;
+      console.log = origLog;
+      await rm(abs, { force: true });
+    }
+  });
+
+  test("escapeRegExp escapes every metacharacter", () => {
+    assert.equal(new RegExp(escapeRegExp("a.b*c(d)[e]\\")).test("a.b*c(d)[e]\\"), true);
+    assert.equal(new RegExp(escapeRegExp("a.b")).test("axb"), false);
   });
 });

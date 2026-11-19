@@ -43,6 +43,7 @@ import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { InvalidArgumentError } from "../../src/errors.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -597,4 +598,179 @@ export function runAsCli(config: SeamCheckConfig): void {
       process.exit(2);
     },
   );
+}
+
+// ---------------------------------------------------------------------------
+// Shrink-only row-ratchet engine (issue #5617)
+//
+// The playbook ratchets (duplicate / vocabulary / reference-check) share one
+// shape: a `{note, files: Record<file, Row>}` baseline, a shrink-only compare,
+// a sorted-row build, a row-scoped re-seed and a check-or-write CLI flow. The
+// engine below owns that structure; each ratchet supplies its scanner, its row
+// payload and its report wording (`formatReport` stays per-ratchet).
+// ---------------------------------------------------------------------------
+
+/** Escape a string for literal use inside a RegExp source. */
+export function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** The shared baseline envelope: a free-form note plus one row per file. */
+export interface RowBaseline<Row> {
+  note: string;
+  files: Record<string, Row>;
+}
+
+/** Build a baseline: file keys sorted, rows that `isEmpty` dropped. */
+export function buildRowBaseline<Row>(
+  rows: Record<string, Row>,
+  note: string,
+  isEmpty: (row: Row) => boolean,
+): RowBaseline<Row> {
+  const files: Record<string, Row> = {};
+  for (const file of Object.keys(rows).sort()) {
+    if (!isEmpty(rows[file]!)) files[file] = rows[file]!;
+  }
+  return { note, files };
+}
+
+/**
+ * Row-scoped re-seed (STD-BASELINE-EDIT-ROWS): only the named files' rows are
+ * replaced by `rows`; every other row and the note carry over verbatim.
+ */
+export function mergeRowsForFiles<Row>(
+  existing: RowBaseline<Row>,
+  rows: Record<string, Row>,
+  files: readonly string[],
+  isEmpty: (row: Row) => boolean,
+  emptyRow: Row,
+): RowBaseline<Row> {
+  const out: Record<string, Row> = {};
+  const names = new Set([...Object.keys(existing.files), ...files]);
+  for (const file of [...names].sort()) {
+    const row = files.includes(file) ? (rows[file] ?? emptyRow) : existing.files[file]!;
+    if (!isEmpty(row)) out[file] = row;
+  }
+  return { note: existing.note, files: out };
+}
+
+/** One cell whose count differs from its baseline. */
+export interface CountDelta<K extends string> {
+  file: string;
+  key: K;
+  count: number;
+  baseline: number;
+}
+
+/**
+ * The single exceeded-vs-stale decider for every count-row ratchet. An absent
+ * file or key is capped at 0. Files sorted, keys in `keys` order.
+ */
+export function compareCountRows<K extends string>(
+  found: Record<string, Partial<Record<K, number>>>,
+  baseline: Record<string, Partial<Record<K, number>>>,
+  keys: readonly K[],
+): { exceeded: CountDelta<K>[]; stale: CountDelta<K>[] } {
+  const exceeded: CountDelta<K>[] = [];
+  const stale: CountDelta<K>[] = [];
+  const files = new Set([...Object.keys(found), ...Object.keys(baseline)]);
+  for (const file of [...files].sort()) {
+    for (const key of keys) {
+      const count = found[file]?.[key] ?? 0;
+      const allowed = baseline[file]?.[key] ?? 0;
+      if (count === allowed) continue;
+      (count > allowed ? exceeded : stale).push({ file, key, count, baseline: allowed });
+    }
+  }
+  return { exceeded, stale };
+}
+
+/**
+ * Cell-scoped re-seed of count rows. `scope.files` limits which files and
+ * `scope.keys` which cells take the fresh `counts`; every other cell keeps its
+ * existing value. Zero cells and empty rows are dropped; keys stay in declared order.
+ */
+export function mergeCountRows<K extends string>(
+  existing: Record<string, Partial<Record<K, number>>>,
+  counts: Record<string, Partial<Record<K, number>>>,
+  keys: readonly K[],
+  scope: { files?: readonly string[]; keys?: readonly K[] } = {},
+): Record<string, Partial<Record<K, number>>> {
+  const out: Record<string, Partial<Record<K, number>>> = {};
+  const names = new Set([...Object.keys(existing), ...Object.keys(counts), ...(scope.files ?? [])]);
+  for (const file of [...names].sort()) {
+    const fileInScope = scope.files === undefined || scope.files.includes(file);
+    const row: Partial<Record<K, number>> = {};
+    for (const key of keys) {
+      const fresh = fileInScope && (scope.keys === undefined || scope.keys.includes(key));
+      const v = fresh ? counts[file]?.[key] : existing[file]?.[key];
+      if (v) row[key] = v;
+    }
+    if (Object.keys(row).length > 0) out[file] = row;
+  }
+  return out;
+}
+
+/**
+ * Resolve a writer's comma-separated `--<flag> a,b` filter from argv:
+ * `undefined` when the flag is absent. A flag given without `--write-baseline`,
+ * or with no value, throws (`missing` is the wording for the no-value case).
+ * Returns the trimmed non-empty names, which may be empty.
+ */
+export function resolveListFlag(argv: readonly string[], flag: string, missing: string): string[] | undefined {
+  const at = argv.indexOf(flag);
+  if (at === -1) return undefined;
+  if (!argv.includes("--write-baseline")) throw new InvalidArgumentError(`${flag} only applies together with --write-baseline`);
+  const value = argv[at + 1];
+  if (value === undefined || value.startsWith("--")) throw new InvalidArgumentError(missing);
+  return value.split(",").map((n) => n.trim()).filter(Boolean);
+}
+
+/** Per-ratchet policy for `runBaselineRatchet`. */
+export interface BaselineRatchetConfig<Found, Base extends RowBaseline<unknown>, Cmp, Filter> {
+  /** Log prefix, e.g. `"playbook-duplicate-ratchet"`. */
+  name: string;
+  /** Repo-relative baseline path. */
+  baselineRel: string;
+  scan: () => Found;
+  load: () => Promise<Base>;
+  build: (found: Found) => Base;
+  /** Scoped re-seed, used only when `filter` resolves to a value. */
+  merge?: (existing: Base, found: Found, filter: Filter) => Base;
+  /** Resolve the scoped-write filter from argv (`undefined` = rewrite everything). */
+  filter?: (argv: readonly string[]) => Filter | undefined;
+  compare: (found: Found, baseline: Base) => Cmp;
+  /** Empty string when clean. */
+  report: (cmp: Cmp) => string;
+  /** Prefix for the failure report on stderr (default: none). */
+  failHeadline?: string;
+  /** Suffix appended to the `wrote <baselineRel>` line. */
+  writeSuffix?: (next: Base) => string;
+}
+
+/**
+ * The shared check-or-write CLI flow. Returns the exit code: 0 on a clean
+ * check or a successful write, 1 on a report or a refused (growing) write.
+ */
+export async function runBaselineRatchet<Found, Base extends RowBaseline<unknown>, Cmp, Filter>(
+  config: BaselineRatchetConfig<Found, Base, Cmp, Filter>,
+  argv: readonly string[] = process.argv,
+): Promise<number> {
+  const filter = config.filter?.(argv);
+  const found = config.scan();
+  if (argv.includes("--write-baseline")) {
+    const next =
+      filter === undefined || !config.merge ? config.build(found) : config.merge(await config.load(), found, filter);
+    const code = await writeBaselineOrRefuse(join(REPO_ROOT, config.baselineRel), next);
+    if (code !== 0) return code;
+    console.log(`[${config.name}] wrote ${config.baselineRel}${config.writeSuffix?.(next) ?? ""}`);
+    return 0;
+  }
+  const report = config.report(config.compare(found, await config.load()));
+  if (report) {
+    console.error(config.failHeadline ? `${config.failHeadline}\n${report}` : report);
+    return 1;
+  }
+  console.log(`[${config.name}] OK`);
+  return 0;
 }
