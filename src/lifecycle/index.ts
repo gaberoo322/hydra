@@ -11,14 +11,9 @@ export {
   TRANSITIONS,
   findOperatorTransition,
   findTransition,
-  isOperatorTarget,
   isHumanHold,
   isLegalTransition,
-  isLifecycleState,
   stateLabelsOf,
-  type FiredBy,
-  type GateId,
-  type HumanHoldState,
   type LifecycleState,
   type OpenState,
   type OperatorTarget,
@@ -48,11 +43,9 @@ export {
   type BlockerRecord,
   type ClaimRecord,
   type CommentRecord,
-  type DesignConceptRecord,
   type Fetched,
   type GateInput,
   type GateRecords,
-  type GateResult,
   type PrRecord,
 } from "./gates.ts";
 export {
@@ -60,32 +53,26 @@ export {
   isUnsanctionedHoldExit,
 } from "./hold-exit.ts";
 export {
-  classRole,
-  countReviewedFailRoundsAfterReset,
-  countReviewedFailRoundsSinceReset,
-  evaluateCaps,
   latestResetMs,
   type TimedBody,
 } from "./caps.ts";
 export {
-  classifyQaPassedExit,
   classifyQaVerdictTarget,
   gateQaVerdict,
   type QaExitTarget,
   type QaLivePr,
   type QaVerdictTarget,
 } from "./gates.ts";
-export { externalMoves, lastKnownState, replayStateSnapshots } from "./timeline.ts";
+export { lastKnownState, replayStateSnapshots } from "./timeline.ts";
 export {
   MAX_STALE_CLAIM_CLOSES,
   STALE_CLAIM_AGE_MS,
-  isZeroStateExempt,
   runReconcile,
   type ReconcileDeps,
   type ReconcileOptions,
   type ReconcileReport,
 } from "./reconcile.ts";
-export { parkForCap, postCapReset, type CapResetResult, type ParkResult } from "./park.ts";
+export { parkForCap, postCapReset, type ParkResult } from "./park.ts";
 export {
   advance,
   defaultSeamDeps,
@@ -105,8 +92,6 @@ export {
   resolveLifecycleMode,
   type OperatorAdvanceInput,
   type AdvanceResult,
-  type ClaimInput,
-  type ClaimResult,
   type LifecycleMode,
   type SeamDeps,
 } from "./seam.ts";

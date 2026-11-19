@@ -1,0 +1,1 @@
+- refactor: drop 16 unused re-exports from the src/lifecycle barrel (#5622)
