@@ -298,10 +298,13 @@ describe("review-findings rule validation against the catalogue", () => {
     assert.deepEqual(parsed.map((p) => p.id).sort(), routed.map((r) => r.id).sort());
   });
 
-  test("reconcile prunes stored findings citing an unknown rule and counts them", () => {
+  test("reconcile prunes stored findings citing an unknown rule only when opted in", () => {
     const bad = stored(finding({ finding: "STD-NOPE-THING: x", location: "src/b.ts:1" }));
     const good = stored(finding());
-    const res = reconcileReviewFindings([bad, good], [], { now: NOW, knownRules: known });
+    const dflt = reconcileReviewFindings([bad, good], [], { now: NOW, knownRules: known });
+    assert.deepEqual(dflt.pruned, [], "default: other-repo / removed-rule rows are never deleted");
+    assert.equal(dflt.unknownRule, 0);
+    const res = reconcileReviewFindings([bad, good], [], { now: NOW, knownRules: known, pruneUnknownRule: true });
     assert.deepEqual(res.pruned, [bad.id]);
     assert.equal(res.unknownRule, 1);
     const noCat = reconcileReviewFindings([bad, good], [], { now: NOW });

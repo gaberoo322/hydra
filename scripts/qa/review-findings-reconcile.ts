@@ -5,13 +5,15 @@
  * comments writes nothing new. The weekly trigger is R2's (#5271); this CLI is
  * the unit of work.
  *
- *   npx tsx scripts/qa/review-findings-reconcile.ts [--since <iso>] [--repo o/r] [--repo-root <path>] [--dry-run]
+ *   npx tsx scripts/qa/review-findings-reconcile.ts [--since <iso>] [--repo o/r] [--repo-root <path>] [--prune-unknown-rules] [--dry-run]
  *
  * Default --since is 7 days ago. It reads issue comments (verdict comments are
  * issue comments) in one paginated GitHub CLI Adapter call, parses each with
  * `parseReviewFindingsComment`, merges against the stored rows, appends the
  * new ones (HSETNX, never overwriting a route row) and prunes rows older than
- * 90 days. Never changes a verdict.
+ * 90 days. Never changes a verdict. Rows citing a rule outside the catalogue are
+ * kept by default (they may belong to another repo or a since-removed rule);
+ * `--prune-unknown-rules` opts in and requires an explicit `--repo-root`.
  */
 
 import { parseReviewFindingsComment, reconcileReviewFindings } from "../../src/qa/review-findings-extract.ts";
@@ -75,13 +77,17 @@ if (isMain) {
   const repo = arg("--repo") ?? "gaberoo322/hydra";
   const since = arg("--since") ?? new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
   const dryRun = process.argv.includes("--dry-run");
+  const pruneUnknownRule = process.argv.includes("--prune-unknown-rules");
   let code = 0;
   try {
+    if (pruneUnknownRule && arg("--repo-root") === null) {
+      throw new Error("--prune-unknown-rules requires an explicit --repo-root matching --repo");
+    }
     const seam = await import("../../src/redis/review-findings.ts");
     const knownRules = await loadKnownRules(arg("--repo-root") ?? process.cwd());
     const harvested = await harvestReviewFindingRows(repo, since, knownRules);
     const existing = await seam.readReviewFindingRows();
-    const plan = reconcileReviewFindings(existing, harvested, { now: Date.now(), knownRules });
+    const plan = reconcileReviewFindings(existing, harvested, { now: Date.now(), knownRules, pruneUnknownRule });
     console.error(
       `[review-findings-reconcile] harvested=${harvested.length} upserts=${plan.upserts.length} unchanged=${plan.unchanged} pruned=${plan.pruned.length} unknown-rule=${plan.unknownRule}${dryRun ? " (dry-run)" : ""}`,
     );

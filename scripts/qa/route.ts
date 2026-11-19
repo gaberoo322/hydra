@@ -695,9 +695,14 @@ async function runRouteImpl(
     try {
       let knownRules: ReadonlySet<string> | undefined;
       if (deps.loadStandards) {
-        const std = await deps.loadStandards();
-        if (std.ok && std.found) knownRules = new Set(std.parsed.rules.map((r) => r.id));
-        else console.error("[hydra-qa] WARN: no usable CODING_STANDARDS.md; review-findings rule validation skipped");
+        try {
+          const std = await deps.loadStandards();
+          if (std.ok && std.found) knownRules = new Set(std.parsed.rules.map((r) => r.id));
+          else console.error("[hydra-qa] WARN: no usable CODING_STANDARDS.md; review-findings rule validation skipped");
+        } catch (err) {
+          // A loader throw degrades to grammar-only validation; the rows are still appended.
+          console.error("[hydra-qa] WARN: loadStandards threw; grammar-only rule validation:", err);
+        }
       }
       const rows = rowsFromFold(
         foldResult.fold as Parameters<typeof rowsFromFold>[0],

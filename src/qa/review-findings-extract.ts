@@ -226,7 +226,7 @@ export interface ReconcileResult {
   upserts: StoredReviewFindingRow[];
   /** Harvested rows already stored (route rows always win; same id = same row). */
   unchanged: number;
-  /** Stored ids older than the retention window, or citing an unknown rule (HDEL these). */
+  /** Stored ids older than the retention window, or (opt-in `pruneUnknownRule`) citing an unknown rule (HDEL these). */
   pruned: string[];
   /** How many of `pruned` are stored `finding` rows whose `rule` is outside the catalogue. */
   unknownRule: number;
@@ -235,7 +235,7 @@ export interface ReconcileResult {
 export function reconcileReviewFindings(
   existing: readonly StoredReviewFindingRow[],
   harvested: readonly StoredReviewFindingRow[],
-  opts: { now: number; retentionDays?: number; knownRules?: ReadonlySet<string> },
+  opts: { now: number; retentionDays?: number; knownRules?: ReadonlySet<string>; pruneUnknownRule?: boolean },
 ): ReconcileResult {
   const cutoff = opts.now - (opts.retentionDays ?? RETENTION_DAYS) * DAY_MS;
   const have = new Set(existing.map((e) => e.id));
@@ -251,6 +251,7 @@ export function reconcileReviewFindings(
     upserts.push(h);
   }
   const isUnknownRule = (e: StoredReviewFindingRow): boolean =>
+    opts.pruneUnknownRule === true &&
     opts.knownRules !== undefined &&
     e.row?.kind === "finding" &&
     typeof e.row.rule === "string" &&
