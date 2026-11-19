@@ -281,8 +281,8 @@ async function runRouteImpl(
     }
     const res = await ports.advance({ issue, to, evidence, ...extra, actor: QA_ACTOR });
     effects.push({ kind, target: `issue#${issue}`, ok: res.ok });
-    if (!res.ok && res.code === "pr-merged") throw new PrMergedStop();
-    if (!res.ok) console.error(`[hydra-qa] WARN: lifecycle advance ${to} on issue#${issue} refused (${res.code || "unknown"})`);
+    if (res.ok === false && res.code === "pr-merged") throw new PrMergedStop();
+    if (res.ok === false) console.error(`[hydra-qa] WARN: lifecycle advance ${to} on issue#${issue} refused (${res.code || "unknown"})`);
     return res;
   };
   /** An advance whose refusal ends the route (exit 1): never a by-hand label edit (ADR-0047 D4). */
@@ -293,7 +293,7 @@ async function runRouteImpl(
     extra: { reason?: string; rationale?: string } = {},
   ): Promise<void> => {
     const res = await advance(to, evidence, kind, extra);
-    if (!res.ok) throw new Error(`lifecycle advance ${to} refused (${res.code || "unknown"}) - not editing labels by hand`);
+    if (res.ok === false) throw new Error(`lifecycle advance ${to} refused (${res.code || "unknown"}) - not editing labels by hand`);
   };
   /**
    * A QA exit off `needs-qa` (FAIL, or the trailer-less `defer`): the seam picks the target from its one
@@ -307,14 +307,14 @@ async function runRouteImpl(
     }
     const res = await ports.qaBounce({ issue, pr, actor: QA_ACTOR, ...(defer ? { defer: true } : {}) });
     effects.push({ kind, target: `issue#${issue}`, ok: res.ok });
-    if (!res.ok && res.code === "pr-merged") throw new PrMergedStop();
-    if (!res.ok) console.error(`[hydra-qa] WARN: lifecycle bounce on issue#${issue} refused (${res.code || "unknown"})`);
+    if (res.ok === false && res.code === "pr-merged") throw new PrMergedStop();
+    if (res.ok === false) console.error(`[hydra-qa] WARN: lifecycle bounce on issue#${issue} refused (${res.code || "unknown"})`);
     return res;
   };
   /** A bounce whose refusal ends the route (exit 1), returning the lane the seam chose. */
   const bounceOrThrow = async (kind: string, defer = false): Promise<"needs-dev-resume" | "ready-for-agent"> => {
     const res = await bounce(kind, defer);
-    if (!res.ok) throw new Error(`lifecycle advance bounce refused (${res.code || "unknown"}) - not editing labels by hand`);
+    if (res.ok === false) throw new Error(`lifecycle advance bounce refused (${res.code || "unknown"}) - not editing labels by hand`);
     return res.to;
   };
   /**
@@ -324,7 +324,7 @@ async function runRouteImpl(
    */
   const passAdvance = async (kind: string): Promise<boolean> => {
     const res = await advance("qa-passed", { pr: String(pr) }, kind);
-    if (res.ok) return true;
+    if (res.ok === true) return true;
     await prComment(
       `QA-Verdict-Error: verdict=PASS pr=${pr} reason=lifecycle advance to qa-passed refused (${res.code || "unknown"}); routing the issue off needs-qa through the seam`,
       "pass-refusal-error-comment",
@@ -675,7 +675,7 @@ async function runRouteImpl(
       let escalate = false;
       let label: "needs-dev-resume" | "ready-for-agent" = "needs-dev-resume";
       const adv = await bounce("fail-bounce-advance");
-      if (adv.ok) {
+      if (adv.ok === true) {
         label = adv.to;
       } else {
         // The seam parks the 3rd reviewed FAIL in enforce AND shadow (qa-fail-rounds is a live arm), posting

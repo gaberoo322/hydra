@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { runQaVerdictPhase, type QaVerdictFetchers } from "../src/qa/phases.ts";
-import { phaseRunner, type AdvanceResult, type CmdResult, type PlumbingPorts } from "../scripts/qa/_lib.ts";
+import { phaseRunner, type CmdResult, type PlumbingPorts, type SeamMoveInput, type SeamMoveResult } from "../scripts/qa/_lib.ts";
 import { runPreflight, type PreflightOptions } from "../scripts/qa/preflight.ts";
 import { NO_STANDARDS_SENTINEL, runPacket } from "../scripts/qa/packet.ts";
 import { SKIP_REVIEW_REPORT, runRoute, type RouteDeps, type RouteOptions } from "../scripts/qa/route.ts";
@@ -53,6 +53,29 @@ function fixtureFetchers(over: Partial<QaVerdictFetchers> = {}): QaVerdictFetche
   };
 }
 
+
+/** Test-side view of a seam outcome: `rc !== 0` is a refusal named by `code`. */
+type SeamOutcome = { rc: number; code: string };
+
+/** The argv-shaped record of one in-process seam move (kept so the effect-order pins read as before). */
+const seamArgv = (i: SeamMoveInput): string[] => [
+  String(i.issue),
+  i.to,
+  ...Object.entries(i.evidence ?? {}).flatMap(([k, v]) => ["--evidence", `${k}=${v}`]),
+  ...(i.reason !== undefined ? ["--reason", i.reason] : []),
+  ...(i.rationale !== undefined ? ["--rationale", i.rationale] : []),
+  "--actor",
+  i.actor,
+];
+const seamResult = (o: SeamOutcome): SeamMoveResult => (o.rc === 0 ? { ok: true } : { ok: false, code: o.code });
+/** The seam's one live read, faked from the harness's `gh pr view --json state` answer: the OPEN/CLOSED lane or a refusal. */
+function bounceLane(state: string): { to: "needs-dev-resume" | "ready-for-agent" } | { code: string } {
+  const s = state.trim();
+  if (s === "OPEN") return { to: "needs-dev-resume" };
+  if (s === "CLOSED") return { to: "ready-for-agent" };
+  return { code: s === "MERGED" ? "pr-merged" : "fetch-failed" };
+}
+
 const ok = (stdout: string): CmdResult => ({ ok: true, stdout });
 const fail = (stderr = "boom"): CmdResult => ({ ok: false, stderr });
 
@@ -78,7 +101,7 @@ interface HarnessOptions {
   ghHandler?: (argv: string[]) => CmdResult | undefined;
   gitHandler?: (argv: string[]) => CmdResult | undefined;
   /** Per-call advance outcome (default: accepted). */
-  advanceHandler?: (args: string[]) => Partial<AdvanceResult> | undefined;
+  advanceHandler?: (args: string[]) => Partial<SeamOutcome> | undefined;
   http?: PlumbingPorts["http"];
   fetchers?: QaVerdictFetchers;
   phase?: PlumbingPorts["phase"];
@@ -92,10 +115,22 @@ function harness(o: HarnessOptions = {}): Harness {
   const log: string[][] = [];
   const fetchers = o.fetchers ?? fixtureFetchers();
   const ports: PlumbingPorts = {
-    async advance(args) {
+    async advance(input) {
+      const args = seamArgv(input);
       advances.push(args);
       log.push(["lifecycle", "advance", ...args]);
-      return { rc: 0, code: "", wouldPark: "", ...(o.advanceHandler?.(args) ?? {}) };
+      return seamResult({ rc: 0, code: "", ...(o.advanceHandler?.(args) ?? {}) });
+    },
+    async qaBounce(input) {
+      const state = (await o.ghHandler?.(["pr", "view", String(input.pr), "--json", "state"])) ?? ok("OPEN\n");
+      const lane = bounceLane(state.ok ? (state.stdout ?? "") : "");
+      if ("code" in lane) return { ok: false, code: lane.code };
+      const args = seamArgv({ issue: input.issue, to: lane.to, evidence: { pr: String(input.pr), ...(input.defer ? { defer: "1" } : {}) }, actor: input.actor });
+      advances.push(args);
+      log.push(["lifecycle", "advance", ...args]);
+      const out = seamResult({ rc: 0, code: "", ...(o.advanceHandler?.(args) ?? {}) });
+      if (out.ok === true) return { ok: true, to: lane.to };
+      return out.code.startsWith("parked:") ? { ok: false, code: out.code, counts: [] } : { ok: false, code: out.code };
     },
     async gh(argv) {
       gh.push(argv);
@@ -685,7 +720,7 @@ const realDeps = (rows: unknown[][] = []): RouteDeps => ({
 const sleeps: number[] = [];
 
 /** An `advance` fake: refuse the Nth call (or every call to `target`) with `code`. */
-const refuse = (target: string, code: string, rc = 1) => (args: string[]): Partial<AdvanceResult> | undefined =>
+const refuse = (target: string, code: string, rc = 1) => (args: string[]): Partial<SeamOutcome> | undefined =>
   args[1] === target ? { rc, code } : undefined;
 const advTo = (args: string[]): string => args[1] as string;
 
@@ -727,18 +762,27 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
     assert.ok(r.degraded.includes("pass-marker"));
   });
 
-  test("route FAIL on an open PR advances to needs-dev-resume; a failed state read also does", async () => {
-    for (const state of ["OPEN", "fail", "empty"] as const) {
-      const h = harness({ ghHandler: withState(state), phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "medium", worst: "w" }) });
-      await runRoute(ROUTE_OPTS, readyPre({ tier: { num: 3, adversarial: true } }), h.ports, realDeps());
-      assert.deepEqual(h.advances.map(advTo), ["needs-dev-resume"], `state read '${state}'`);
-      assert.deepEqual(h.advances[0], ["5269", "needs-dev-resume", "--evidence", "pr=77", "--actor", "hydra-qa"]);
+  test("route FAIL: the seam's one live read picks the lane (OPEN -> needs-dev-resume, CLOSED -> ready-for-agent); an unreadable state refuses; MERGED stops", async () => {
+    const failPhase = cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "medium", worst: "w" });
+    const open = harness({ ghHandler: withState("OPEN"), phase: failPhase });
+    await runRoute(ROUTE_OPTS, readyPre({ tier: { num: 3, adversarial: true } }), open.ports, realDeps());
+    assert.deepEqual(open.advances.map(advTo), ["needs-dev-resume"]);
+    assert.deepEqual(open.advances[0], ["5269", "needs-dev-resume", "--evidence", "pr=77", "--actor", "hydra-qa"]);
+
+    const closed = harness({ ghHandler: withState("CLOSED"), phase: failPhase });
+    await runRoute(ROUTE_OPTS, readyPre(), closed.ports, realDeps());
+    assert.deepEqual(closed.advances.map(advTo), ["ready-for-agent"]);
+
+    for (const state of ["fail", "empty"] as const) {
+      const h = harness({ ghHandler: withState(state), phase: failPhase });
+      await assert.rejects(runRoute(ROUTE_OPTS, readyPre(), h.ports, realDeps()), /bounce refused \(fetch-failed\)/, `state read '${state}'`);
+      assert.deepEqual(h.advances, [], "an unreadable PR state writes no label");
     }
-    for (const state of ["CLOSED", "MERGED"]) {
-      const h = harness({ ghHandler: withState(state), phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "medium" }) });
-      await runRoute(ROUTE_OPTS, readyPre(), h.ports, realDeps());
-      assert.deepEqual(h.advances.map(advTo), ["ready-for-agent"], `confirmed ${state} is the only ready-for-agent arm`);
-    }
+
+    const merged = harness({ ghHandler: withState("MERGED"), phase: failPhase });
+    const r = await runRoute(ROUTE_OPTS, readyPre(), merged.ports, realDeps());
+    assert.deepEqual(merged.advances, [], "MERGED: reconcile owns the exit, QA writes nothing");
+    assert.ok(r.degraded.includes("pr-merged"));
   });
 
   test("route: GLM provenance selects comment wording only, never the bounce lane", async () => {
@@ -1133,7 +1177,7 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
 describe("route golden bodies (posted bytes frozen, issue #5269 INV-7)", () => {
   interface Arm {
     name: string;
-    advance?: (args: string[]) => Partial<AdvanceResult> | undefined;
+    advance?: (args: string[]) => Partial<SeamOutcome> | undefined;
     pre: PreflightResult;
     canned: Canned;
     state?: string;
@@ -1460,13 +1504,14 @@ describe("spawned CLIs (production adapter, fake gh on PATH)", () => {
           "  *required_status_checks*) echo '{\"contexts\":[\"test\"]}' ;;",
           "  *comments,reviews*) echo '{\"comments\":[],\"reviews\":[]}' ;;",
           `  *headRefOid*) echo '{"headRefOid":"${HEAD}","mergeStateStatus":"CLEAN"}' ;;`,
-          '  *"issue edit"*|*"pr comment"*) exit 0 ;;',
+          // The in-process seam re-reads the issue: needs-qa until the label edit lands, then qa-passed.
+          `  *"issue view"*) if [ -f ${dir}/edited ]; then L=qa-passed; else L=needs-qa; fi; printf '{"number":5269,"title":"t","url":"https://github.com/gaberoo322/hydra/issues/5269","createdAt":"2026-01-01T00:00:00Z","labels":[{"name":"%s"}],"body":"b","state":"OPEN"}' "$L" ;;`,
+          `  *"issue edit"*) touch ${dir}/edited; exit 0 ;;`,
+          '  *"pr comment"*) exit 0 ;;',
           '  *) echo "fake-gh: unmatched: $*" >&2; exit 1 ;;',
           "esac",
         ].join("\n"),
       );
-      // The seam CLI is `npx tsx scripts/lifecycle.ts advance ...`: a fake npx records it and accepts.
-      fakeBin(dir, "npx", `echo "npx $*" >> ${log}; echo '{"ok":true}'`);
       const pre = join(dir, "pre.json");
       writeFileSync(pre, JSON.stringify(readyPre({ tier: { num: 2, adversarial: false }, fanout: { mode: "standard", reviewers: ["standards", "spec"], reason: "Review fan-out: standard" } })));
       const findings = join(dir, "findings.json");
@@ -1481,9 +1526,9 @@ describe("spawned CLIs (production adapter, fake gh on PATH)", () => {
       assert.equal(out.nextStep, "arm-auto-merge");
       assert.match(out.trailer, /^QA-Verdict: PASS pr=77 round=1 sha=0123456789ab blockers=0 max_severity=none$/);
       assert.ok(out.degraded.includes("review-findings"), `Redis is unreachable on port 1: ${r.stdout} ${r.stderr}`);
-      const writes = readFileSync(log, "utf8").trim().split("\n").filter((l) => /^(npx|pr comment)/.test(l));
-      assert.deepEqual(writes.map((l) => l.split(" ").slice(0, 2).join(" ")), ["pr comment", "npx tsx"]);
-      assert.match(writes[1] ?? "", /scripts\/lifecycle\.ts advance 5269 qa-passed --evidence pr=77 --actor hydra-qa$/);
+      const writes = readFileSync(log, "utf8").trim().split("\n").filter((l) => /^(issue edit|pr comment)/.test(l));
+      assert.deepEqual(writes.map((l) => l.split(" ").slice(0, 2).join(" ")), ["pr comment", "issue edit"]);
+      assert.match(writes[1] ?? "", /issue edit 5269 .*--add-label qa-passed/, "the in-process seam wrote qa-passed");
       assert.ok(!readFileSync(log, "utf8").includes("pr merge"), "the merge call site stays in the playbook");
     } finally {
       rmSync(dir, { recursive: true, force: true });

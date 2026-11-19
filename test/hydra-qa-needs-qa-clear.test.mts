@@ -36,7 +36,29 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import { runRoute, type RouteDeps, type RouteOptions } from "../scripts/qa/route.ts";
-import type { AdvanceResult, CmdResult, PlumbingPorts } from "../scripts/qa/_lib.ts";
+import type { CmdResult, PlumbingPorts, SeamMoveInput, SeamMoveResult } from "../scripts/qa/_lib.ts";
+/** Test-side view of a seam outcome: `rc !== 0` is a refusal named by `code`. */
+type SeamOutcome = { rc: number; code: string };
+
+/** The argv-shaped record of one in-process seam move (kept so the effect-order pins read as before). */
+const seamArgv = (i: SeamMoveInput): string[] => [
+  String(i.issue),
+  i.to,
+  ...Object.entries(i.evidence ?? {}).flatMap(([k, v]) => ["--evidence", `${k}=${v}`]),
+  ...(i.reason !== undefined ? ["--reason", i.reason] : []),
+  ...(i.rationale !== undefined ? ["--rationale", i.rationale] : []),
+  "--actor",
+  i.actor,
+];
+const seamResult = (o: SeamOutcome): SeamMoveResult => (o.rc === 0 ? { ok: true } : { ok: false, code: o.code });
+/** The seam's one live read, faked from the harness's `gh pr view --json state` answer: the OPEN/CLOSED lane or a refusal. */
+function bounceLane(state: string): { to: "needs-dev-resume" | "ready-for-agent" } | { code: string } {
+  const s = state.trim();
+  if (s === "OPEN") return { to: "needs-dev-resume" };
+  if (s === "CLOSED") return { to: "ready-for-agent" };
+  return { code: s === "MERGED" ? "pr-merged" : "fetch-failed" };
+}
+
 import type { PreflightResult } from "../src/schemas/qa-plumbing-cli.ts";
 import { QA_ESCALATION_LABELS } from "../src/qa/round-action.ts";
 
@@ -98,13 +120,23 @@ function phase(c: Canned): PlumbingPorts["phase"] {
 
 async function route(
   c: Canned,
-  o: { pre?: PreflightResult; state?: string; defer?: boolean; advance?: (args: string[]) => Partial<AdvanceResult> | undefined } = {},
+  o: { pre?: PreflightResult; state?: string; defer?: boolean; advance?: (args: string[]) => Partial<SeamOutcome> | undefined } = {},
 ): Promise<string[][]> {
   const calls: string[][] = [];
   const ports: PlumbingPorts = {
-    async advance(args): Promise<AdvanceResult> {
+    async advance(input): Promise<SeamMoveResult> {
+      const args = seamArgv(input);
       calls.push(["lifecycle", "advance", ...args]);
-      return { rc: 0, code: "", wouldPark: "", ...(o.advance?.(args) ?? {}) };
+      return seamResult({ rc: 0, code: "", ...(o.advance?.(args) ?? {}) });
+    },
+    async qaBounce(input) {
+      const lane = bounceLane(o.state ?? "OPEN");
+      if ("code" in lane) return { ok: false, code: lane.code };
+      const args = seamArgv({ issue: input.issue, to: lane.to, evidence: { pr: String(input.pr), ...(input.defer ? { defer: "1" } : {}) }, actor: input.actor });
+      calls.push(["lifecycle", "advance", ...args]);
+      const out = seamResult({ rc: 0, code: "", ...(o.advance?.(args) ?? {}) });
+      if (out.ok === true) return { ok: true, to: lane.to };
+      return out.code.startsWith("parked:") ? { ok: false, code: out.code, counts: [] } : { ok: false, code: out.code };
     },
     async gh(argv): Promise<CmdResult> {
       calls.push(argv);
@@ -164,14 +196,22 @@ describe("hydra-qa clears needs-qa on every verdict (issue #638)", () => {
     });
   }
 
-  test("a not-open defer still leaves needs-qa to ready-for-agent through the seam (the label-less orphan gap, #3788)", async () => {
+  test("a closed-PR defer still leaves needs-qa to ready-for-agent through the seam (the label-less orphan gap, #3788)", async () => {
     const calls = await route(
       { verdict: "PASS" },
-      { pre: pre({ gate: { action: "defer", reason: "d", redRequired: [], skipVerdict: null, skipCiSummary: null } }), defer: true, state: "MERGED" },
+      { pre: pre({ gate: { action: "defer", reason: "d", redRequired: [], skipVerdict: null, skipCiSummary: null } }), defer: true, state: "CLOSED" },
     );
     const adv = calls.find(leavesNeedsQa) as string[];
     assert.equal(target(adv), "ready-for-agent");
     assert.ok(adv.includes("defer=1"), "the trailer-less defer edge");
+  });
+
+  test("a MERGED-PR defer writes nothing: reconcile owns needs-qa -> closed (pr-merged stops the route)", async () => {
+    const calls = await route(
+      { verdict: "PASS" },
+      { pre: pre({ gate: { action: "defer", reason: "d", redRequired: [], skipVerdict: null, skipCiSummary: null } }), defer: true, state: "MERGED" },
+    );
+    assert.ok(!calls.some(leavesNeedsQa), "no advance after a pr-merged refusal");
   });
 
   test("PASS-pending-CI never leaves the pre-#638 'leave needs-qa in place' instruction anywhere", () => {
@@ -212,14 +252,11 @@ describe("hydra-qa bounce label keys on open-PR state, not GLM provenance (issue
     assert.ok(!/gh pr comment\b/.test(PLAYBOOK), "no gh pr comment fence outside the retained merge fence");
   });
 
-  test("the bounce label is read LIVE per call and defaults to needs-dev-resume unless CLOSED/MERGED", () => {
-    const helper = ROUTE_SRC.slice(ROUTE_SRC.indexOf('const res = await ports.gh(["pr", "view"'), ROUTE_SRC.indexOf("/** The result of a path that posted"));
-    assert.match(helper, /"pr", "view", String\(pr\)[\s\S]{0,80}"--json", "state"/, "a live gh pr view --json state read at bounce time (INV-2)");
-    assert.ok(helper.includes('state === "CLOSED" || state === "MERGED"'));
-    const rfa = helper.indexOf('"ready-for-agent"');
-    const ndr = helper.indexOf('"needs-dev-resume"');
-    assert.ok(rfa > 0 && ndr > rfa, "ready-for-agent only on the confirmed CLOSED/MERGED arm; needs-dev-resume is the default");
-    assert.equal((ROUTE_SRC.match(/await bounceLabel\(\)/g) ?? []).length, 4, "four call sites: defer, PASS-refusal defer reroute, T1-T3 FAIL, T4 1st deep-QA FAIL");
+  test("route never names the bounce lane or reads the PR state itself: every exit goes through ports.qaBounce", () => {
+    assert.ok(!ROUTE_SRC.includes("bounceLabel"), "bounceLabel is gone");
+    assert.doesNotMatch(ROUTE_SRC, /"--json", "state"/, "no second live PR-state read in the route");
+    assert.equal((ROUTE_SRC.match(/ports\.qaBounce\(/g) ?? []).length, 1, "one qaBounce call, shared by every bounce site");
+    assert.equal((ROUTE_SRC.match(/await bounce(?:OrThrow)?\(/g) ?? []).length, 5, "four call sites (defer, PASS-refusal defer reroute, T1-T3 FAIL, T4 1st deep-QA FAIL) plus the bounceOrThrow wrapper");
   });
 
   test("an open PR bounces to needs-dev-resume — GLM or not — and never adds ready-for-agent", async () => {
@@ -231,11 +268,14 @@ describe("hydra-qa bounce label keys on open-PR state, not GLM provenance (issue
     }
   });
 
-  test("failed or empty state reads default to needs-dev-resume; a confirmed CLOSED/MERGED PR is the only fallback", async () => {
-    for (const [state, want] of [["CLOSED", "ready-for-agent"], ["MERGED", "ready-for-agent"], ["OPEN", "needs-dev-resume"], ["", "needs-dev-resume"]] as const) {
+  test("the seam's one read picks the lane: CLOSED -> ready-for-agent, OPEN -> needs-dev-resume, MERGED writes nothing, an unreadable state refuses", async () => {
+    for (const [state, want] of [["CLOSED", "ready-for-agent"], ["OPEN", "needs-dev-resume"]] as const) {
       const calls = await route({ verdict: "FAIL" }, { state });
       assert.equal(target(calls.find(leavesNeedsQa) as string[]), want, `state '${state}'`);
     }
+    const merged = await route({ verdict: "FAIL" }, { state: "MERGED" });
+    assert.ok(!merged.some(leavesNeedsQa), "MERGED: reconcile owns the exit");
+    await assert.rejects(route({ verdict: "FAIL" }, { state: "" }), /bounce refused \(fetch-failed\)/);
   });
 });
 

@@ -1,0 +1,1 @@
+- refactor: a QA FAIL now leaves needs-qa through one in-process lifecycle seam call that picks the exit lane from a single live PR read (#5659)
