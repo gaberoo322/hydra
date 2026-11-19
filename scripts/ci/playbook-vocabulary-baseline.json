@@ -49,7 +49,7 @@
       "invariant-cite": 3
     },
     "docs/operator-playbooks/_fragments/hydra-target-build-anchor-preflight.md": {
-      "shell-lines": 161,
+      "shell-lines": 158,
       "symbol-cite": 4
     },
     "docs/operator-playbooks/_fragments/hydra-target-build-inline-mode.md": {
@@ -178,7 +178,7 @@
     },
     "docs/operator-playbooks/hydra-target-build.md": {
       "shell-lines": 305,
-      "symbol-cite": 16
+      "symbol-cite": 15
     },
     "docs/operator-playbooks/hydra-target-cleanup.md": {
       "issue-cite": 16,

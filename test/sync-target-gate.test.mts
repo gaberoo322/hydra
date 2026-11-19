@@ -636,6 +636,45 @@ describe("hydra-target-build playbook wiring (issue #1451, #4526)", () => {
     }
   });
 
+  test("the anchor-preflight SCOPE_IN block checks manifest provenance before reading TARGET_APP_SUBDIR", () => {
+    const frag = readFileSync(
+      join(REPO_ROOT, "docs", "operator-playbooks", "_fragments", "hydra-target-build-anchor-preflight.md"),
+      "utf-8",
+    );
+    const PROVENANCE =
+      '[ "${TARGET_MANIFEST_ROOT:-}" = "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}" ] || {';
+    const blocks: string[] = [];
+    let cur: string[] | null = null;
+    for (const line of frag.split("\n")) {
+      if (/^\s*```/.test(line)) {
+        if (cur) {
+          blocks.push(cur.join("\n"));
+          cur = null;
+        } else if (/^\s*```bash\s*$/.test(line)) cur = [];
+        continue;
+      }
+      if (cur) cur.push(line);
+    }
+    const code = (b: string) => b.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+    const readers = blocks.filter((b) => /TARGET_APP_SUBDIR/.test(code(b)));
+    assert.ok(readers.length >= 1, "at least one fragment block reads TARGET_APP_SUBDIR");
+    for (const b of readers) {
+      assert.ok(code(b).includes(PROVENANCE), `block lacks the provenance check:\n${b.slice(0, 200)}`);
+      assert.ok(
+        code(b).indexOf(PROVENANCE) < code(b).search(/TARGET_APP_SUBDIR/),
+        "the provenance check precedes the first TARGET_APP_SUBDIR read",
+      );
+    }
+  });
+
+  test("Step 4.5 prose never cites the worktree manifest as the risk-surface source", () => {
+    const main = readFileSync(join(REPO_ROOT, "docs", "operator-playbooks", "hydra-target-build.md"), "utf-8");
+    assert.ok(
+      !main.includes("<TARGET_WT>/.hydra/manifest.json"),
+      "the risk surface is read from the serving checkout's manifest, not the worktree copy",
+    );
+  });
+
   test("the risk gates classify against the SERVING checkout's manifest, not the branch's own copy", () => {
     // After Step 0.6 the shell exports TARGET_MANIFEST_ROOT=$TARGET_WT (verify
     // commands come from the worktree). The gate scripts honour that variable,
