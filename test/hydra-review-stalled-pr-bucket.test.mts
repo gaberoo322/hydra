@@ -242,10 +242,16 @@ describe("hydra-review playbook — hand-back clears the PR's stranding labels (
     const recipe = /```bash\n([\s\S]*?)```/.exec(rule);
     assert.ok(recipe, "the rule must carry a concrete bash recipe block");
     const body = recipe[1];
-    assert.match(body, /for L in ready-for-human conflict-fix-attempted/, "both stranding labels are cleared");
-    // Name-in-URL-path DELETE on the PR number — the `-f name=` form wipes ALL labels.
-    assert.match(body, /gh api -X DELETE "repos\/\$RREPO\/issues\/\$PR\/labels\/\$L"/);
-    assert.doesNotMatch(body, /gh pr edit/, "gh pr edit is broken for labels — never use it");
+    // `gh pr edit` is the PR-label route the lifecycle-state-label-guard hook
+    // exempts by design (PR labels are flags, ADR-0047 D2). A `gh api -X DELETE
+    // .../issues/<n>/labels/ready-for-human` is denied as an issue STATE write
+    // once the PR number is inlined, because the hook cannot tell a PR from an issue.
+    assert.match(
+      body,
+      /gh pr edit "\$PR" --repo "\$RREPO" --remove-label ready-for-human --remove-label conflict-fix-attempted/,
+      "both stranding labels are cleared through gh pr edit",
+    );
+    assert.doesNotMatch(body, /gh api -X DELETE/, "the hook denies an issues/<n>/labels state DELETE once inlined");
     assert.doesNotMatch(body, /gh api[^\n]*-f name=/, "the -f name= DELETE form wipes every label");
     // The linked issue is routed too.
     assert.match(body, /RESP=\$\(curl -s -X POST http:\/\/localhost:4000\/api\/autopilot\/board\/relabel/);
@@ -259,20 +265,21 @@ describe("hydra-review playbook — hand-back clears the PR's stranding labels (
     assert.doesNotMatch(body, /gh issue edit/, "the issue relabel rides the board route, never gh issue edit");
   });
 
-  test("the label DELETE fails loud: only an HTTP 404 is tolerated, anything else aborts before the issue relabel (QA round 1)", () => {
+  test("the label removal fails loud: any non-zero gh pr edit aborts before the issue relabel (QA round 1)", () => {
     const rule = handBackRule();
     const recipe = /```bash\n([\s\S]*?)```/.exec(rule);
     assert.ok(recipe, "the rule must carry a concrete bash recipe block");
     const body = recipe[1];
-    // No silent swallow: discarding stderr behind an `||` fallback reports
-    // every failure (auth, rate limit, network) as a harmless 404.
-    assert.doesNotMatch(body, /2>\/dev\/null/, "the DELETE must not discard stderr");
-    assert.doesNotMatch(body, /--silent[^\n]*\|\|/, "the DELETE must not swallow failures with an || fallback");
-    // stderr is captured and only a 404 / "Label does not exist" is tolerated.
-    assert.match(body, /ERR=\$\(gh api -X DELETE [^\n]*2>&1\)/, "the DELETE's stderr must be captured");
-    assert.match(body, /grep -qE 'HTTP 404\|Label does not exist'/, "only a 404 is tolerated");
-    // Any other failure prints the error and exits non-zero.
-    assert.match(body, /could not remove[^\n]*>&2\n\s*exit 1/, "a non-404 failure must print and exit non-zero");
+    // No silent swallow. `gh pr edit --remove-label` already exits 0 when the
+    // label is absent from the PR, so ANY non-zero exit (auth, rate limit,
+    // network, unknown label) is a real failure.
+    assert.doesNotMatch(body, /2>\/dev\/null/, "the removal must not discard stderr");
+    assert.doesNotMatch(body, /\|\|\s*true/, "the removal must not swallow failures with || true");
+    assert.match(
+      body,
+      /--remove-label conflict-fix-attempted \\\n\s*\|\| \{ echo "ERROR: could not remove[^\n]*>&2; exit 1; \}/,
+      "a failed removal must print and exit non-zero",
+    );
     // The PR's labels are re-read; the issue relabel is refused while a
     // stranding label is still present.
     assert.match(body, /gh api "repos\/\$RREPO\/issues\/\$PR\/labels"/, "the PR's labels must be re-read");

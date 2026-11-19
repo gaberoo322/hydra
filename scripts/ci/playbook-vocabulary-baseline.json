@@ -166,7 +166,7 @@
       "status": 5,
       "issue-cite": 21,
       "back-compat": 1,
-      "shell-lines": 103,
+      "shell-lines": 95,
       "symbol-cite": 4
     },
     "docs/operator-playbooks/hydra-skill-prune.md": {
