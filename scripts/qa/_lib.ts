@@ -96,6 +96,23 @@ export function phaseRunner(fetchers: QaVerdictFetchers): PlumbingPorts["phase"]
   return (phase, input) => runQaVerdictPhase(phase, input, fetchers);
 }
 
+/**
+ * Map one in-process seam `advance` to a SeamMoveResult, never throwing (STD-VERIFY-NEVER-THROW): a seam
+ * crash becomes the `crashed` refusal, as the retired subprocess exit did, so the route's refusal/defer path runs.
+ */
+export async function guardedSeamMove(
+  run: () => Promise<{ ok: true } | { ok: false; code: string; counts?: readonly CapCount[] }>,
+): Promise<SeamMoveResult> {
+  try {
+    const res = await run();
+    if (res.ok === true) return { ok: true };
+    return res.counts !== undefined ? { ok: false, code: res.code, counts: res.counts } : { ok: false, code: res.code };
+  } catch (err) {
+    console.error("[hydra-qa] WARN: lifecycle advance crashed:", err);
+    return { ok: false, code: "crashed" };
+  }
+}
+
 /** The production ports: GitHub CLI Adapter + git seam + global fetch. */
 export async function createProductionPorts(repo: string, apiBase: string): Promise<PlumbingPorts> {
   const { ghExec } = await import("../../src/github/gh.ts");
@@ -107,11 +124,7 @@ export async function createProductionPorts(repo: string, apiBase: string): Prom
   const { advance, qaBounce, defaultSeamDeps } = await import("../../src/lifecycle/index.ts");
   const seamDeps = defaultSeamDeps(resolve(fileURLToPath(new URL("../..", import.meta.url))));
   return {
-    async advance(input) {
-      const res = await advance(input, seamDeps);
-      if (res.ok === true) return { ok: true };
-      return res.counts !== undefined ? { ok: false, code: res.code, counts: res.counts } : { ok: false, code: res.code };
-    },
+    advance: (input) => guardedSeamMove(() => advance(input, seamDeps)),
     qaBounce: (input) => qaBounce(input, seamDeps),
     async gh(args) {
       return toCmd(await ghExec(args));

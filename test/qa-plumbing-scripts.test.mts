@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { runQaVerdictPhase, type QaVerdictFetchers } from "../src/qa/phases.ts";
-import { phaseRunner, type CmdResult, type PlumbingPorts, type SeamMoveInput, type SeamMoveResult } from "../scripts/qa/_lib.ts";
+import { guardedSeamMove, phaseRunner, type CmdResult, type PlumbingPorts, type SeamMoveInput, type SeamMoveResult } from "../scripts/qa/_lib.ts";
 import { runPreflight, type PreflightOptions } from "../scripts/qa/preflight.ts";
 import { NO_STANDARDS_SENTINEL, runPacket } from "../scripts/qa/packet.ts";
 import { SKIP_REVIEW_REPORT, runRoute, type RouteDeps, type RouteOptions } from "../scripts/qa/route.ts";
@@ -1555,6 +1555,26 @@ describe("spawned CLIs (production adapter, fake gh on PATH)", () => {
 // ---------------------------------------------------------------------------
 // Route: reviewer commit class A wired into the executed path (issue #5415)
 // ---------------------------------------------------------------------------
+
+describe("guardedSeamMove (production advance adapter never throws)", () => {
+  test("a seam crash becomes the crashed refusal instead of rejecting", async () => {
+    const res = await guardedSeamMove(async () => {
+      throw new Error("boom");
+    });
+    assert.deepEqual(res, { ok: false, code: "crashed" });
+  });
+
+  test("an accepted move and a parked refusal keep their verdicts (counts ride through)", async () => {
+    assert.deepEqual(await guardedSeamMove(async () => ({ ok: true })), { ok: true });
+    const counts = [{ arm: "qa-fail-rounds", count: 3, cap: 3 }] as never;
+    assert.deepEqual(await guardedSeamMove(async () => ({ ok: false, code: "parked:qa-fail-rounds", counts })), {
+      ok: false,
+      code: "parked:qa-fail-rounds",
+      counts,
+    });
+    assert.deepEqual(await guardedSeamMove(async () => ({ ok: false, code: "no-edge" })), { ok: false, code: "no-edge" });
+  });
+});
 
 describe("route: reviewer commit class A and class B (issue #5415, executed-path order pins)", () => {
   const NEW_HEAD = "f".repeat(40);

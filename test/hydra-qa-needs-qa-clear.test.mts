@@ -214,6 +214,16 @@ describe("hydra-qa clears needs-qa on every verdict (issue #638)", () => {
     assert.ok(!calls.some(leavesNeedsQa), "no advance after a pr-merged refusal");
   });
 
+  test("T4 first deep-QA FAIL bounces through the seam's one read: the lane follows the PR state, the route never names it", async () => {
+    const t4 = { verdict: "FAIL", roundAction: "deep-qa", deepQa: { action: "bounce", failNumber: 1 } } as const;
+    const t4pre = pre({ tier: { num: 4, adversarial: true } });
+    const open = await route(t4, { pre: t4pre, state: "OPEN" });
+    const closed = await route(t4, { pre: t4pre, state: "CLOSED" });
+    assert.equal(target(open.find(leavesNeedsQa) as string[]), "needs-dev-resume");
+    assert.equal(target(closed.find(leavesNeedsQa) as string[]), "ready-for-agent");
+    assert.ok(!closed.some(handLabelWrite));
+  });
+
   test("PASS-pending-CI never leaves the pre-#638 'leave needs-qa in place' instruction anywhere", () => {
     assert.doesNotMatch(PLAYBOOK, /Leave the needs-qa label in place/i);
     assert.doesNotMatch(ROUTE_SRC, /Leave the needs-qa label in place/i);
