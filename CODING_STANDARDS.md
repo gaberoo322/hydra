@@ -164,6 +164,6 @@ enforced-by: scripts/ci/playbook-vocabulary-ratchet.ts
 
 ### STD-BASELINE-EDIT-ROWS
 
-Move only rows for changed files. A row a manifest test forces counts as changed. Never commit a blanket writer's output. A raised or seeded row needs a PR-body line `Baseline-raise: <fixture-path> <row-key> — <reason>`. An undisclosed raise, or a row for a file outside the diff, is a medium finding, reviewer-fixable as ADR-0046 class A. Ratchets built on `scripts/ci/ratchet.ts` (never-throw, fail-loud, test-title-provenance) take `--write-baseline` (tightens only, exit 1 on growth) and `--allow-grow` (reviewed growth); `--init`, `--seed`, `--shrink-baseline` and `--update-baseline` exit 2, and the printed advice names the exact rows rather than telling you to regenerate the file.
+Move only rows for changed files. A row a manifest test forces counts as changed. Never commit a blanket writer's output. A raised or seeded row needs a PR-body line `Baseline-raise: <fixture-path> <row-key> — <reason>`. An undisclosed raise, or a row for a file outside the diff, is a medium finding, reviewer-fixable as ADR-0046 class A.
 
 enforced-by: reviewer, scripts/ci/baseline-raise-check.ts (advisory)

@@ -139,6 +139,7 @@
     "test/qa-plumbing-scripts.test.mts": "behaviour",
     "test/qa-verdict-cli.test.mts": "behaviour",
     "test/qa-verdict-trailer.test.mts": "grandfathered",
+    "test/ratchet.test.mts": "behaviour",
     "test/reap-stale-test-procs.test.mts": "behaviour",
     "test/recover-stale.test.mts": "behaviour",
     "test/redis-db-helper.test.mts": "behaviour",
