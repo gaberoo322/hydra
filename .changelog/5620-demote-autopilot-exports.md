@@ -1,0 +1,1 @@
+- refactor: demote 20 unused src/autopilot exports to module-private (#5620)

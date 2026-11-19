@@ -86,7 +86,7 @@ export interface DispatchOutcome {
 }
 
 /** A dispatch with its joined outcome; `null` = no cycle record yet (pending). */
-export interface JoinedDispatch extends TurnDispatch {
+interface JoinedDispatch extends TurnDispatch {
   outcome: DispatchOutcome | null;
 }
 
@@ -293,7 +293,7 @@ export function sanitizeTurnObservabilityFields(
  * first for older turn rows (#4634), then `slot` (what decide.py's
  * make_dispatch emits today). Null when neither is a non-empty string.
  */
-export function resolveDispatchClass(action: Record<string, unknown>): string | null {
+function resolveDispatchClass(action: Record<string, unknown>): string | null {
   if (typeof action.class === "string" && action.class) return action.class;
   if (typeof action.slot === "string" && action.slot) return action.slot;
   return null;
@@ -367,7 +367,7 @@ export function parseTurnRow(member: string): TurnRow | null {
 }
 
 /** {@link parseTurnRow} for an already-parsed object (same tolerance rule). */
-export function parseTurnObject(parsed: unknown): TurnRow | null {
+function parseTurnObject(parsed: unknown): TurnRow | null {
   const raw = plainObject(parsed);
   if (!raw || !Number.isInteger(raw.turn_n)) return null;
 

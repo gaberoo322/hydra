@@ -333,7 +333,7 @@ export function parseGlmWithheld(boardState: string | null): ReadonlySet<number>
  * board-state body the base `ready_for_agent` count came from — the rows that
  * count dropped for an open strict blocker. Malformed / degraded is empty.
  */
-export function parseBlockerExcluded(boardState: string | null): ReadonlySet<number> {
+function parseBlockerExcluded(boardState: string | null): ReadonlySet<number> {
   return parseBoardStateIssueList(boardState, "blocker_excluded");
 }
 
