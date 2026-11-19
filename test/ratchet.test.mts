@@ -91,6 +91,21 @@ describe("ratchet: verdict over shape x polarity x stale", () => {
     }
   });
 
+  test("stale rows fail the verdict under stale=fail and only hint under stale=hint", async () => {
+    const root = setup({ gone: 1, kept: 1 });
+    try {
+      const strict = await make("counted", "ceiling", "fail", ["kept"]).verdict(root);
+      assert.equal(strict.ok, false);
+      assert.deepEqual(strict.stale, ["gone"]);
+      const lenient = await make("counted", "ceiling", "hint", ["kept"]).verdict(root);
+      assert.equal(lenient.ok, true);
+      assert.deepEqual(lenient.stale, ["gone"]);
+      assert.match(lenient.advice, /hint/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("a missing baseline is an empty baseline", async () => {
     const root = setup(undefined);
     try {
