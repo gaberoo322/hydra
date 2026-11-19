@@ -31,7 +31,7 @@ const CLASS_ORDER: readonly OneWayDoorClass[] = [
   "out-of-repo-contract",
 ];
 
-export interface OneWayDoorSignal {
+interface OneWayDoorSignal {
   ruleId: string;
   /** null only for the OWD-DETECTOR-ERROR signal. */
   class: OneWayDoorClass | null;

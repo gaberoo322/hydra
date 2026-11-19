@@ -10,7 +10,7 @@ import { isPromptOnlyChange } from "./change-shape.ts";
 import type { FinalVerdict } from "./verdict-trailer.ts";
 
 /** Conclusion strings GitHub returns for a completed check. */
-export type CheckConclusion =
+type CheckConclusion =
   | "success"
   | "failure"
   | "cancelled"
@@ -23,7 +23,7 @@ export type CheckConclusion =
   | null;
 
 /** Status strings GitHub returns. `queued` / `in_progress` / `pending` mean "not yet decided". */
-export type CheckStatus =
+type CheckStatus =
   | "queued"
   | "in_progress"
   | "pending"
@@ -408,7 +408,7 @@ export function classifyVerdict(
  * `aggregateAdversarialReview` / `classifyVerdict` folds — it only declines to
  * spawn reviewers whose output is provably moot (INV-D).
  */
-export type ReviewAdmissionAction = "admit" | "defer" | "skip-required-failed";
+type ReviewAdmissionAction = "admit" | "defer" | "skip-required-failed";
 
 export interface ReviewAdmissionInput {
   checks: CheckState[];

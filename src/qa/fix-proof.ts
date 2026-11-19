@@ -84,12 +84,12 @@ export function classifyQaFixPath(path: string): QaFixPathClass {
 }
 
 /** True iff `path` is a test file a class-B commit must prove by assertion. */
-export function isQaFixTestFile(path: string): boolean {
+function isQaFixTestFile(path: string): boolean {
   const p = normalize(path);
   return p.startsWith("test/") && p.endsWith(".test.mts") && classifyQaFixPath(p) === "B";
 }
 
-export type QaFixViolationReason =
+type QaFixViolationReason =
   | "malformed-trailer"
   | "stage-off"
   | "class-b-not-permitted"
@@ -97,7 +97,7 @@ export type QaFixViolationReason =
   | "wrong-class-path"
   | "verifier-core-pr";
 
-export interface QaFixViolation {
+interface QaFixViolation {
   sha: string;
   reason: QaFixViolationReason;
   path?: string;
@@ -190,7 +190,7 @@ export function evaluateQaFixProof(input: QaFixProofInput): QaFixProofResult {
 // least one ERR_ASSERTION failure AND no file-level crash entry.
 // ---------------------------------------------------------------------------
 
-export interface TapFileProof {
+interface TapFileProof {
   proven: boolean;
   assertionFailures: number;
   crashed: boolean;
