@@ -135,6 +135,41 @@ describe("skill-size-ratchet: shrink-only baseline comparison", () => {
     assertGrowthAdvice(violations[0].message);
   });
 
+  test("ADVISED LINE: the Baseline-raise line the growth advice prints clears the guard", async () => {
+    const { evaluateBaselineRaise } = await import("../scripts/ci/baseline-raise-check.ts");
+    const FX = "scripts/ci/skill-size-baseline.json";
+    const advised = (msg: string): string => {
+      const m = /`(Baseline-raise: [^`]+)`/.exec(msg);
+      assert.ok(m, `no Baseline-raise line in: ${msg}`);
+      return m[1].replace("<reason>", "needed");
+    };
+    const grew = compareAgainstBaseline(
+      { [PB]: { body: 105, description: 20 } },
+      baselineOf({ [PB]: { body: 100, description: 20 } }),
+    ).violations[0];
+    const grewRes = evaluateBaselineRaise({
+      fixtures: [{
+        path: FX,
+        base: JSON.stringify({ files: { [PB]: { body: 100, description: 20 } } }),
+        head: JSON.stringify({ files: { [PB]: { body: 105, description: 20 } } }),
+      }],
+      changedFiles: [],
+      prBody: advised(grew.message),
+    });
+    assert.equal(grewRes.ok, true, JSON.stringify(grewRes.findings));
+    const added = compareAgainstBaseline({ [PB]: { body: 50, description: 10 } }, baselineOf({})).violations[0];
+    const addedRes = evaluateBaselineRaise({
+      fixtures: [{
+        path: FX,
+        base: JSON.stringify({ files: {} }),
+        head: JSON.stringify({ files: { [PB]: { body: 50, description: 10 } } }),
+      }],
+      changedFiles: [],
+      prBody: advised(added.message),
+    });
+    assert.equal(addedRes.ok, true, JSON.stringify(addedRes.findings));
+  });
+
   test("MISSING BASELINE: null baseline fails with the seed command", () => {
     const { violations } = compareAgainstBaseline(
       { [PB]: { body: 50, description: 10 } },

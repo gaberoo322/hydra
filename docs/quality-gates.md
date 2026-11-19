@@ -233,8 +233,9 @@ The `advisory-checks.yml` step still runs the CLI as a readable per-PR report.
 **Reviewed growth.** In the same PR that grows a playbook, raise exactly that
 file's row to the measured count (hand-edit — never commit a blanket
 `--write-baseline`) and add a PR-body line
-`Baseline-raise: scripts/ci/skill-size-baseline.json <row-key> - <reason>`
-(STD-BASELINE-EDIT-ROWS). A new playbook or fragment adds its row the same way.
+`Baseline-raise: scripts/ci/skill-size-baseline.json files/<path>/body - <reason>`
+(`<path>` is the playbook path, e.g. `docs/operator-playbooks/hydra-dev.md`; STD-BASELINE-EDIT-ROWS).
+A new playbook or fragment adds its row the same way, with the key `files/<path>`.
 A description over the cap is shortened, never raised.
 
 ### `scope-check`

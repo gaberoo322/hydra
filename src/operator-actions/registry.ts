@@ -1389,7 +1389,7 @@ const RAW_ENTRIES = [
       },
     ],
     rationale:
-      "a required check failing is a distinct admission line from conflicted/unshepherded — advisory-checks (the ambient-red skill-size ratchet) must NEVER count toward it, so the default entry starts with the required-check table itself.",
+      "a required check failing is a distinct admission line from conflicted/unshepherded — advisory-checks (the non-required report steps) must NEVER count toward it, so the default entry starts with the required-check table itself.",
     doc: HYDRA_REVIEW_DOC,
   },
   {

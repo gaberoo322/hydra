@@ -200,7 +200,7 @@ export function compareAgainstBaseline(
           formatGrowthAdvice({
             cmd: WRITE_BASELINE_CMD,
             baselineRel: BASELINE_REL,
-            rowKey: path,
+            rowKey: `files/${path}`,
             fixVerb: "add a hand-written row for the new playbook",
             current: entry.body,
           }),
@@ -218,7 +218,7 @@ export function compareAgainstBaseline(
             formatGrowthAdvice({
               cmd: WRITE_BASELINE_CMD,
               baselineRel: BASELINE_REL,
-              rowKey: path,
+              rowKey: `files/${path}/body`,
               fixVerb: "shrink the file",
               current: entry.body,
             }),
