@@ -265,7 +265,7 @@ describe("hydra-review playbook — hand-back clears the PR's stranding labels (
     assert.doesNotMatch(body, /gh issue edit/, "the issue relabel rides the board route, never gh issue edit");
   });
 
-  test("the label removal fails loud: any non-zero gh pr edit aborts before the issue relabel (QA round 1)", () => {
+  test("the label removal fails loud: any non-zero gh pr edit aborts before the issue relabel", () => {
     const rule = handBackRule();
     const recipe = /```bash\n([\s\S]*?)```/.exec(rule);
     assert.ok(recipe, "the rule must carry a concrete bash recipe block");
