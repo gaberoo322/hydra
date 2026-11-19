@@ -252,11 +252,10 @@ describe("hydra-qa bounce label keys on open-PR state, not GLM provenance (issue
     assert.ok(!/gh pr comment\b/.test(PLAYBOOK), "no gh pr comment fence outside the retained merge fence");
   });
 
-  test("route never names the bounce lane or reads the PR state itself: every exit goes through ports.qaBounce", () => {
-    assert.ok(!ROUTE_SRC.includes("bounceLabel"), "bounceLabel is gone");
-    assert.doesNotMatch(ROUTE_SRC, /"--json", "state"/, "no second live PR-state read in the route");
-    assert.equal((ROUTE_SRC.match(/ports\.qaBounce\(/g) ?? []).length, 1, "one qaBounce call, shared by every bounce site");
-    assert.equal((ROUTE_SRC.match(/await bounce(?:OrThrow)?\(/g) ?? []).length, 5, "four call sites (defer, PASS-refusal defer reroute, T1-T3 FAIL, T4 1st deep-QA FAIL) plus the bounceOrThrow wrapper");
+  test("the route never reads the PR state itself on a FAIL: the seam's one read picks the lane", async () => {
+    const calls = await route({ verdict: "FAIL" }, { state: "CLOSED" });
+    assert.ok(!calls.some((a) => a[0] === "pr" && a[1] === "view" && a.includes("state")), "no route-side PR-state read");
+    assert.equal(target(calls.find(leavesNeedsQa) as string[]), "ready-for-agent");
   });
 
   test("an open PR bounces to needs-dev-resume — GLM or not — and never adds ready-for-agent", async () => {
