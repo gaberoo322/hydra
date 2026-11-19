@@ -91,7 +91,6 @@ function baseState(): Record<string, unknown> {
       unattended: true,
       schema_version: 2,
       daily_spend_cap_usd: 0,
-      scout_cost_share: 0.04,
     },
     slots: {
       dev_orch: null,
@@ -271,6 +270,16 @@ describe("turn.sh — Phases 1–4 as one command (issue #4831)", () => {
     const usageLine = r.stdout.split("\n").filter((l) => l.startsWith("{")).map((l) => JSON.parse(l)).find((s) => "slots_occupied" in s);
     assert.deepEqual(usageLine.slots_occupied, ["qa_orch"]);
     assert.ok(!readJson(sb2.plan).actions.some((a: any) => a.type === "dispatch" && a.slot === "qa_orch"));
+  });
+
+  test("a pre-existing state.json still carrying the retired limits.scout_cost_share loads (unknown limit keys are ignored, #5561)", () => {
+    const st = baseState();
+    (st.limits as any).scout_cost_share = 0.04;
+    const sb2 = sandbox(st);
+    sandboxes.push(sb2);
+    const r = runTurn(sb2);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readJson(sb2.plan).turn, 4, "plan is produced from the legacy state");
   });
 
   test("a terminate-worthy state still yields a plan (exit 0) — termination is an ACTION the session executes, not a turn.sh failure", () => {

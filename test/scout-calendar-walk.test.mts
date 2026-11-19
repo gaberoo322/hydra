@@ -37,7 +37,6 @@ const {
   isCategoryCooledDown,
   CLASS_COOLDOWN_DAYS,
   CATEGORY_COOLDOWN_DAYS,
-  SCOUT_DAILY_COST_SHARE,
   recordScoutSpend,
   getScoutSpendToday,
   scoutSpendDateString,
@@ -166,8 +165,6 @@ describe("isCooledDown", () => {
     // 7 days / 30 days are pinned by the issue body.
     assert.equal(CLASS_COOLDOWN_DAYS, 7);
     assert.equal(CATEGORY_COOLDOWN_DAYS, 30);
-    // ~4% of \$50/day cap is the steady-state recommendation.
-    assert.equal(SCOUT_DAILY_COST_SHARE, 0.04);
   });
 });
 

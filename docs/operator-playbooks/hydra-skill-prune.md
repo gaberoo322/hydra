@@ -45,21 +45,14 @@ worth re-running). Runnable by hand: `/hydra-skill-prune [apply]`.
 
 ## Step 1 — Pick the ONE skill to prune
 
-Selection is **largest-over-baseline first, else round-robin**:
+Selection is **largest-over-baseline first, else round-robin**, computed by
+`scripts/skill-prune/select-skill.ts` (no hand-rolled pick):
 
-1. Read `scripts/ci/skill-size-baseline.json` (the shrink-only ratchet
-   baseline: per-playbook body word counts).
-2. For each `docs/operator-playbooks/hydra-*.md`, compute the current body word
-   count and the delta over its baseline entry.
-3. If any skill's current body **exceeds** its baseline (it grew since the last
-   ratchet tighten), pick the one with the **largest over-baseline delta** — it
-   is the freshest accretion and the highest-value prune.
-4. Otherwise (every skill at or below baseline, the steady state), fall back to
-   **round-robin**: pick the skill with the oldest `skill_prune` attempt. Track
-   the rotation in a small `${HYDRA_STATE_DIR:-/tmp}/hydra-skill-prune-rotation.json`
-   ledger (skill name → last-pruned epoch); pick the least-recently-pruned skill,
-   stamp it after the run. A missing ledger starts the rotation at the
-   alphabetically first playbook.
+Run `npx tsx scripts/skill-prune/select-skill.ts select` (prints the playbook name); after the run (PR opened or downgrade issue filed) run `npx tsx scripts/skill-prune/select-skill.ts stamp <playbook-name>`.
+
+It compares each playbook body against `scripts/ci/skill-size-baseline.json`,
+picks the largest over-baseline delta, else the least-recently-pruned playbook
+from its rotation ledger (alphabetically first when the ledger is missing).
 
 Only ONE skill is chosen. Do not batch.
 
@@ -123,9 +116,9 @@ EVAL_RC=$?
   `after` came out identical, or `before` carried zero load-bearing contract
   tokens — see `evals/scorers/contract-token-parity.ts`): the run
   **DOWNGRADES**. Do NOT open a PR. Under `--apply`, file a single
-  `needs-triage` GitHub issue on `gaberoo322/hydra` — stamped
-  `--label needs-triage --label skill-prune` (create the label once if
-  absent: `gh label create skill-prune --repo gaberoo322/hydra --force`,
+  `needs-triage` GitHub issue on `gaberoo322/hydra` — created with the flag
+  label `--label skill-prune` only, its state written by the lifecycle seam
+  as below (create the label once if absent: `gh label create skill-prune --repo gaberoo322/hydra --force`,
   the cleanup-scan precedent) — listing the candidate deletions (bucketed
   by Pocock taxonomy) so a human/triage pass can decide. The `skill-prune`
   label is the COUNT SEAM for the autopilot's `skill_prune_board_saturated`
@@ -133,6 +126,8 @@ EVAL_RC=$?
   issues against the cap of 3 and suppresses the class above it) — omitting it disarms the cap and lets a failing eval
   re-file candidate lists every 7d cooldown. Under dry-run, just print
   that list.
+
+@include _fragments/issue-first-state.md
 
 > **Scope of the offline eval:** the echo-provider
 > eval verifies load-bearing contract-token **PRESERVATION** across the prune —

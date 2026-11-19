@@ -103,17 +103,6 @@ export const CLASS_COOLDOWN_DAYS =
 /** Default per-category cooldown — research question #2 default. */
 export const CATEGORY_COOLDOWN_DAYS = 30;
 
-/** Steady-state cost slice as a fraction of the daily token budget.
- *
- * Research question #1: ~4% of the $50/day cap (≈ \$2/day). Each scout
- * dispatch consumes ~30–50K tokens; a weekly walk over 10 categories
- * (dep:* targets removed in issue #4556 — walk surface is categories-only)
- * ≈ 10 dispatches / 7 days ≈ 1.4 dispatches/day. Operators override via
- * `state.limits.scout_cost_share` — `decide.py:_select_for_signal` reads
- * it at runtime (issue #532 wired enforcement on top of this constant).
- */
-export const SCOUT_DAILY_COST_SHARE = 0.04;
-
 /** TTL on the per-day scout spend mirror key (issue #532). 7 days. */
 const SCOUT_SPEND_DAILY_TTL_SECONDS = 7 * 24 * 60 * 60;
 

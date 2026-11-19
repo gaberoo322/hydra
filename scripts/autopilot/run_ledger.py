@@ -243,7 +243,6 @@ LIMITS = [
     _row("unattended", "bool", REQUIRED, RESET),
     _row("schema_version", "int", SCHEMA_VERSION, RESET),
     _row("daily_spend_cap_usd", "number", REQUIRED, RESET),
-    _row("scout_cost_share", "number", REQUIRED, RESET),
     _row("orch_realm_weekly_share_cap", "number", None, RESET, seeded=False),
 ]
 

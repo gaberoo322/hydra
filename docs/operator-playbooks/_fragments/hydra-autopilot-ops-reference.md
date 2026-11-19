@@ -207,7 +207,6 @@ Defaults live in the file named in each row; read them there.
 | `HYDRA_AUTOPILOT_SLOT_EVENTS_MAXLEN` | the hooks | `XADD MAXLEN ~` cap |
 | `HYDRA_AUTOPILOT_SUBAGENT_MAX_WALL_SECONDS` | `decide.py` | Silent-wedge fallback cap |
 | `HYDRA_AUTOPILOT_DAILY_SPEND_CAP_USD` | bootstrap | Written to `state.limits.daily_spend_cap_usd`; nothing reads it (the spend gate was removed) |
-| `HYDRA_AUTOPILOT_SCOUT_COST_SHARE` | bootstrap | Written to `state.limits.scout_cost_share`; nothing reads it (the spend gate was removed) |
 | `HYDRA_USAGE_5H_THROTTLE_T1` | `src/cost/usage-tracker.ts` | Tier-1 fraction of the 5h window. Once reached on the authoritative OAuth meter (never the transcript estimate), `projectEligibility` sheds the lowest-value pipeline and backfill classes. Inert when the meter reports no 5h window. Set-but-invalid falls back to the default and logs |
 | `HYDRA_USAGE_5H_THROTTLE_T2` | `src/cost/usage-tracker.ts` | Tier-2 fraction. Additionally sheds `design_concept_orch` and `dev_orch`; `qa_*` and `dev_target` are never shed. A value under T1 is clamped up |
 | `HYDRA_EXTRA_USAGE_POLICY` | `src/cost/config.ts` | `block` forces `allow=false` while paid overage is armed (`reasons.extraUsageArmed`); `allow` reports it without folding it into `allow`, for an account whose overage is plan-level and capped. `pace-gate.sh` keys its skip arm off `extraUsageBlocking`. Set-but-invalid falls back to the default and logs |
