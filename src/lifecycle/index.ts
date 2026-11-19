@@ -14,10 +14,6 @@ export {
   isHumanHold,
   isLegalTransition,
   stateLabelsOf,
-  type LifecycleState,
-  type OpenState,
-  type OperatorTarget,
-  type OperatorTransition,
 } from "./transitions.ts";
 export {
   ADR5_REASONS,
@@ -46,33 +42,25 @@ export {
   type Fetched,
   type GateInput,
   type GateRecords,
-  type PrRecord,
 } from "./gates.ts";
 export {
   HOLD_EXIT_ALERT_WINDOW_DAYS,
   isUnsanctionedHoldExit,
 } from "./hold-exit.ts";
 export {
-  latestResetMs,
   type TimedBody,
 } from "./caps.ts";
 export {
   classifyQaVerdictTarget,
   gateQaVerdict,
-  type QaExitTarget,
   type QaLivePr,
-  type QaVerdictTarget,
 } from "./gates.ts";
-export { lastKnownState, replayStateSnapshots } from "./timeline.ts";
 export {
   MAX_STALE_CLAIM_CLOSES,
   STALE_CLAIM_AGE_MS,
   runReconcile,
   type ReconcileDeps,
-  type ReconcileOptions,
-  type ReconcileReport,
 } from "./reconcile.ts";
-export { parkForCap, postCapReset, type ParkResult } from "./park.ts";
 export { advance, journalEntry, type AdvanceResult } from "./seam.ts";
 export {
   defaultSeamDeps,

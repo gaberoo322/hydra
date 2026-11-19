@@ -513,7 +513,7 @@
   "test/test-pools.test.mts": 11,
   "test/test-source-read-ratchet.test.mts": 3,
   "test/test-title-provenance-ratchet.test.mts": 4,
-  "test/test-typecheck-check.test.mts": 6,
+  "test/test-typecheck-check.test.mts": 7,
   "test/tick-stagnation-alert.test.mts": 1,
   "test/tier-classifier.test.mts": 6,
   "test/tier-policy.test.mts": 2,

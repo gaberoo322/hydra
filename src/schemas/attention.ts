@@ -121,6 +121,12 @@ export const AttentionFeedItemSchema = z
     detail: z.string().optional(),
     /** Rank-0 aggregate only: the active machine-stopped lines, in line order. */
     subLines: z.array(MachineStoppedSubLineSchema).optional(),
+    /**
+     * The issue number of a per-issue row (never a PR row or an aggregate),
+     * so the dashboard can build an `in-dashboard` board-route body for the
+     * recommended action (issue #5648).
+     */
+    issue: z.number().int().positive().optional(),
   })
   .strict();
 
