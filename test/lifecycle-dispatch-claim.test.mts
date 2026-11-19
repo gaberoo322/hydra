@@ -143,6 +143,30 @@ describe("dispatch: composite verb (INV-6, INV-8)", () => {
     assert.equal(w.edits.length, 0);
   });
 
+  test("a throw after the claim opened returns redis-failed and releases the claim (no claim-held on retry)", async () => {
+    const { w, seam } = world("enforce");
+    w.labels.set(10, ["ready-for-agent"]);
+    // The claim opens first; the label write inside the advance then throws.
+    seam.edit = async () => {
+      throw new Error("boom");
+    };
+    const res = await dispatch(D("d1"), seam);
+    assert.equal(res.ok === false && res.code, "redis-failed");
+    assert.equal(w.claims.has(10), false);
+  });
+
+  test("sibling: a throw before any claim opens never releases a claim owned by another dispatch", async () => {
+    const { w, seam } = world("enforce");
+    const other = await openClaim({ issue: 10, dispatchId: "other", class: "dev_orch", run: "r0", artifactHash: null, actor: "cli" }, seam);
+    assert.equal(other.ok, true);
+    seam.fetch.designConcept = async () => {
+      throw new Error("boom");
+    };
+    const res = await dispatch(D("d1"), seam);
+    assert.equal(res.ok === false && res.code, "redis-failed");
+    assert.equal(w.claims.get(10)?.dispatchId, "other");
+  });
+
   test("shadow writes the label and reports wouldRefuse", async () => {
     const { w, seam } = world("shadow", { status: "draft", hash: "h" });
     w.labels.set(10, ["ready-for-agent", "needs-design-concept"]);
@@ -358,7 +382,13 @@ describe("no TTL, no force path (INV-1, INV-2)", () => {
   });
 
   test("there is no force-release path: no release --held, no releaseHeldClaim", () => {
-    const files = ["../scripts/lifecycle.ts", "../src/lifecycle/seam.ts", "../src/lifecycle/reconcile.ts"];
+    const files = [
+      "../scripts/lifecycle.ts",
+      "../src/lifecycle/seam.ts",
+      "../src/lifecycle/claim.ts",
+      "../src/lifecycle/operator.ts",
+      "../src/lifecycle/reconcile.ts",
+    ];
     for (const f of files) {
       const src = readFileSync(new URL(f, import.meta.url), "utf8");
       assert.equal(/releaseHeldClaim|"held"|--held/.test(src), false, f);

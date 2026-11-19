@@ -1,0 +1,1 @@
+- refactor: split the lifecycle seam into spine, deps, claim and operator modules (#5618)

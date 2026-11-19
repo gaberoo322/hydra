@@ -30,7 +30,7 @@ import {
   type LifecycleJournalEntry,
 } from "../src/redis/lifecycle-journal.ts";
 import { parkForCap } from "../src/lifecycle/park.ts";
-import type { SeamDeps } from "../src/lifecycle/seam.ts";
+import type { SeamDeps } from "../src/lifecycle/index.ts";
 import type { CapCount } from "../src/lifecycle/caps.ts";
 
 const REPO = "test-owner/lifecycle-journal-test";

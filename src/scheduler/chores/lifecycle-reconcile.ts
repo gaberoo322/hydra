@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { logger } from "../../logger.ts";
 import { listIssuesBySearch, listOpenIssues, resolveGithubRepo } from "../../github/issues.ts";
 import { listOpenPrs } from "../../github/prs.ts";
-import { defaultSeamDeps } from "../../lifecycle/seam.ts";
+import { defaultSeamDeps } from "../../lifecycle/index.ts";
 import {
   RECENTLY_CLOSED_LIMIT,
   runReconcile,

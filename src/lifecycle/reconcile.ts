@@ -34,7 +34,9 @@ import {
   type Fetched,
 } from "./gates.ts";
 import { postCapReset } from "./park.ts";
-import { advance, releaseClaim, type AdvanceInput, type AdvanceResult, type SeamDeps } from "./seam.ts";
+import { releaseClaim } from "./claim.ts";
+import { advance, type AdvanceInput, type AdvanceResult } from "./seam.ts";
+import type { SeamDeps } from "./seam-deps.ts";
 import { externalMoves, lastKnownState } from "./timeline.ts";
 import { stateLabelsOf } from "./transitions.ts";
 

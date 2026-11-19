@@ -23,7 +23,7 @@ import {
   type CapJournalEntry,
   type TimedBody,
 } from "../src/lifecycle/caps.ts";
-import { advance, openClaim, releaseClaim, type SeamDeps, type LifecycleMode } from "../src/lifecycle/seam.ts";
+import { advance, openClaim, releaseClaim, type SeamDeps, type LifecycleMode } from "../src/lifecycle/index.ts";
 import { postCapReset } from "../src/lifecycle/park.ts";
 import { TRANSITIONS } from "../src/lifecycle/transitions.ts";
 import type { LifecycleJournalEntry } from "../src/redis/lifecycle-journal.ts";

@@ -13,7 +13,7 @@
 import { logger } from "../logger.ts";
 import type { LifecycleJournalEntry } from "../redis/lifecycle-journal.ts";
 import { CAP_RESET_PREFIX, renderCapCounts, type CapCount } from "./caps.ts";
-import type { SeamDeps } from "./seam.ts";
+import type { SeamDeps } from "./seam-deps.ts";
 import { findTransition, isLifecycleState } from "./transitions.ts";
 
 export interface ParkInput {

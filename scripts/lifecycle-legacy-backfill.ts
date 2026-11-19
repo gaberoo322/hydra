@@ -18,7 +18,7 @@
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { defaultSeamDeps, openClaim, type SeamDeps } from "../src/lifecycle/index.ts";
-import { LEGACY_BACKFILL_CLASS } from "../src/lifecycle/seam.ts";
+import { LEGACY_BACKFILL_CLASS } from "../src/lifecycle/index.ts";
 import { closeRedisConnections } from "../src/redis/connection.ts";
 import { listOpenIssues, type IssueReadResult, type IssueRow } from "../src/github/issues.ts";
 

@@ -61,24 +61,25 @@ export {
   runReconcile,
   type ReconcileDeps,
 } from "./reconcile.ts";
+export { advance, journalEntry, type AdvanceResult } from "./seam.ts";
 export {
-  advance,
   defaultSeamDeps,
-  journalEntry,
   loadLifecycleMode,
-  openClaim,
-  operatorAdvance,
-  operatorReopen,
-  releaseClaim,
-  releaseClaimByDispatch,
-  dispatch,
-  type DispatchInput,
-  type DispatchResult,
-  CLAIM_OUTCOMES,
-  type ClaimOutcome,
-  type ClaimPurpose,
   resolveLifecycleMode,
-  type AdvanceResult,
   type LifecycleMode,
   type SeamDeps,
-} from "./seam.ts";
+} from "./seam-deps.ts";
+export {
+  CLAIM_OUTCOMES,
+  CLAIM_PURPOSES,
+  LEGACY_BACKFILL_CLASS,
+  dispatch,
+  openClaim,
+  releaseClaim,
+  releaseClaimByDispatch,
+  type ClaimOutcome,
+  type ClaimPurpose,
+  type DispatchInput,
+  type DispatchResult,
+} from "./claim.ts";
+export { operatorAdvance, operatorReopen, type OperatorAdvanceInput } from "./operator.ts";
