@@ -38,9 +38,9 @@ import {
 import { BriefScheduler, localParts, weeklyDue } from "./brief-scheduler.ts";
 import { loadTelegramCredentials } from "./credentials.ts";
 
-export const BRIEF_DEDUP_KEY = "morning-brief";
+const BRIEF_DEDUP_KEY = "morning-brief";
 /** Items window when no last-sent key exists yet (first brief ever). */
-export const BRIEF_DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000;
+const BRIEF_DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000;
 const MAX_WAITING = 12;
 const MAX_MERGES = 15;
 const MAX_EVENT_LINES = 20;
@@ -126,7 +126,7 @@ function autopilotSection(s: BriefSources, nowMs: number): BriefSection {
 }
 
 /** One-line stagnation glance: breached/instrumented, warming, window cycles. */
-export function stagnationLine(panel: StagnationLike | null | undefined): string {
+function stagnationLine(panel: StagnationLike | null | undefined): string {
   if (!panel || !panel.signals) return "no instrumented stagnation signals";
   let breached = 0;
   let warming = 0;

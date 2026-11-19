@@ -2,8 +2,8 @@
  * Morning Brief line rendering (ADR-0045 Decision 7, issues #5047 / #5389).
  *
  * The per-kind renderers live on the rows of `KIND_TABLE` in `./page-list.ts`
- * (the one per-kind table); this file re-exports the brief types and the
- * `fact` helper so existing importers keep compiling, and owns the generic
+ * (the one per-kind table); this file re-exports `BriefItem` so existing
+ * importers keep compiling, and owns the generic
  * fallback dispatch and the tolerant stored-item parse. A kind with no
  * `briefLine` (an arbitrary `/events/publish` payload, or a literal-page row)
  * renders through the generic `kind — title (facts)` line and is never blank.
@@ -14,8 +14,7 @@
 
 import { genericBriefLine, rowOf, type BriefItem } from "./page-list.ts";
 
-export { fact } from "./page-list.ts";
-export type { BriefItem, BriefKind, BriefLineRenderer } from "./page-list.ts";
+export type { BriefItem } from "./page-list.ts";
 
 /**
  * Render one brief item as a plain-text line. A kind whose row carries a

@@ -24,8 +24,8 @@
 import { logger } from "../logger.ts";
 import { redisBriefStore, type DeliveryOutcome } from "../redis/operator-channel.ts";
 
-export const BRIEF_HOUR = 7;
-export const BRIEF_MINUTE = 30;
+const BRIEF_HOUR = 7;
+const BRIEF_MINUTE = 30;
 
 export interface LocalParts {
   hour: number;
@@ -86,7 +86,7 @@ export interface BriefStore {
 }
 
 /** What the send path reports back; `ok` means the transport delivered it. */
-export interface BriefSendOutcome {
+interface BriefSendOutcome {
   ok: boolean;
   outcome: DeliveryOutcome;
   at: number;
