@@ -196,6 +196,7 @@ async function fileNeedsTriage(
         else lastFailure = adv.code;
       } catch (err: any) {
         lastFailure = `threw: ${err?.message || err}`;
+        logger.warn({ issueNumber, attempt, err }, "wiring-liveness dark-alarm: first-state advance threw");
       }
     }
     if (!landed) {
