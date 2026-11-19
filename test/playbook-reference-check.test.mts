@@ -20,6 +20,8 @@ const {
   looksLikeSymbol,
   compareAgainstBaseline,
   buildBaseline,
+  mergeBaselineForFiles,
+  resolveFilesFilter,
   formatReport,
   scanRepo,
   loadBaseline,
@@ -244,6 +246,22 @@ describe("playbook-reference-check: shrink-only baseline", () => {
     );
     assert.deepEqual(baseline.files, { "b.md": ["path src/z.ts", "route /api/x"] });
     assert.doesNotMatch(baseline.note, /\d{4}-\d{2}-\d{2}/);
+  });
+});
+
+describe("playbook-reference-check: scoped re-seed (--files)", () => {
+  test("mergeBaselineForFiles rewrites only the named rows and keeps the note", () => {
+    const existing = { note: "n", files: { "a.md": ["path x"], "b.md": ["npm y"] } };
+    const merged = mergeBaselineForFiles(existing, { "a.md": [{ kind: "path", ref: "z", line: 1 }] }, ["a.md", "b.md"]);
+    assert.deepEqual(merged, { note: "n", files: { "a.md": ["path z"] } });
+    assert.deepEqual(mergeBaselineForFiles(existing, {}, ["a.md"]), { note: "n", files: { "b.md": ["npm y"] } });
+  });
+
+  test("resolveFilesFilter rejects a filter without --write-baseline or without a value", () => {
+    assert.equal(resolveFilesFilter(["--write-baseline"]), undefined);
+    assert.deepEqual(resolveFilesFilter(["--write-baseline", "--files", "a.md,b.md"]), ["a.md", "b.md"]);
+    assert.throws(() => resolveFilesFilter(["--files", "a.md"]), /only applies together with --write-baseline/);
+    assert.throws(() => resolveFilesFilter(["--write-baseline", "--files"]), /needs a comma-separated value/);
   });
 });
 

@@ -33,7 +33,18 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { InvalidArgumentError } from "../../src/errors.ts";
 import { listPlaybooks } from "./playbook-reference-check.ts";
-import { REPO_ROOT, formatStaleAdvice, isCliEntrypoint, loadJsonBaseline, writeJsonBaseline } from "./seam-check-lib.ts";
+import {
+  REPO_ROOT,
+  buildRowBaseline,
+  compareCountRows,
+  formatStaleAdvice,
+  isCliEntrypoint,
+  loadJsonBaseline,
+  mergeCountRows,
+  resolveListFlag,
+  runBaselineRatchet,
+  type CountDelta,
+} from "./seam-check-lib.ts";
 
 export const BASELINE_REL = "scripts/ci/playbook-duplicate-baseline.json";
 export const STANDARD_REL = "CODING_STANDARDS.md";
@@ -216,41 +227,35 @@ export function countSpans(found: Record<string, Span[]>): Record<string, number
 // Baseline
 // ---------------------------------------------------------------------------
 
+const SPAN_KEYS = ["spans"] as const;
+
+const spanCounts = (found: Record<string, Span[]>): Record<string, { spans?: number }> => {
+  const out: Record<string, { spans?: number }> = {};
+  for (const [file, spans] of Object.entries(found)) out[file] = { spans: spans.length };
+  return out;
+};
+
 export function compareAgainstBaseline(found: Record<string, Span[]>, baseline: Baseline): Comparison {
-  const exceeded: Delta[] = [];
-  const stale: Delta[] = [];
-  const files = new Set([...Object.keys(found), ...Object.keys(baseline.files)]);
-  for (const file of [...files].sort()) {
-    const spans = found[file] ?? [];
-    const allowed = baseline.files[file]?.spans ?? 0;
-    if (spans.length === allowed) continue;
-    (spans.length > allowed ? exceeded : stale).push({ file, count: spans.length, baseline: allowed, spans });
-  }
-  return { exceeded, stale };
+  const cmp = compareCountRows(spanCounts(found), baseline.files, SPAN_KEYS);
+  const toDelta = (d: CountDelta<"spans">): Delta => ({ file: d.file, count: d.count, baseline: d.baseline, spans: found[d.file] ?? [] });
+  return { exceeded: cmp.exceeded.map(toDelta), stale: cmp.stale.map(toDelta) };
 }
 
 export function buildBaseline(found: Record<string, Span[]>): Baseline {
-  const files: Record<string, { spans: number }> = {};
-  for (const file of Object.keys(found).sort()) {
-    if (found[file].length > 0) files[file] = { spans: found[file].length };
-  }
-  return {
-    note:
-      `Shrink-only per-file counts of playbook passages shared verbatim with another playbook source (issue #5587). ` +
+  const rows: Record<string, { spans: number }> = {};
+  for (const [file, spans] of Object.entries(found)) rows[file] = { spans: spans.length };
+  return buildRowBaseline(
+    rows,
+    `Shrink-only per-file counts of playbook passages shared verbatim with another playbook source (issue #5587). ` +
       `Never raise a count: move the passage into a _fragments/ file per ${STANDARD_REL} STD-PLAYBOOK-ONE-HOME. ` +
       `Lower with ${WRITE_BASELINE_CMD} [--files a.md,b.md].`,
-    files,
-  };
+    (row) => row.spans === 0,
+  );
 }
 
 /** Re-seed only the named files' rows; every other row and the note stay as they are. */
 export function mergeBaselineForFiles(existing: Baseline, found: Record<string, Span[]>, files: readonly string[]): Baseline {
-  const rows: Record<string, { spans: number }> = {};
-  const names = new Set([...Object.keys(existing.files), ...files]);
-  for (const file of [...names].sort()) {
-    const n = files.includes(file) ? (found[file]?.length ?? 0) : (existing.files[file]?.spans ?? 0);
-    if (n > 0) rows[file] = { spans: n };
-  }
+  const rows = mergeCountRows(existing.files, spanCounts(found), SPAN_KEYS, { files }) as Record<string, { spans: number }>;
   return { note: existing.note, files: rows };
 }
 
@@ -259,13 +264,8 @@ export function mergeBaselineForFiles(existing: Baseline, found: Record<string, 
  * every row. `--files` without `--write-baseline`, or with no/empty value, throws.
  */
 export function resolveFilesFilter(argv: readonly string[]): string[] | undefined {
-  const at = argv.indexOf("--files");
-  if (at === -1) return undefined;
-  if (!argv.includes("--write-baseline")) throw new InvalidArgumentError("--files only applies together with --write-baseline");
-  const value = argv[at + 1];
-  if (value === undefined || value.startsWith("--")) throw new InvalidArgumentError("--files needs a comma-separated value");
-  const names = value.split(",").map((n) => n.trim()).filter(Boolean);
-  if (names.length === 0) throw new InvalidArgumentError("--files needs at least one file name");
+  const names = resolveListFlag(argv, "--files", "--files needs a comma-separated value");
+  if (names !== undefined && names.length === 0) throw new InvalidArgumentError("--files needs at least one file name");
   return names;
 }
 
@@ -311,21 +311,18 @@ export async function loadBaseline(root: string = REPO_ROOT): Promise<Baseline> 
 }
 
 async function main(): Promise<void> {
-  const filesFilter = resolveFilesFilter(process.argv);
-  const found = scanRepo();
-  if (process.argv.includes("--write-baseline")) {
-    const target = join(REPO_ROOT, BASELINE_REL);
-    const next = filesFilter === undefined ? buildBaseline(found) : mergeBaselineForFiles(await loadBaseline(), found, filesFilter);
-    await writeJsonBaseline(target, next);
-    console.log(`[playbook-duplicate-ratchet] wrote ${BASELINE_REL}`);
-    return;
-  }
-  const report = formatReport(compareAgainstBaseline(found, await loadBaseline()));
-  if (report) {
-    console.error(report);
-    process.exit(1);
-  }
-  console.log("[playbook-duplicate-ratchet] OK");
+  const code = await runBaselineRatchet({
+    name: "playbook-duplicate-ratchet",
+    baselineRel: BASELINE_REL,
+    scan: () => scanRepo(),
+    load: () => loadBaseline(),
+    build: buildBaseline,
+    merge: mergeBaselineForFiles,
+    filter: resolveFilesFilter,
+    compare: compareAgainstBaseline,
+    report: formatReport,
+  });
+  if (code !== 0) process.exit(code);
 }
 
 if (isCliEntrypoint(import.meta.url)) {

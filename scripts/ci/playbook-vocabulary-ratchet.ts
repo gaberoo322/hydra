@@ -56,7 +56,18 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { InvalidArgumentError } from "../../src/errors.ts";
 import { attributedSymbols, listPlaybooks } from "./playbook-reference-check.ts";
-import { REPO_ROOT, formatStaleAdvice, isCliEntrypoint, loadJsonBaseline, writeJsonBaseline } from "./seam-check-lib.ts";
+import {
+  REPO_ROOT,
+  compareCountRows,
+  escapeRegExp,
+  formatStaleAdvice,
+  isCliEntrypoint,
+  loadJsonBaseline,
+  mergeCountRows,
+  resolveListFlag,
+  runBaselineRatchet,
+  type CountDelta,
+} from "./seam-check-lib.ts";
 import { HISTORICAL_EXEMPT_RE, classifyFile } from "./target-coupling-check.ts";
 
 export const BASELINE_REL = "scripts/ci/playbook-vocabulary-baseline.json";
@@ -167,10 +178,6 @@ const SHELL_INFO = new Set(["bash", "sh", "zsh", "shell"]);
 
 /** A CommonMark fence line, optionally inside blockquote prefixes. */
 const FENCE_RE = /^\s*(?:>\s*)*(`{3,}|~{3,})(.*)$/;
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
 
 /** Split on `sep` at parenthesis depth 0. */
 function splitTopLevel(text: string, sep: string): string[] {
@@ -299,37 +306,30 @@ export function countByShape(hits: readonly Hit[]): ShapeCounts {
 // Baseline
 // ---------------------------------------------------------------------------
 
+const shapeCounts = (found: Record<string, Hit[]>): Record<string, ShapeCounts> => {
+  const out: Record<string, ShapeCounts> = {};
+  for (const [file, hits] of Object.entries(found)) out[file] = countByShape(hits);
+  return out;
+};
+
 export function compareAgainstBaseline(found: Record<string, Hit[]>, baseline: Baseline): Comparison {
-  const exceeded: Delta[] = [];
-  const stale: Delta[] = [];
-  const files = new Set([...Object.keys(found), ...Object.keys(baseline.files)]);
-  for (const file of [...files].sort()) {
-    const hits = found[file] ?? [];
-    const counts = countByShape(hits);
-    for (const shape of SHAPES) {
-      const count = counts[shape] ?? 0;
-      const allowed = baseline.files[file]?.[shape] ?? 0;
-      if (count === allowed) continue;
-      const delta = { file, shape, count, baseline: allowed, hits: hits.filter((h) => h.shape === shape) };
-      (count > allowed ? exceeded : stale).push(delta);
-    }
-  }
-  return { exceeded, stale };
+  const cmp = compareCountRows(shapeCounts(found), baseline.files, SHAPES);
+  const toDelta = (d: CountDelta<Shape>): Delta => ({
+    file: d.file,
+    shape: d.key,
+    count: d.count,
+    baseline: d.baseline,
+    hits: (found[d.file] ?? []).filter((h) => h.shape === d.key),
+  });
+  return { exceeded: cmp.exceeded.map(toDelta), stale: cmp.stale.map(toDelta) };
 }
 
 export function buildBaseline(found: Record<string, Hit[]>): Baseline {
-  const files: Record<string, ShapeCounts> = {};
-  for (const file of Object.keys(found).sort()) {
-    const counts = countByShape(found[file]);
-    const ordered: ShapeCounts = {};
-    for (const shape of SHAPES) if (counts[shape]) ordered[shape] = counts[shape];
-    if (Object.keys(ordered).length > 0) files[file] = ordered;
-  }
   return {
     note:
       `Shrink-only per-file counts of banned playbook vocabulary (issue #5500). ` +
       `Never raise a count: rewrite the sentence per ${STANDARD_REL}. Lower with ${WRITE_BASELINE_CMD}.`,
-    files,
+    files: mergeCountRows({}, shapeCounts(found), SHAPES),
   };
 }
 
@@ -339,19 +339,7 @@ export function buildBaseline(found: Record<string, Hit[]>): Baseline {
  * dropped only when it ends up empty (STD-BASELINE-EDIT-ROWS).
  */
 export function mergeBaselineForShapes(existing: Baseline, found: Record<string, Hit[]>, shapes: readonly Shape[]): Baseline {
-  const files: Record<string, ShapeCounts> = {};
-  const names = new Set([...Object.keys(existing.files), ...Object.keys(found)]);
-  for (const file of [...names].sort()) {
-    const counts = countByShape(found[file] ?? []);
-    const prev = existing.files[file] ?? {};
-    const row: ShapeCounts = {};
-    for (const shape of SHAPES) {
-      const v = shapes.includes(shape) ? counts[shape] : prev[shape];
-      if (v) row[shape] = v;
-    }
-    if (Object.keys(row).length > 0) files[file] = row;
-  }
-  return { note: existing.note, files };
+  return { note: existing.note, files: mergeCountRows(existing.files, shapeCounts(found), SHAPES, { keys: shapes }) };
 }
 
 /** Parse a `--shape a,b` argument; an unknown name throws. */
@@ -373,12 +361,8 @@ export function parseShapeArg(arg: string): Shape[] {
  * throws instead of silently doing nothing.
  */
 export function resolveShapeFilter(argv: readonly string[]): Shape[] | undefined {
-  const at = argv.indexOf("--shape");
-  if (at === -1) return undefined;
-  if (!argv.includes("--write-baseline")) throw new InvalidArgumentError("--shape only applies together with --write-baseline");
-  const value = argv[at + 1];
-  if (value === undefined || value.startsWith("--")) throw new InvalidArgumentError("--shape needs a value");
-  return parseShapeArg(value);
+  const names = resolveListFlag(argv, "--shape", "--shape needs a value");
+  return names === undefined ? undefined : parseShapeArg(names.join(","));
 }
 
 /** Empty string when clean. */
@@ -432,21 +416,18 @@ export async function loadBaseline(root: string = REPO_ROOT): Promise<Baseline> 
 }
 
 async function main(): Promise<void> {
-  const shapeFilter = resolveShapeFilter(process.argv);
-  const found = scanRepo();
-  if (process.argv.includes("--write-baseline")) {
-    const target = join(REPO_ROOT, BASELINE_REL);
-    const next = shapeFilter === undefined ? buildBaseline(found) : mergeBaselineForShapes(await loadBaseline(), found, shapeFilter);
-    await writeJsonBaseline(target, next);
-    console.log(`[playbook-vocabulary-ratchet] wrote ${BASELINE_REL}`);
-    return;
-  }
-  const report = formatReport(compareAgainstBaseline(found, await loadBaseline()));
-  if (report) {
-    console.error(report);
-    process.exit(1);
-  }
-  console.log("[playbook-vocabulary-ratchet] OK");
+  const code = await runBaselineRatchet({
+    name: "playbook-vocabulary-ratchet",
+    baselineRel: BASELINE_REL,
+    scan: () => scanRepo(),
+    load: () => loadBaseline(),
+    build: buildBaseline,
+    merge: mergeBaselineForShapes,
+    filter: resolveShapeFilter,
+    compare: compareAgainstBaseline,
+    report: formatReport,
+  });
+  if (code !== 0) process.exit(code);
 }
 
 if (isCliEntrypoint(import.meta.url)) {
