@@ -32,7 +32,7 @@ export const CAP_ARMS = [
 ] as const;
 export type CapArm = (typeof CAP_ARMS)[number];
 
-export type CapUnit = "issue" | "pr";
+type CapUnit = "issue" | "pr";
 
 export interface CapRow {
   readonly arm: CapArm;
@@ -69,7 +69,7 @@ export const CAP_DEFAULTS: Readonly<Record<CapArm, number>> = Object.fromEntries
 /** The arm whose limit is NOT env-overridable (seam, round-action and merge guard must agree). */
 const NON_OVERRIDABLE: readonly CapArm[] = ["qa-fail-rounds"];
 
-export const CAP_ENV_PREFIX = "HYDRA_LIFECYCLE_CAP_";
+const CAP_ENV_PREFIX = "HYDRA_LIFECYCLE_CAP_";
 
 export function capEnvName(arm: CapArm): string {
   return CAP_ENV_PREFIX + arm.toUpperCase().replace(/-/g, "_");
@@ -221,7 +221,7 @@ export interface TimelineLabelEvent {
   tsMs: number;
 }
 
-export type CapSource = "journal" | "trailer" | "timeline-derived";
+type CapSource = "journal" | "trailer" | "timeline-derived";
 
 export interface CapCount {
   arm: CapArm;
@@ -233,7 +233,7 @@ export interface CapCount {
   applicable: boolean;
 }
 
-export const TIMELINE_ARMS = ["total-claims", "needs-dev-resume-claims", "stale-requeue"] as const;
+const TIMELINE_ARMS = ["total-claims", "needs-dev-resume-claims", "stale-requeue"] as const;
 export type TimelineArm = (typeof TIMELINE_ARMS)[number];
 const PAIR_WINDOW_MS = 60_000;
 
@@ -265,7 +265,7 @@ function isStaleRequeueEntry(e: CapJournalEntry): boolean {
 }
 
 /** How many times `e` counts toward a timeline arm (also the seed contribution). */
-export function entryContribution(arm: TimelineArm, e: CapJournalEntry): number {
+function entryContribution(arm: TimelineArm, e: CapJournalEntry): number {
   if (arm === "total-claims") return e.kind === "claim-opened" ? 1 : 0;
   if (arm === "needs-dev-resume-claims") {
     return e.kind === "claim-opened" && e.evidence.state === "needs-dev-resume" ? 1 : 0;

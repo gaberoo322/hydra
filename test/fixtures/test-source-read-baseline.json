@@ -10,6 +10,7 @@
     "test/api-versions.test.mts": "grandfathered",
     "test/attention-calibration.test.mts": "grandfathered",
     "test/attention-target-bucket.test.mts": "grandfathered",
+    "test/backfill-dedup-baseline.test.mts": "behaviour",
     "test/attention.test.mts": "grandfathered",
     "test/autopilot-args.test.mts": "behaviour",
     "test/autopilot-cooldown-redis-mirror.test.mts": "behaviour",

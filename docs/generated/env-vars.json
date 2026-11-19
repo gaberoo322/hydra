@@ -786,18 +786,6 @@
       }
     },
     {
-      "name": "HYDRA_AUTOPILOT_SCOUT_COST_SHARE",
-      "readSites": [
-        {
-          "path": "scripts/autopilot/bootstrap.sh"
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/autopilot/bootstrap.sh"
-      }
-    },
-    {
       "name": "HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT",
       "readSites": [
         {
@@ -3459,6 +3447,9 @@
         },
         {
           "path": "scripts/branch-prune.sh"
+        },
+        {
+          "path": "scripts/ci/backfill-dedup-baseline.sh"
         },
         {
           "path": "scripts/ci/post-commit-status.ts"

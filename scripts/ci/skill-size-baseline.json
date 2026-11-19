@@ -20,7 +20,7 @@
       "body": 1818
     },
     "docs/operator-playbooks/_fragments/hydra-autopilot-ops-reference.md": {
-      "body": 1857
+      "body": 1840
     },
     "docs/operator-playbooks/_fragments/hydra-autopilot-phase6-ops.md": {
       "body": 803
@@ -42,6 +42,9 @@
     },
     "docs/operator-playbooks/_fragments/hydra-target-build-merge-flow.md": {
       "body": 4986
+    },
+    "docs/operator-playbooks/_fragments/issue-first-state.md": {
+      "body": 72
     },
     "docs/operator-playbooks/_fragments/lifecycle-seam-writes.md": {
       "body": 50
@@ -69,8 +72,8 @@
       "description": 32
     },
     "docs/operator-playbooks/hydra-architecture-scan.md": {
-      "body": 5955,
-      "description": 38
+      "body": 5886,
+      "description": 39
     },
     "docs/operator-playbooks/hydra-autopilot.md": {
       "body": 10889,
@@ -97,7 +100,7 @@
       "description": 21
     },
     "docs/operator-playbooks/hydra-discover.md": {
-      "body": 2201,
+      "body": 2026,
       "description": 26
     },
     "docs/operator-playbooks/hydra-doctor.md": {
@@ -137,8 +140,8 @@
       "description": 27
     },
     "docs/operator-playbooks/hydra-research.md": {
-      "body": 2591,
-      "description": 25
+      "body": 2365,
+      "description": 24
     },
     "docs/operator-playbooks/hydra-retro.md": {
       "body": 2461,
@@ -149,7 +152,7 @@
       "description": 34
     },
     "docs/operator-playbooks/hydra-skill-prune.md": {
-      "body": 1485,
+      "body": 1438,
       "description": 49
     },
     "docs/operator-playbooks/hydra-sweep.md": {

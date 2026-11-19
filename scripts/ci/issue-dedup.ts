@@ -7,7 +7,7 @@
  * matter for autonomous collisions — `hydra-discover` and
  * `hydra-architecture-scan` — BOTH fire on the SAME unified `orch_backfill_idle`
  * signal (discover_orch revived #959; both in `BACKFILL_SIGNAL_CLASSES`,
- * decide.py:329). The one-per-turn stagger guard stops them dispatching the same
+ * `scripts/autopilot/decide.py`). The one-per-turn stagger guard stops them dispatching the same
  * TURN, but their independent per-class 1h cooldowns plus the
  * `BACKFILL_STARVATION_FLOOR` mean both can fire within the same idle HOUR.
  *

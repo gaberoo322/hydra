@@ -26,7 +26,7 @@
       "spans": 2
     },
     "docs/operator-playbooks/hydra-architecture-scan.md": {
-      "spans": 16
+      "spans": 14
     },
     "docs/operator-playbooks/hydra-autopilot.md": {
       "spans": 4
@@ -35,7 +35,7 @@
       "spans": 9
     },
     "docs/operator-playbooks/hydra-discover.md": {
-      "spans": 7
+      "spans": 5
     },
     "docs/operator-playbooks/hydra-epic-close.md": {
       "spans": 1
@@ -53,7 +53,7 @@
       "spans": 7
     },
     "docs/operator-playbooks/hydra-research.md": {
-      "spans": 16
+      "spans": 13
     },
     "docs/operator-playbooks/hydra-retro.md": {
       "spans": 7
