@@ -402,6 +402,8 @@ function runStep31(opts: Run31Opts): Run31Result {
     const wrapper = [
       `TARGET_WS=${shSingleQuote(ws)}`,
       `TARGET_APP_SUBDIR=${shSingleQuote(subdir)}`,
+      `TARGET_WT=${shSingleQuote(ws)}`,
+      `TARGET_MANIFEST_ROOT=${shSingleQuote(ws)}`,
       `TARGET_GH_REPO='example/target'`,
       `TARGET_CAP_WIRING_LEDGER=${shSingleQuote(opts.ledger !== undefined ? "docs/agents/wiring-status.md" : "")}`,
       `TARGET_CAP_WIRING_LEDGER_GENERATOR=${shSingleQuote(capabilityGenerator(opts.packageJson))}`,

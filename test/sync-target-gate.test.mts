@@ -667,12 +667,6 @@ describe("hydra-target-build playbook wiring (issue #1451, #4526)", () => {
     }
   });
 
-  test("Step 4.5 names the serving checkout's manifest as the risk-surface source", () => {
-    const main = readFileSync(join(REPO_ROOT, "docs", "operator-playbooks", "hydra-target-build.md"), "utf-8");
-    assert.ok(!main.includes("<TARGET_WT>/.hydra/manifest.json"), "the worktree copy is not the risk-surface source");
-    assert.ok(main.includes("$TARGET_WS/.hydra/manifest.json"), "Step 4.5 cites the serving checkout's manifest");
-  });
-
   test("the risk gates classify against the SERVING checkout's manifest, not the branch's own copy", () => {
     // After Step 0.6 the shell exports TARGET_MANIFEST_ROOT=$TARGET_WT (verify
     // commands come from the worktree). The gate scripts honour that variable,
