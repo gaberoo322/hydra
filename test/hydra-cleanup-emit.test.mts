@@ -681,3 +681,162 @@ describe("covering-PR dedup (#1766) — in-flight/just-merged sibling fixes supp
     assert.equal(MERGED_PR_DEDUP_WINDOW_MS, 24 * 60 * 60 * 1000, "default window is 24h");
   });
 });
+
+import {
+  parseLaneArg,
+  applyLanePolicy,
+  fileCleanupIssue,
+  runCleanupEmit,
+  type ExecFn,
+} from "../scripts/ci/hydra-cleanup-emit.ts";
+
+const STATE_LABELS = ["ready-for-agent", "hitl-grill", "needs-triage", "in-progress", "needs-qa"];
+
+type Call = { file: string; args: string[] };
+
+/** Fake exec: records calls, `gh issue create` returns a URL, `advance` calls obey `advanceFail`. */
+function fakeExec(opts: { advanceFail?: (to: string) => string | null; viewLabels?: string[] } = {}): {
+  exec: ExecFn;
+  calls: Call[];
+} {
+  const calls: Call[] = [];
+  const exec: ExecFn = (file, args) => {
+    calls.push({ file, args });
+    if (file === "gh" && args[1] === "create") return "https://github.com/gaberoo322/hydra/issues/777\n";
+    if (file === "gh" && args[1] === "view") {
+      return JSON.stringify({ labels: (opts.viewLabels ?? []).map((name) => ({ name })) });
+    }
+    if (file === "npx") {
+      const code = opts.advanceFail?.(args[4]);
+      if (code) {
+        const err = new Error("exit 1") as Error & { stdout: string };
+        err.stdout = JSON.stringify({ ok: false, issue: 777, code }) + "\n";
+        throw err;
+      }
+      return JSON.stringify({ ok: true }) + "\n";
+    }
+    return "";
+  };
+  return { exec, calls };
+}
+
+function quietly<T>(fn: () => T): T {
+  const orig = console.error;
+  console.error = () => {};
+  try {
+    return fn();
+  } finally {
+    console.error = orig;
+  }
+}
+
+describe("hydra-cleanup-emit filing lane (#5616)", () => {
+  test("create argv carries flag labels only, never a lifecycle state label", () => {
+    const { exec, calls } = fakeExec();
+    fileCleanupIssue("t", "b", "hitl-grill", exec);
+    const create = calls.find((c) => c.file === "gh" && c.args[1] === "create");
+    assert.ok(create);
+    const labels = create.args.filter((_, i) => create.args[i - 1] === "--label");
+    assert.deepEqual(labels, ["cleanup-scan", "design-concept-exempt"]);
+    for (const s of STATE_LABELS) assert.ok(!create.args.includes(s), `${s} must not be in the create argv`);
+  });
+
+  test("default lane parks: advance needs-triage then hitl-grill with scope-negotiation", () => {
+    const parsed = parseLaneArg(["/tmp/k.json", "--apply"]);
+    assert.ok(parsed.ok && parsed.lane === "hitl-grill" && parsed.explicit === false);
+    const { exec, calls } = fakeExec();
+    const out = fileCleanupIssue("t", "b", "hitl-grill", exec);
+    assert.equal(out, "filed as #777 in hitl-grill");
+    const adv = calls.filter((c) => c.file === "npx").map((c) => c.args);
+    assert.equal(adv.length, 2);
+    assert.deepEqual(adv[0], ["tsx", "scripts/lifecycle.ts", "advance", "777", "needs-triage", "--actor", "hydra-cleanup"]);
+    assert.deepEqual(adv[1].slice(0, 6), ["tsx", "scripts/lifecycle.ts", "advance", "777", "hitl-grill", "--reason"]);
+    assert.equal(adv[1][6], "scope-negotiation");
+    assert.ok(adv[1].includes("--rationale"));
+    assert.equal(adv[1].slice(-2).join(" "), "--actor hydra-cleanup");
+  });
+
+  test("--lane=ready-for-agent advances with reason scoped", () => {
+    const parsed = parseLaneArg(["--lane=ready-for-agent"]);
+    assert.ok(parsed.ok && parsed.lane === "ready-for-agent" && parsed.explicit);
+    const { exec, calls } = fakeExec();
+    fileCleanupIssue("t", "b", "ready-for-agent", exec);
+    const adv = calls.filter((c) => c.file === "npx").map((c) => c.args);
+    assert.equal(adv[1][4], "ready-for-agent");
+    assert.equal(adv[1][6], "scoped");
+  });
+
+  test("space-separated --lane and bad values are rejected before anything is read or filed", () => {
+    assert.equal(parseLaneArg(["--lane", "hitl-grill"]).ok, false);
+    assert.equal(parseLaneArg(["--lane=bogus"]).ok, false);
+    const { exec, calls } = fakeExec();
+    quietly(() => {
+      assert.equal(runCleanupEmit(["node", "x", "--lane", "hitl-grill"], exec), 1);
+      assert.equal(runCleanupEmit(["node", "x", "--lane=bogus", "--apply"], exec), 1);
+    });
+    assert.equal(calls.length, 0);
+  });
+
+  test("a refused advance is reported and never falls back to a direct label write", () => {
+    const { exec, calls } = fakeExec({ advanceFail: (to) => (to === "hitl-grill" ? "gate-refused" : null) });
+    const out = quietly(() => fileCleanupIssue("t", "b", "hitl-grill", exec));
+    assert.equal(out, "filed as #777 (state write refused: gate-refused)");
+    assert.equal(calls.filter((c) => c.file === "gh" && c.args[1] === "edit").length, 0);
+    assert.equal(calls.filter((c) => c.file === "npx").length, 2, "no retry with other arguments");
+  });
+
+  test("illegal-transition whose observed state is already the target counts as success", () => {
+    const { exec } = fakeExec({
+      advanceFail: (to) => (to === "hitl-grill" ? "illegal-transition" : null),
+      viewLabels: ["hitl-grill", "cleanup-scan"],
+    });
+    assert.equal(quietly(() => fileCleanupIssue("t", "b", "hitl-grill", exec)), "filed as #777 in hitl-grill");
+  });
+
+  test("first advance: illegal-transition with issue already in needs-triage continues to the lane advance", () => {
+    const { exec, calls } = fakeExec({
+      advanceFail: (to) => (to === "needs-triage" ? "illegal-transition" : null),
+      viewLabels: ["needs-triage", "cleanup-scan"],
+    });
+    assert.equal(quietly(() => fileCleanupIssue("t", "b", "hitl-grill", exec)), "filed as #777 in hitl-grill");
+    assert.equal(calls.filter((c) => c.file === "npx").length, 2, "lane advance still attempted");
+  });
+
+  test("first advance: illegal-transition with issue NOT in needs-triage stays refused", () => {
+    const { exec, calls } = fakeExec({
+      advanceFail: (to) => (to === "needs-triage" ? "illegal-transition" : null),
+      viewLabels: ["cleanup-scan"],
+    });
+    assert.equal(
+      quietly(() => fileCleanupIssue("t", "b", "hitl-grill", exec)),
+      "filed as #777 (state write refused: illegal-transition)",
+    );
+    assert.equal(calls.filter((c) => c.file === "npx").length, 1);
+  });
+
+  test("inbox cap truncates in plan order and states the arithmetic", () => {
+    const planned = ["a", "b", "c", "d", "e", "f", "g", "h"];
+    const seven = applyLanePolicy(planned, "hitl-grill", false, 7);
+    assert.deepEqual(seven.items, ["a", "b", "c"]);
+    assert.ok(seven.laneLines.includes("lane: hitl-grill (default; admission rule)"));
+    assert.ok(
+      seven.laneLines.some((l) => l.startsWith("hitl-grill inbox: 7/10 open") && l.includes("filing 3 of 8 planned batch(es)")),
+    );
+    const full = applyLanePolicy(planned, "hitl-grill", false, 10);
+    assert.deepEqual(full.items, []);
+    assert.ok(full.laneLines.some((l) => l.includes("filing 0 of 8") && l.includes("cap")));
+    const override = applyLanePolicy(planned, "ready-for-agent", true, null);
+    assert.equal(override.items.length, 8, "cap does not apply to the operator override lane");
+    assert.deepEqual(override.laneLines, ["lane: ready-for-agent (operator override)"]);
+  });
+
+  test("a failed inbox read fails closed: exit 1 and nothing filed", () => {
+    const calls: Call[] = [];
+    const exec: ExecFn = (file, args) => {
+      calls.push({ file, args });
+      throw new Error("gh down");
+    };
+    quietly(() => assert.equal(runCleanupEmit(["node", "x", "/tmp/k.json", "--apply"], exec), 1));
+    assert.ok(calls.length > 0 && calls.every((c) => c.args[1] === "list"), "only the inbox read was attempted");
+  });
+});

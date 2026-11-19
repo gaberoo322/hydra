@@ -8,7 +8,7 @@
       "body": 338
     },
     "docs/operator-playbooks/_fragments/grounding-tests-deposit.md": {
-      "body": 104
+      "body": 131
     },
     "docs/operator-playbooks/_fragments/hydra-autopilot-class-wiring.md": {
       "body": 1031
@@ -26,7 +26,7 @@
       "body": 803
     },
     "docs/operator-playbooks/_fragments/hydra-dev-child-flow.md": {
-      "body": 4295
+      "body": 4297
     },
     "docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md": {
       "body": 2881
@@ -41,7 +41,7 @@
       "body": 292
     },
     "docs/operator-playbooks/_fragments/hydra-target-build-merge-flow.md": {
-      "body": 3880
+      "body": 4986
     },
     "docs/operator-playbooks/_fragments/issue-first-state.md": {
       "body": 72
@@ -58,11 +58,17 @@
     "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md": {
       "body": 63
     },
+    "docs/operator-playbooks/_fragments/target-seam-preamble.md": {
+      "body": 610
+    },
+    "docs/operator-playbooks/_fragments/target-self-isolation-preamble.md": {
+      "body": 818
+    },
     "docs/operator-playbooks/_fragments/thermo-nuclear-proposal-format.md": {
       "body": 795
     },
     "docs/operator-playbooks/hydra-architect.md": {
-      "body": 898,
+      "body": 1152,
       "description": 32
     },
     "docs/operator-playbooks/hydra-architecture-scan.md": {
@@ -70,19 +76,19 @@
       "description": 39
     },
     "docs/operator-playbooks/hydra-autopilot.md": {
-      "body": 7469,
+      "body": 10889,
       "description": 25
     },
     "docs/operator-playbooks/hydra-branch-prune.md": {
-      "body": 425,
+      "body": 428,
       "description": 30
     },
     "docs/operator-playbooks/hydra-cleanup.md": {
-      "body": 1226,
+      "body": 1394,
       "description": 45
     },
     "docs/operator-playbooks/hydra-design-qa.md": {
-      "body": 990,
+      "body": 996,
       "description": 37
     },
     "docs/operator-playbooks/hydra-dev.md": {
@@ -90,7 +96,7 @@
       "description": 24
     },
     "docs/operator-playbooks/hydra-digest.md": {
-      "body": 807,
+      "body": 819,
       "description": 21
     },
     "docs/operator-playbooks/hydra-discover.md": {
@@ -102,19 +108,23 @@
       "description": 15
     },
     "docs/operator-playbooks/hydra-epic-close.md": {
-      "body": 1188,
+      "body": 1189,
       "description": 12
     },
     "docs/operator-playbooks/hydra-epic-sprint.md": {
-      "body": 1979,
+      "body": 2458,
       "description": 42
     },
     "docs/operator-playbooks/hydra-grill.md": {
       "body": 3882,
       "description": 34
     },
+    "docs/operator-playbooks/hydra-hitl-grill.md": {
+      "body": 1579,
+      "description": 50
+    },
     "docs/operator-playbooks/hydra-issue-research.md": {
-      "body": 285,
+      "body": 532,
       "description": 21
     },
     "docs/operator-playbooks/hydra-pr-rebase.md": {
@@ -122,11 +132,11 @@
       "description": 15
     },
     "docs/operator-playbooks/hydra-prd.md": {
-      "body": 1911,
+      "body": 2254,
       "description": 34
     },
     "docs/operator-playbooks/hydra-qa.md": {
-      "body": 6883,
+      "body": 6898,
       "description": 27
     },
     "docs/operator-playbooks/hydra-research.md": {
@@ -134,15 +144,15 @@
       "description": 24
     },
     "docs/operator-playbooks/hydra-retro.md": {
-      "body": 2425,
+      "body": 2461,
       "description": 41
     },
     "docs/operator-playbooks/hydra-review.md": {
-      "body": 3666,
+      "body": 5379,
       "description": 34
     },
     "docs/operator-playbooks/hydra-skill-prune.md": {
-      "body": 1442,
+      "body": 1438,
       "description": 49
     },
     "docs/operator-playbooks/hydra-sweep.md": {
@@ -150,27 +160,27 @@
       "description": 30
     },
     "docs/operator-playbooks/hydra-target-build.md": {
-      "body": 5637,
+      "body": 9389,
       "description": 38
     },
     "docs/operator-playbooks/hydra-target-cleanup.md": {
-      "body": 2174,
+      "body": 2873,
       "description": 34
     },
     "docs/operator-playbooks/hydra-target-discover.md": {
-      "body": 1039,
+      "body": 1104,
       "description": 30
     },
     "docs/operator-playbooks/hydra-target-incident.md": {
-      "body": 1189,
+      "body": 1757,
       "description": 36
     },
     "docs/operator-playbooks/hydra-target-qa.md": {
-      "body": 3215,
+      "body": 3420,
       "description": 43
     },
     "docs/operator-playbooks/hydra-target-research.md": {
-      "body": 2166,
+      "body": 2278,
       "description": 36
     },
     "docs/operator-playbooks/hydra-target-retro.md": {
@@ -178,11 +188,11 @@
       "description": 41
     },
     "docs/operator-playbooks/hydra-target-sweep.md": {
-      "body": 2165,
+      "body": 2272,
       "description": 28
     },
     "docs/operator-playbooks/hydra-tickets.md": {
-      "body": 962,
+      "body": 1088,
       "description": 32
     },
     "docs/operator-playbooks/hydra-tool-scout.md": {
@@ -190,7 +200,7 @@
       "description": 36
     },
     "docs/operator-playbooks/hydra-wayfinder.md": {
-      "body": 3002,
+      "body": 3052,
       "description": 48
     },
     "docs/operator-playbooks/hydra-wire-or-retire.md": {
@@ -200,6 +210,10 @@
     "docs/operator-playbooks/thermo-nuclear-code-quality-review.md": {
       "body": 2572,
       "description": 46
+    },
+    "docs/operator-playbooks/zoom-out.md": {
+      "body": 31,
+      "description": 34
     }
   }
 }

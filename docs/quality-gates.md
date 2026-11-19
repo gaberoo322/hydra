@@ -216,6 +216,28 @@ run on at least 10 PRs. If the broader Stryker catalog surfaces no survivors the
 homegrown gate misses, the correct recommendation is **drop**, and that is a
 success outcome for the experiment, not a failure.
 
+### skill-size ratchet (required — via the `test` job)
+
+**What it does.** `scripts/ci/skill-size-ratchet.ts` counts the words in every
+skill source — each frontmattered `docs/operator-playbooks/*.md` body and each
+`docs/operator-playbooks/_fragments/*.md` file — and compares them to
+`scripts/ci/skill-size-baseline.json`. It fails when a body grows past its row,
+when a skill source has no row, when a row's file is gone, or when a frontmatter
+`description` is longer than max(50, its baselined count).
+
+**Where it is enforced.** The required `test` job: the "the real playbooks" case
+in `test/skill-size-ratchet.test.mts` runs the ratchet over the real playbooks
+and baseline, so a violation fails `npm test`. `ci.yml` is not edited for this.
+The `advisory-checks.yml` step still runs the CLI as a readable per-PR report.
+
+**Reviewed growth.** In the same PR that grows a playbook, raise exactly that
+file's row to the measured count (hand-edit — never commit a blanket
+`--write-baseline`) and add a PR-body line
+`Baseline-raise: scripts/ci/skill-size-baseline.json files/<path>/body - <reason>`
+(`<path>` is the playbook path, e.g. `docs/operator-playbooks/hydra-dev.md`; STD-BASELINE-EDIT-ROWS).
+A new playbook or fragment adds its row the same way, with the key `files/<path>`.
+A description over the cap is shortened, never raised.
+
 ### `scope-check`
 
 **What it does.** Reads the PR body and (when linked) the issue body, extracts
@@ -225,6 +247,14 @@ out-of-scope files. Thresholds match the historical in-cycle gate
 (`outOfScopeRatio > 0.8 && outOfScope.length > 3`); the original
 `src/scope-enforcement.ts` was removed by issue #476 and the CI script is
 now the single source of truth.
+
+**Always in scope.** `MECHANICAL_COMPANIONS` (`src/scope-section.ts`, imported
+by `scripts/ci/scope-check.ts`) is admitted by `classifyScope` through the strict `isMechanicalCompanion` predicate (exact file or `/`-prefix match, the same one the QA packet uses): a path is listed
+iff a repo script generates it from other tracked files AND a CI drift guard
+forces its regeneration into the same PR (`.changelog/`, `docs/generated/`, the
+ratchet baselines). The QA packet names the companions present in a diff so
+reviewers share the same list. `test/fixtures/qa-cohort-baseline.json` (a
+deliberately written ledger) is excluded.
 
 **Thresholds.**
 - `SCOPE_OUT_OF_SCOPE_THRESHOLD` env var, float `0..1`, default `0.8`

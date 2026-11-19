@@ -164,7 +164,7 @@ const intEntries = (xs: readonly unknown[]): number[] => xs.map(asInt).filter((n
 const readData = (r: GhJsonRead): unknown => (r.kind === "ok" ? r.data : undefined);
 
 /** `[.[] | select(.pull_request == null) | .number]` — open issue numbers, PRs filtered out. */
-export function nonPrIssueNumbers(read: GhJsonRead): unknown[] | null {
+function nonPrIssueNumbers(read: GhJsonRead): unknown[] | null {
   if (read.kind !== "ok") return null;
   const items = eachValue(read.data);
   if (items === null) return null;
@@ -212,7 +212,7 @@ export function projectPrRefs(read: GhJsonRead): PrRefRow[] | null {
  * the stale-heartbeat condition, so `glm-eligible` rows count (fail-open
  * toward work; `glmWithheldIssueNumbers` therefore yields `[]`).
  */
-export async function deriveFallbackBoard(
+async function deriveFallbackBoard(
   rows: readonly IssueRow[],
   resolveOpen: (numbers: number[]) => Promise<Set<number>>,
   nowMs: number,
@@ -268,7 +268,7 @@ export function healthyCounts(d: Row): TargetBoardCounts {
 }
 
 /** An int list field of the board payload (`glm_withheld` W / `blocker_excluded` B); non-list → empty. */
-export function boardIssueList(d: Row, key: string): number[] {
+function boardIssueList(d: Row, key: string): number[] {
   const v = d[key];
   if (!Array.isArray(v)) return [];
   return intEntries(v);

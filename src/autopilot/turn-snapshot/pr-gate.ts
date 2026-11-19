@@ -92,7 +92,7 @@ export interface InflightRefs {
  * verdict binds to the current head - the durable twin of the session's
  * in-memory `qa-verdict` event.
  */
-export interface QaRecheckEntry {
+interface QaRecheckEntry {
   readonly pr: number;
   readonly tier: number;
   readonly verdict: string;
@@ -428,7 +428,7 @@ export function parseTierLine(body: unknown): number | null {
  * and has every required check settled and none red. No script run or read is
  * spent on anything else.
  */
-export function qaRecheckCandidates(
+function qaRecheckCandidates(
   prs: readonly unknown[],
   required: ReadonlySet<string>,
   parkedPrs: ReadonlySet<number> = new Set(),
@@ -452,7 +452,7 @@ export function qaRecheckCandidates(
 }
 
 /** A `qa-verdict-event.sh` stdout object as a typed entry, or `null` when it is not the expected shape. */
-export function parseQaRecheckEntry(raw: unknown, pr: number, tier: number): QaRecheckEntry | null {
+function parseQaRecheckEntry(raw: unknown, pr: number, tier: number): QaRecheckEntry | null {
   const e = asRow(raw);
   if (e === null) return null;
   if (e.pr_number !== pr || e.tier !== tier) return null;
@@ -468,7 +468,7 @@ export function parseQaRecheckEntry(raw: unknown, pr: number, tier: number): QaR
  * unavailable (the dispatch outputs fail closed on that separately). A PR whose
  * closing parse throws is never parked-skipped (it keeps today's handling).
  */
-export function parkedPrNumbers(
+function parkedPrNumbers(
   prs: readonly unknown[],
   prRefs: PrRefsAvailability,
   parkedIssues: Classified<ReadonlySet<number>>,

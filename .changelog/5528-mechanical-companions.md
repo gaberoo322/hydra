@@ -1,0 +1,1 @@
+- fix: stop scope-check and QA from flagging gate-regenerated companion files (generated inventories, ratchet baselines) as scope creep (#5528)

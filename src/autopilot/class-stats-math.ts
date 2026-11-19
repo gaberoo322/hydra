@@ -103,7 +103,7 @@ const DAMPENER_REPROBE_HOURS = 24;
  * is a weak class. These are DELIBERATELY conservative — v1 never acts on them.
  */
 export const DEV_WEAK_MERGE_RATE = 0.1;
-export const PRODUCER_WEAK_BETA = 0;
+const PRODUCER_WEAK_BETA = 0;
 
 /**
  * The weighted-quota-per-merge ceiling above which a dev class — even one with a
@@ -348,7 +348,7 @@ export interface ClassScoreboard {
 }
 
 /** The three served verdict thresholds (issue #5161). */
-export interface ClassScoreboardThresholds {
+interface ClassScoreboardThresholds {
   /** Dev classes at or below this merge rate are `underperforming`. */
   devWeakMergeRate: number;
   /** Producer classes at or below this spine β are `underperforming`. */

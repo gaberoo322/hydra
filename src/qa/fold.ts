@@ -113,10 +113,10 @@ export const FOLLOW_UPS_HEADING = "### Follow-ups (non-blocking)";
  *  high   — behaviour regression, data or work loss, or a weakened safety gate
  *  medium — a spec criterion unmet, or a real bug on a non-critical path
  *  low    — wording, comments, citations, style */
-export type FindingSeverity = "high" | "medium" | "low";
+type FindingSeverity = "high" | "medium" | "low";
 
 /** Which review axis raised the finding. */
-export type FindingAxis = "standards" | "spec";
+type FindingAxis = "standards" | "spec";
 
 /** One reviewer finding, as the step-8 aggregate transcribes it. */
 export interface ReviewFinding {

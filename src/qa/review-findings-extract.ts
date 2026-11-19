@@ -25,7 +25,7 @@ import type {
 import { canonicalLocationKey, FOLLOW_UPS_HEADING, QA_FINDINGS_HEADING, type FoldedFinding } from "./fold.ts";
 import { parseQaVerdictTrailers } from "./verdict-trailer.ts";
 
-export const DEFAULT_WINDOW_DAYS = 30;
+const DEFAULT_WINDOW_DAYS = 30;
 export const RETENTION_DAYS = 90;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const STD_RULE_RE = /STD-[A-Z0-9]+(?:-[A-Z0-9]+)*/;
@@ -35,13 +35,13 @@ function oneLine(raw: unknown): string {
 }
 
 /** The first `STD-*` stable rule ID in a finding's text, or null. */
-export function extractRule(finding: string): string | null {
+function extractRule(finding: string): string | null {
   const m = STD_RULE_RE.exec(finding);
   return m ? m[0] : null;
 }
 
 /** The path half of `canonicalLocationKey(location)`; null for placeholders. */
-export function fileOfLocation(location: string): string | null {
+function fileOfLocation(location: string): string | null {
   const key = canonicalLocationKey(location);
   return key === null ? null : key.replace(/:\d+$/, "");
 }
@@ -235,7 +235,7 @@ export type ReviewFindingArm =
   | { arm: "pair-miss"; prs: number[]; count: number }
   | { arm: "detector-gap"; key: string; prs: number[] };
 
-export interface ReviewFindingHotSpot {
+interface ReviewFindingHotSpot {
   file: string;
   count: number;
   rules: string[];

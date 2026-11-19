@@ -54,7 +54,8 @@ import {
   type OpenIssueRef,
   type PullRequestRef,
 } from "./hydra-cleanup-render.ts";
-import { runEmitShell, type EmitShellSpec } from "./hydra-emit-shell.ts";
+import { InvalidArgumentError } from "../../src/errors.ts";
+import { runEmitShell, type EmitShellSpec, type EmitShellIo } from "./hydra-emit-shell.ts";
 import { loadKnipReport } from "./hydra-knip-source.ts";
 
 /**
@@ -534,8 +535,101 @@ function readBoardIssues(): OpenIssueRef[] {
   }
 }
 
-function createIssue(title: string, body: string): void {
-  execFileSync(
+/** The two lanes a filed batch can first land in (ADR-0047 state labels). */
+export type CleanupLane = "hitl-grill" | "ready-for-agent";
+
+/** Admission rule (hydra-autopilot, Self-filed work): self-filed orchestrator work parks. */
+export const DEFAULT_LANE: CleanupLane = "hitl-grill";
+
+/** Mirrors HITL_GRILL_INBOX_CAP (src/autopilot/turn-snapshot/board-saturation.ts) and architecture-scan 4c. */
+export const HITL_GRILL_INBOX_CAP = 10;
+
+/** Injectable process seam: same call shape as `execFileSync` (stdout string, throws on non-zero). */
+export type ExecFn = (file: string, args: string[], opts?: { input?: string }) => string;
+
+const defaultExec: ExecFn = (file, args, opts) =>
+  execFileSync(file, args, { input: opts?.input, encoding: "utf-8", stdio: ["pipe", "pipe", "inherit"] });
+
+const LANE_USAGE = "usage: hydra-cleanup-emit [knip-report.json] [--apply] [--lane=hitl-grill|ready-for-agent]";
+
+/**
+ * Runner-local `--lane=<value>` parse (equals form ONLY). The shared emit shell
+ * takes the first non-`--` token as the source path, so a space-separated
+ * `--lane hitl-grill` would hijack it; it is therefore rejected, not accepted.
+ */
+export function parseLaneArg(
+  args: string[],
+): { ok: true; lane: CleanupLane; explicit: boolean } | { ok: false; error: string } {
+  let lane: CleanupLane = DEFAULT_LANE;
+  let explicit = false;
+  for (const a of args) {
+    if (a === "--lane") return { ok: false, error: `--lane needs the equals form (--lane=<value>). ${LANE_USAGE}` };
+    if (!a.startsWith("--lane=")) continue;
+    const v = a.slice("--lane=".length);
+    if (v !== "hitl-grill" && v !== "ready-for-agent") {
+      return { ok: false, error: `invalid --lane value "${v}". ${LANE_USAGE}` };
+    }
+    lane = v;
+    explicit = true;
+  }
+  return { ok: true, lane, explicit };
+}
+
+/** Pure inbox arithmetic: how many planned batches may be filed given the open hitl-grill count. */
+export function inboxAllowance(open: number): number {
+  return Math.max(0, HITL_GRILL_INBOX_CAP - open);
+}
+
+function parseJsonLine(out: string): Record<string, unknown> | null {
+  for (const line of out.split("\n").reverse()) {
+    const t = line.trim();
+    if (!t.startsWith("{")) continue;
+    try {
+      return JSON.parse(t) as Record<string, unknown>;
+    } catch {
+      /* intentional: a non-JSON stdout line is not the CLI's result line; keep scanning */
+    }
+  }
+  return null;
+}
+
+/** One `lifecycle.ts advance` call; returns null on success, else the refusal code (never throws). */
+function seamAdvance(exec: ExecFn, issue: number, to: CleanupLane | "needs-triage", extra: string[]): string | null {
+  try {
+    exec("npx", ["tsx", "scripts/lifecycle.ts", "advance", String(issue), to, ...extra, "--actor", "hydra-cleanup"]);
+    return null;
+  } catch (err) {
+    const stdout = (err as { stdout?: unknown }).stdout;
+    const res = parseJsonLine(typeof stdout === "string" ? stdout : String(stdout ?? ""));
+    console.error(
+      `  [lifecycle advance #${issue} -> ${to}] refused:`,
+      res ? JSON.stringify(res) : err instanceof Error ? err.message : String(err),
+    );
+    return typeof res?.code === "string" ? res.code : "advance-failed";
+  }
+}
+
+/** True when the issue already carries `lane` (a reconcile backstop raced our advance). */
+function alreadyInState(exec: ExecFn, issue: number, lane: string): boolean {
+  try {
+    const out = exec("gh", ["issue", "view", String(issue), "--repo", REPO, "--json", "labels"]);
+    const labels = (JSON.parse(out) as { labels?: Array<{ name?: string }> }).labels ?? [];
+    return labels.some((l) => l.name === lane);
+  } catch (err) {
+    console.error(`  [lifecycle] could not re-read #${issue} state:`, err instanceof Error ? err.message : String(err));
+    return false;
+  }
+}
+
+/**
+ * File one batch: `gh issue create` carries FLAG labels only (ADR-0047 D3);
+ * the first state is then written through the lifecycle seam: `needs-triage`
+ * (the one gate-free move from no state), then the chosen lane. A refused
+ * advance is final for that step (ADR-0047 D4): reported, never retried with
+ * other arguments, never a direct label write, never a delete.
+ */
+export function fileCleanupIssue(title: string, body: string, lane: CleanupLane, exec: ExecFn = defaultExec): string {
+  const out = exec(
     "gh",
     [
       "issue",
@@ -546,8 +640,6 @@ function createIssue(title: string, body: string): void {
       title,
       "--label",
       "cleanup-scan",
-      "--label",
-      "ready-for-agent",
       // Cleanup-scan findings are mechanically-verifiable dead-code deletions that
       // never go through hydra-grill, so they carry no design-concept artifact.
       // The design-concept-exempt label tells hydra-qa to skip the Spec axis rather
@@ -558,8 +650,77 @@ function createIssue(title: string, body: string): void {
       "--body-file",
       "-",
     ],
-    { input: body, encoding: "utf-8", stdio: ["pipe", "inherit", "inherit"] },
+    { input: body },
   );
+  const m = out.trim().match(/github\.com\/.*\/issues\/(\d+)/);
+  if (!m) throw new InvalidArgumentError(`could not parse issue number from gh issue create output: ${out.trim()}`);
+  const n = Number(m[1]);
+
+  const tri = seamAdvance(exec, n, "needs-triage", []);
+  // A reconcile backstop may have already put the issue in needs-triage (race):
+  // an illegal-transition whose observed state equals the target is success.
+  if (tri !== null && !(tri === "illegal-transition" && alreadyInState(exec, n, "needs-triage"))) {
+    return `filed as #${n} (state write refused: ${tri})`;
+  }
+
+  const laneArgs =
+    lane === "hitl-grill"
+      ? [
+          "--reason",
+          "scope-negotiation",
+          "--rationale",
+          "Self-filed orchestrator dead-code batch: parked per the admission rule (hydra-autopilot, Self-filed work); the operator admits it to the dispatch queue.",
+        ]
+      : [
+          "--reason",
+          "scoped",
+          "--rationale",
+          "Mechanical dead-code batch, operator override lane; acceptance is a green npm test and tsc after the deletion.",
+        ];
+  const code = seamAdvance(exec, n, lane, laneArgs);
+  if (code !== null) {
+    if (code === "illegal-transition" && alreadyInState(exec, n, lane)) return `filed as #${n} in ${lane}`;
+    return `filed as #${n} (state write refused: ${code})`;
+  }
+  return `filed as #${n} in ${lane}`;
+}
+
+/** Read the open `hitl-grill` count once. THROWS on failure (caller fails closed). */
+export function readHitlGrillOpenCount(exec: ExecFn = defaultExec): number {
+  const out = exec("gh", [
+    "issue", "list", "--repo", REPO, "--label", "hitl-grill", "--state", "open", "--limit", "200", "--json", "number",
+  ]);
+  const parsed = JSON.parse(out) as unknown;
+  if (!Array.isArray(parsed)) throw new InvalidArgumentError("gh issue list returned a non-array");
+  return parsed.length;
+}
+
+/**
+ * Pure lane + inbox policy (INV-6/INV-7). The cap truncates in plan order
+ * (whole-file-deletion batches already rank first) and applies to the park
+ * lane only; `inboxOpen === null` means no inbox read was needed.
+ */
+export function applyLanePolicy<T>(
+  planned: T[],
+  lane: CleanupLane,
+  explicit: boolean,
+  inboxOpen: number | null,
+): { items: T[]; laneLines: string[] } {
+  const laneLines: string[] = [
+    lane === "hitl-grill"
+      ? `lane: hitl-grill (${explicit ? "explicit" : "default"}; admission rule)`
+      : "lane: ready-for-agent (operator override)",
+  ];
+  let items = planned;
+  if (lane === "hitl-grill" && inboxOpen !== null) {
+    const k = Math.min(items.length, inboxAllowance(inboxOpen));
+    laneLines.push(
+      `hitl-grill inbox: ${inboxOpen}/${HITL_GRILL_INBOX_CAP} open — filing ${k} of ${items.length} planned batch(es)` +
+        (k === 0 ? ` (inbox cap ${HITL_GRILL_INBOX_CAP} reached, parking nothing this run)` : ""),
+    );
+    items = items.slice(0, k);
+  }
+  return { items, laneLines };
 }
 
 /**
@@ -576,7 +737,13 @@ const SATURATION_CAP = 10;
  * readCoveringPrs() + collectNamespaceConsumedModules() run there (not in the
  * readers above), so a saturated board still skips both, exactly as before.
  */
-const CLEANUP_EMIT_SHELL_SPEC: EmitShellSpec<KnipReport, OpenIssueRef, PlannedCleanupIssue> = {
+export function buildCleanupShellSpec(
+  lane: CleanupLane,
+  explicit: boolean,
+  inboxOpen: number | null,
+  exec: ExecFn = defaultExec,
+): EmitShellSpec<KnipReport, OpenIssueRef, PlannedCleanupIssue> {
+  return {
   name: "hydra-cleanup-emit",
   banner: "Orchestrator (~/hydra)",
   openItemNoun: "cleanup-scan issues",
@@ -610,9 +777,12 @@ const CLEANUP_EMIT_SHELL_SPEC: EmitShellSpec<KnipReport, OpenIssueRef, PlannedCl
     const plannedFindings = plan.issues.reduce((n, i) => n + i.findings.length, 0);
     const prCoveredDrops = plan.dropped.filter((d) => /covered by .*PR #/.test(d.reason));
 
+    const { items, laneLines } = applyLanePolicy(plan.issues, lane, explicit, inboxOpen);
+
     return {
-      items: plan.issues,
+      items,
       summaryLines: [
+        ...laneLines,
         `knip raw findings:   ${plan.rawCount}`,
         `PR dedup surface:    ${coveringPrs.length} PR(s) (open + merged within ${MERGED_PR_DEDUP_WINDOW_MS / 3_600_000}h, #1766)`,
         `After filter+dedup:  ${plan.issues.length} batch issue(s) covering ${plannedFindings} finding(s) (cap ${EMIT_CAP} issues, ≤${SYMBOLS_PER_BATCH} findings each)`,
@@ -638,13 +808,37 @@ const CLEANUP_EMIT_SHELL_SPEC: EmitShellSpec<KnipReport, OpenIssueRef, PlannedCl
       : "";
     return `• ${issue.title}${fix}`;
   },
-  createItem: (issue) => {
-    createIssue(issue.title, issue.body);
-    return "filed";
-  },
-};
+  createItem: (issue) => fileCleanupIssue(issue.title, issue.body, lane, exec),
+  };
+}
+
+/**
+ * CLI entry: parse `--lane=`, read the park-lane inbox once (fail closed), then
+ * hand off to the shared shell. Returns the exit code; files nothing on a bad
+ * option or a failed inbox read.
+ */
+export function runCleanupEmit(argv: string[], exec: ExecFn = defaultExec, io?: EmitShellIo): number {
+  const parsed = parseLaneArg(argv.slice(2));
+  if (parsed.ok === false) {
+    console.error(`hydra-cleanup-emit: ${parsed.error}`);
+    return 1;
+  }
+  let inboxOpen: number | null = null;
+  if (parsed.lane === "hitl-grill") {
+    try {
+      inboxOpen = readHitlGrillOpenCount(exec);
+    } catch (err) {
+      console.error(
+        "hydra-cleanup-emit: failed to read the open hitl-grill inbox — aborting (cannot honour the inbox cap):",
+        err instanceof Error ? err.message : String(err),
+      );
+      return 1;
+    }
+  }
+  return runEmitShell(buildCleanupShellSpec(parsed.lane, parsed.explicit, inboxOpen, exec), argv, io);
+}
 
 // Only run when executed directly (not when imported by the test).
 if (import.meta.url === `file://${process.argv[1]}`) {
-  process.exitCode = runEmitShell(CLEANUP_EMIT_SHELL_SPEC, process.argv);
+  process.exitCode = runCleanupEmit(process.argv);
 }

@@ -74,6 +74,8 @@ const DEFAULT_MIN_COUNT = 3;
 // stay imported here for the sibling extractors below.
 import {
   extractScopeFromBody,
+  isMechanicalCompanion,
+  matchesScopeList,
   extractSection,
   looksLikePath,
 } from "../../src/scope-section.ts";
@@ -81,17 +83,12 @@ import { readChangedFiles } from "../../src/mutation-gate-inputs.ts";
 
 export { extractScopeFromBody };
 
-/**
- * Issue #3678: path prefixes that are ALWAYS in scope for every PR, regardless
- * of the "Files in scope" section. `.changelog/` fragments (the per-PR release-
- * note convention, epic #3676) are conflict-free additive files that any PR may
- * carry, so a PR that adds only a changelog fragment must never trip the scope
- * gate. Unioned into the in-scope set in main() before classification; the
- * existing startsWith matcher covers the whole `.changelog/**` subtree from the
- * single `.changelog/` prefix, and in-scope-wins (#1872) additionally reconciles
- * away any incidental out-of-scope listing of a `.changelog/` path.
- */
-export const ALWAYS_IN_SCOPE: string[] = [".changelog/"];
+// Issue #3678 / #5528: paths always in scope (`.changelog/` fragments plus the
+// gate-regenerated companions) live in `MECHANICAL_COMPANIONS`
+// (src/scope-section.ts) and are admitted inside classifyScope through the strict
+// `isMechanicalCompanion` predicate (the same one the QA packet uses, so gate and
+// packet agree); in-scope-wins (#1872) reconciles any incidental out-of-scope
+// listing of them.
 
 /**
  * Issue #396: explicit "Files out of scope" block. Any changed file matching
@@ -204,11 +201,8 @@ export function classifyScope(
   const scopeNormalised = inScope.map(normalisePath).filter((s) => s.length > 0);
   const outDeclaredNormalised = outOfScopeDeclared.map(normalisePath).filter((s) => s.length > 0);
 
-  const matches = (target: string, list: string[]): boolean => {
-    if (list.length === 0) return false;
-    if (list.includes(target)) return true;
-    return list.some((s) => target.startsWith(s) || s.startsWith(target) || target.endsWith(s));
-  };
+  const matches = matchesScopeList;
+  const inScopeOrCompanion = (n: string): boolean => isMechanicalCompanion(n) || matches(n, scopeNormalised);
 
   // In-scope wins (issue #1872): drop from the declared out-of-scope set any
   // entry that also matches the in-scope set under the same matcher. A file the
@@ -225,7 +219,7 @@ export function classifyScope(
   // entry OR vice-versa under the same matcher (matches() only walks one
   // direction's startsWith/endsWith, so a single call misses the suffix case).
   const overlapsInScope = (o: string): boolean =>
-    matches(o, scopeNormalised) || scopeNormalised.some((s) => matches(s, [o]));
+    isMechanicalCompanion(o) || matches(o, scopeNormalised) || scopeNormalised.some((s) => matches(s, [o]));
   const outNormalised = outDeclaredNormalised.filter((o) => !overlapsInScope(o));
 
   const justifiedTouched = changed.filter((f) => matches(normalisePath(f), justified));
@@ -243,7 +237,7 @@ export function classifyScope(
   const outOfScope = changed.filter((f) => {
     const n = normalisePath(f);
     if (matches(n, justified)) return false;
-    if (matches(n, scopeNormalised)) return false;
+    if (inScopeOrCompanion(n)) return false;
     return true;
   });
 
@@ -398,7 +392,6 @@ function main(): number {
   // the report). Filtering here is the gate-side backstop for already-filed
   // issues; hydra-prd-render.ts now partitions them at generation time.
   const inScope = Array.from(new Set([
-    ...ALWAYS_IN_SCOPE,
     ...extractScopeFromBody(prBody),
     ...extractScopeFromBody(issueBody),
   ])).filter((p) => !isTargetRepoPath(p));

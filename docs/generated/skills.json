@@ -72,7 +72,7 @@
       "name": "hydra-cleanup",
       "path": "docs/operator-playbooks/hydra-cleanup.md",
       "stage": "pre-plan-producer",
-      "description": "Non-interactive deterministic dead-code + simplification detector. Runs a static-analysis tool (knip) over the Orchestrator to find provably-unused exports/files, then files high-confidence findings as ready-for-agent GitHub issues whose acceptance criterion is \"remove X AND npm test/tsc still pass\". Dry-run by default; --apply creates issues. Zero AskUserQuestion.",
+      "description": "Non-interactive deterministic dead-code + simplification detector. Runs a static-analysis tool (knip) over the Orchestrator to find provably-unused exports/files, then files high-confidence findings as hitl-grill-parked GitHub issues whose acceptance criterion is \"remove X AND npm test/tsc still pass\". Dry-run by default; --apply creates issues. Zero AskUserQuestion.",
       "dispatchedBy": [
         {
           "class": "cleanup_orch",
@@ -230,7 +230,7 @@
       "name": "hydra-hitl-grill",
       "path": "docs/operator-playbooks/hydra-hitl-grill.md",
       "stage": "operator-interactive",
-      "description": "Drain the hitl-grill park lane on gaberoo322/hydra — classify every parked agent-filed item (premise still true? duplicate? scoped? which cluster?), dismiss moot clusters in one question, then walk the rest one at a time to Promote / Scope-and-promote / Grill-first / Fold / Dismiss through the board routes. Operator-interactive; never an autopilot dispatch class.",
+      "description": "Drain the hitl-grill park lane on gaberoo322/hydra — classify every parked agent-filed item (premise still true? duplicate? scoped? which cluster?), dismiss moot clusters in one question, then walk the rest one at a time to Promote / Scope-and-promote / Grill-first / Fold / Dismiss via board routes. Operator-interactive; never autopilot-dispatched.",
       "dispatchedBy": [],
       "composedFrom": [],
       "route": "/docs/skill/hydra-hitl-grill",

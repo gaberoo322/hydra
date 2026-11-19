@@ -136,7 +136,7 @@ export function parseMergeDangerField(body: string | null | undefined): MergeDan
   return { status: "missing", declared: null, raw: null, reason: null };
 }
 
-export type MergeDangerOutcome =
+type MergeDangerOutcome =
   | "match"
   | "under-declared"
   | "over-declared"
@@ -145,7 +145,7 @@ export type MergeDangerOutcome =
   | "detector-unknown";
 
 /** Structurally identical to fold.ts `ReviewFinding` (leaf stays free of a fold import). */
-export interface MergeDangerFinding {
+interface MergeDangerFinding {
   severity: "medium" | "low";
   axis: "standards";
   reviewer: "merge-danger-check";
