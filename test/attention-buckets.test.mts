@@ -683,7 +683,7 @@ describe("blocker-aware waiting rows (#4805)", () => {
     assert.equal(item.detail, "blocked by #4624 (state unknown — blocker lookup failed)");
   });
 
-  test("stale-blocked recommends the relabel to ready-for-agent and warns when no Files in scope", async () => {
+  test("stale-blocked recommends the board promote to ready-for-agent and warns when no Files in scope", async () => {
     const result = await getAttentionFeed(
       deps({
         getIssuesWaiting: async () =>
@@ -693,10 +693,8 @@ describe("blocker-aware waiting rows (#4805)", () => {
     const item = result.items.find((i) => i.id === "stale-blocked-issue-40")!;
     assert.match(item.detail ?? "", /add a ## Files in scope section before relabelling/);
     const rec = item.action.recommended;
-    assert.ok(
-      rec.kind === "terminal-skill" &&
-        rec.command.includes("--remove-label blocked --add-label ready-for-agent"),
-    );
+    assert.ok(rec.kind === "in-dashboard" && rec.route === "/autopilot/board/promote");
+    assert.equal(item.issue, 40, "the row carries its issue number for the promote body");
     assert.deepEqual(
       (item.action.alternatives as { label: string }[]).map((a) => a.label),
       ["Still blocked (update ref)", "No longer relevant"],
