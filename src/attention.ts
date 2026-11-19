@@ -272,6 +272,9 @@ export async function getAttentionFeed(
       key: draft.key,
       action,
       ...(subLines ? { subLines } : {}),
+      ...(draft.context.kind === "issue" && typeof draft.context.number === "number"
+        ? { issue: draft.context.number }
+        : {}),
     });
   }
 

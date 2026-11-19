@@ -51,6 +51,7 @@ import {
   classEntryCoverage,
   controlEntryCoverage,
 } from "../src/operator-actions/registry.ts";
+import { OPEN_STATES } from "../src/lifecycle/index.ts";
 import { createOperatorActionsRouter } from "../src/api/operator-actions.ts";
 import { DISPATCH_CLASSES } from "../src/taxonomy/classes.ts";
 import {
@@ -1275,5 +1276,86 @@ describe("control:work/holdback-enroll and control:health/brief-send entries (is
     const health = await readPage(HEALTH_SRC);
     const section = health.slice(health.indexOf('data-testid="operator-channel-section"'), health.indexOf("<AlertsPanel"));
     assert.ok(section.includes('controlKey="control:health/brief-send"'), "brief-send sits inside operator-channel-section");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lifecycle state moves go through the board routes (issue #5648)
+// ---------------------------------------------------------------------------
+
+/** Keys of entries whose terminal-skill action edits a lifecycle STATE label with `gh issue edit`. */
+function stateLabelEditOffenders(registry: readonly OperatorActionEntry[]): string[] {
+  const states = new Set<string>(OPEN_STATES);
+  const offenders: string[] = [];
+  for (const entry of registry) {
+    for (const action of actionsOf(entry)) {
+      if (action.kind !== "terminal-skill" || !/\bgh issue edit\b/.test(action.command)) continue;
+      const operands = [...action.command.matchAll(/--(?:add|remove)-label\s+(\S+)/g)].map((m) => m[1]);
+      if (operands.some((label) => states.has(label))) offenders.push(entry.key);
+    }
+  }
+  return offenders;
+}
+
+describe("operator recipes never write a lifecycle state label directly (issue #5648)", () => {
+  test("no terminal-skill recipe in REGISTRY runs a state-label gh issue edit", () => {
+    assert.deepEqual(stateLabelEditOffenders(REGISTRY), []);
+  });
+
+  test("the offender check flags a synthetic state-label edit and allows a flag label", () => {
+    const bad = validEntry("waiting-on-you:needs-info", {
+      alternatives: [
+        terminalAction("Bad", "gh issue edit {number} --repo {repo} --remove-label needs-info --add-label blocked"),
+        terminalAction("Alt 2"),
+      ],
+    }) as OperatorActionEntry;
+    const flag = validEntry("waiting-on-you:blocked-live", {
+      alternatives: [terminalAction("Flag", "gh issue edit {number} --repo {repo} --add-label glm-withhold"), terminalAction("Alt 2")],
+    }) as OperatorActionEntry;
+    assert.deepEqual(stateLabelEditOffenders([bad, flag]), ["waiting-on-you:needs-info"]);
+  });
+
+  test("the orchestrator state moves are in-dashboard board-route actions", () => {
+    const find = (key: string, label: string) => {
+      const entry = REGISTRY.find((e) => e.key === key && e.variant === undefined)!;
+      return actionsOf(entry).find((a) => a.label === label)!;
+    };
+    const unblock = find("waiting-on-you:stale-blocked", "Unblock");
+    assert.ok(unblock.kind === "in-dashboard" && unblock.route === "/autopilot/board/promote");
+    assert.ok(unblock.kind === "in-dashboard" && unblock.confirmTier === "confirm-first");
+    for (const [key, label, route] of [
+      ["waiting-on-you:ready-for-human", "Mark blocked instead", "/autopilot/board/relabel"],
+      ["waiting-on-you:needs-info", "Close as won't-fix", "/autopilot/board/close"],
+      ["waiting-on-you:blocked-live", "Escalate to ready-for-human", "/autopilot/board/relabel"],
+    ] as const) {
+      const a = find(key, label);
+      assert.ok(a.kind === "in-dashboard" && a.route === route && a.confirmTier === "immediate-undo", `${key} ${label}`);
+    }
+  });
+
+  test("no target-items entry fires an /autopilot/board/ route (the board router binds one repo)", () => {
+    const offenders = REGISTRY.filter((e) => bucketOfKey(e.key) === "target-items").filter((e) =>
+      actionsOf(e).some((a) => a.kind === "in-dashboard" && a.route.startsWith("/autopilot/board/")),
+    );
+    assert.deepEqual(offenders.map((e) => e.key), []);
+  });
+
+  test("Target close recipes are label-free gh issue close, and no action mentions a wontfix label", () => {
+    for (const [key, label] of [
+      ["target-items:needs-info", "Close as won't-fix"],
+      ["target-items:blocked-live", "No longer relevant"],
+    ] as const) {
+      const entry = REGISTRY.find((e) => e.key === key && e.variant === undefined)!;
+      const a = actionsOf(entry).find((x) => x.label === label)!;
+      assert.ok(a.kind === "terminal-skill" && a.command === "gh issue close {number} --repo {repo} --reason \"not planned\"", key);
+    }
+    for (const entry of REGISTRY) {
+      for (const a of actionsOf(entry)) {
+        assert.ok(!/wontfix/.test(JSON.stringify(a)), `${entry.key}: ${a.label}`);
+        if (/won't-fix|no longer relevant/i.test(a.label) && a.kind !== "terminal-skill") {
+          assert.ok(/not planned/.test(a.consequence), `${entry.key}: ${a.label}`);
+        }
+      }
+    }
   });
 });
