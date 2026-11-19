@@ -1,0 +1,1 @@
+- fix: stop importing test-typecheck-check from running tsc and exiting the test process (#5647)
