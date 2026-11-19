@@ -94,7 +94,7 @@
       "symbol-cite": 1
     },
     "docs/operator-playbooks/hydra-cleanup.md": {
-      "back-compat": 2,
+      "back-compat": 1,
       "shell-lines": 16,
       "symbol-cite": 9
     },

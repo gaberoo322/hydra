@@ -1,6 +1,6 @@
 ---
 name: hydra-cleanup
-description: Non-interactive deterministic dead-code + simplification detector. Runs a static-analysis tool (knip) over the Orchestrator to find provably-unused exports/files, then files high-confidence findings as ready-for-agent GitHub issues whose acceptance criterion is "remove X AND npm test/tsc still pass". Dry-run by default; --apply creates issues. Zero AskUserQuestion.
+description: Non-interactive deterministic dead-code + simplification detector. Runs a static-analysis tool (knip) over the Orchestrator to find provably-unused exports/files, then files high-confidence findings as hitl-grill-parked GitHub issues whose acceptance criterion is "remove X AND npm test/tsc still pass". Dry-run by default; --apply creates issues. Zero AskUserQuestion.
 when_to_use: "When the Orchestrator board is idle, or the operator says 'cleanup scan' or 'find dead code'."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*)
 arguments: [apply]
@@ -14,10 +14,10 @@ It is the mechanical half of the idle-backfill confidence gate; the judgment hal
 
 | Confidence | Meaning | Label |
 |---|---|---|
-| Mechanical | Acceptance is deterministic (a green suite proves the deletion). | `ready-for-agent` |
+| Mechanical | Acceptance is deterministic (a green suite proves the deletion). | `hitl-grill` (operator `--lane=ready-for-agent` overrides) |
 | Judgment | Correctness is an opinion (deep-module reorganisation, debatable seams). | `needs-triage` |
 
-A deep-module reorganisation is never auto-routed to `ready-for-agent`. Every finding this skill emits is mechanical, so it routes to `ready-for-agent`.
+A deep-module reorganisation is never auto-routed to `ready-for-agent`. Every finding is mechanical but self-filed, so the runner parks it in `hitl-grill` (admission rule).
 
 ## What this skill is NOT
 
@@ -117,7 +117,9 @@ Never drive `gh issue create` from a hand-written loop: title and body must rend
 
 The unit of work is one module batch (`moduleDirKey()`, `SYMBOLS_PER_BATCH = 20`). Each issue carries a per-symbol checklist, a `## Files in scope` section and a `cleanup-identities` manifest used for dedup.
 
-**Labels (every issue):** `cleanup-scan`, `ready-for-agent`, `design-concept-exempt`. `cleanup-scan` is the count seam for `cleanup_board_saturated` and the exemption key read by `hydra-qa`, the grill gate and the GLM drainer; `design-concept-exempt` is kept for the readers that still key on it.
+**Labels and state:** `gh issue create` carries flag labels only: `cleanup-scan` (the count seam for `cleanup_board_saturated` and the exemption key read by `hydra-qa`, the grill gate and the GLM drainer) and `design-concept-exempt`. The first state is written through the lifecycle seam, `needs-triage` then the lane; a refused advance is reported as `filed as #N (state write refused: <code>)` and the run continues.
+
+**Lane.** Default `hitl-grill` (admission rule in `docs/operator-playbooks/hydra-autopilot.md`), so the argument-free `--apply` that `cleanup_orch` sends complies. `--apply --lane=ready-for-agent` is the operator-only override (equals form only; any other value exits 1). In the `hitl-grill` lane the runner files at most `max(0, 10 - open)` batches, in plan order, and exits 1 if the inbox read fails. The dry-run names the lane and that arithmetic.
 
 ### 4. Report
 
@@ -127,6 +129,8 @@ knip findings:        <n> unused (<f> files, <e> exports)
 After filter:         <n>
 Emitted:              <k> batch issues covering <n> findings  (#NNN ...)
 Dropped:              <n>  (<reasons>)
+Lane:                 hitl-grill (default; admission rule)
+hitl-grill inbox:     <open>/10 open - filing <k> of <n>
 Board saturation:     ok (<n> open cleanup-scan issues, under the 10 cap)
 ```
 
