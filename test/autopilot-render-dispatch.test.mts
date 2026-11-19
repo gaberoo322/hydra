@@ -829,6 +829,9 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
     const retro = render("retro_orch", action("retro_orch", "hydra-retro", { prompt_args: { apply: true } }));
     assert.match(retro.prompt, /`apply: true` — this is a REAL run, not a dry run/);
     assert.match(retro.prompt, /Admission rule \(operator directive 2026-08-19\)/);
+    assert.match(retro.prompt, /advance <N> needs-triage/);
+    assert.match(retro.prompt, /advance <N> hitl-grill --reason scope-negotiation/);
+    assert.doesNotMatch(retro.prompt, /NEVER `ready-for-agent` or `needs-triage`/);
     assert.match(retro.prompt, /Invoke the `hydra-retro` skill \(via the Skill tool; apply: true\)/);
     const sweep = render("sweep_orch", action("sweep_orch", "hydra-sweep", { prompt_args: { scope: "orch", anchor: "issue-4823" } }));
     assert.match(sweep.prompt, /match by closing ref, not by title/);

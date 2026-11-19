@@ -795,6 +795,8 @@ The replay contract in `test/turn-snapshot-json.test.mts` (#5085) is the only gu
 
 **When you discover a defect in Hydra's own machinery, you file it as `hitl-grill`, never as `ready-for-agent`.**
 
+File it through the lifecycle seam in two hops: flag labels only at `gh issue create`, `advance <N> needs-triage` (the first-state rule), then `advance <N> hitl-grill --reason scope-negotiation --rationale "<one line>"`.
+
 You may file freely — noticing defects is valuable and nothing here discourages it.
 What you may NOT do is promote your own finding into the dispatch queue. Only the
 operator moves an issue from `hitl-grill` to `ready-for-agent`. The `/work` inbox
@@ -810,7 +812,7 @@ Three carve-outs, all narrow:
 1. **`needs-triage` for a wedge** — the stale-heartbeat recovery path keeps filing
    `needs-triage` with the run-log tail. Unchanged.
 2. **hydra-grill's gate-fail handoff, posted on the anchor issue** — a `## hydra-grill
-   handoff` comment plus the `ready-for-human` label (ADR-0034 §8.1) is a design-concept
+   handoff` comment plus the `hitl-grill` move through the lifecycle seam (ADR-0034 §8.1) is a design-concept
    escalation on the anchor issue itself, not an issue you are promoting. Unchanged.
 3. **Runaway-subagent issues (#395)** — a hard-cap breach is an incident, not a
    proposal. Unchanged.

@@ -243,9 +243,11 @@ If `apply === false` (the default), PRINT the plan and STOP — no issues, no PR
 
 Under `--apply`:
 
-- For each `plan.issues[]`: `gh issue create --repo gaberoo322/hydra --title <title> --body <evidence + cue + Source>` (no state label at creation), then `npx tsx scripts/lifecycle.ts advance <N> needs-triage --actor hydra-retro` (from none, gate-free; tolerate `illegal-transition` with observed state `needs-triage` — the reconcile backstop raced it; any other non-zero exit is final, never a direct label write, ADR-0047 D3/D4). Then record the cue in the seen-list:
+- For each `plan.issues[]`: `gh issue create --repo gaberoo322/hydra --title <title> --body <evidence + cue + Source>`, then the first-state step below. Then record the cue in the seen-list:
 
       npx tsx -e '(async () => { const {recordRetroSeen} = await import("./src/redis/retro-seen.ts"); await recordRetroSeen({cue: process.env.CUE, decision: "issue", runId: process.env.RUN_ID, ref: process.env.REF, at: new Date().toISOString()}); process.exit(0); })();'
+
+@include _fragments/issue-first-state.md
 
 - For `plan.pr` (if non-null): open a feature branch, apply the prompt/doc fix
   (skill lesson / CLAUDE.md / CONTEXT.md note), run `npm run typecheck:test`
@@ -296,11 +298,11 @@ Without `--apply` print the plan and write the artifact only.
    with `recordRetroSeen({...entry, at: <now ISO>})` so the due signal does not
    re-fire daily (next check in 7 days); `fence` is
    terminal. Caps are independent of the run pass: at most **2** check issues
-   (`needs-triage`, body names the arm, PRs, rounds and the proposed
+   (filed through § 8's create + first-state step; body names the arm, PRs, rounds and the proposed
    deterministic check) and **1** PR (a standard or fence rung).
 3. **Cohort trip.** `loadRolloutSwitches(repoRoot)` reporting a trip yields one
    mechanical issue via `planCohortTripIssue(baseline generatedAt, seen)`,
-   outside the 2-issue cap.
+   outside the 2-issue cap, filed through § 8's create + first-state step.
 4. **The PR.** A `standard` rung edits only `CODING_STANDARDS.md` (one new or
    edited rule with an `enforced-by:` line, plus any prunes below); a `fence`
    rung edits only a one-line fence in `CLAUDE.md`. Before `gh pr create`,

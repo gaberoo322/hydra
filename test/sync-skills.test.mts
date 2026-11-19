@@ -455,6 +455,20 @@ describe("scripts/sync-skills.sh — @include fragment mechanism (issue #2552)",
     }
   });
 
+  test("issue-first-state includers render their own actor name", () => {
+    const r = liveSync();
+    assert.equal(r.status, 0, `live sync failed: ${r.stderr}`);
+    for (const skill of ["hydra-retro", "hydra-dev"]) {
+      const body = readFileSync(join(r.dir, "claude", skill, "SKILL.md"), "utf-8");
+      assert.ok(
+        body.includes(`advance <N> needs-triage --actor ${skill}`),
+        `${skill} SKILL.md must carry the first-state rule with its own actor`,
+      );
+      assert.doesNotMatch(body, /^[ \t]*@include\b/m);
+      assert.doesNotMatch(body, /\{\{SKILL_NAME\}\}/);
+    }
+  });
+
   // Issue #2947: reference_files copies named fragments into the generated skill
   // folder as siblings of SKILL.md (progressive disclosure) rather than
   // @include-ing them (which grows the body).
