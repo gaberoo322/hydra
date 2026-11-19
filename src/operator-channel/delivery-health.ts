@@ -38,11 +38,11 @@ import {
 } from "../redis/operator-channel.ts";
 
 export const DELIVERY_HEALTH_WINDOW_HOURS = 24;
-export const DELIVERY_HEALTH_WINDOW_MS = DELIVERY_HEALTH_WINDOW_HOURS * 60 * 60 * 1000;
+const DELIVERY_HEALTH_WINDOW_MS = DELIVERY_HEALTH_WINDOW_HOURS * 60 * 60 * 1000;
 /** Same bound the channel's own store calls fail open under. */
-export const DELIVERY_HEALTH_READ_TIMEOUT_MS = 1500;
+const DELIVERY_HEALTH_READ_TIMEOUT_MS = 1500;
 
-export interface LastPageSummary {
+interface LastPageSummary {
   /** ISO-8601 of the delivery attempt. */
   at: string;
   /** The log kind: a first page, a 6h reminder, or the recovered message. */
@@ -53,7 +53,7 @@ export interface LastPageSummary {
   status?: number;
 }
 
-export interface LastBriefSummary {
+interface LastBriefSummary {
   at: string;
   outcome: DeliveryOutcome;
   status?: number;
@@ -74,7 +74,7 @@ export interface DeliveryHealthAvailable {
   window: { hours: number; failed: number; suppressed: number };
 }
 
-export interface DeliveryHealthUnavailable {
+interface DeliveryHealthUnavailable {
   available: false;
   generatedAt: string;
   reason: string;
@@ -138,7 +138,7 @@ export function summarizeDeliveryHealth(inputs: DeliveryHealthInputs): DeliveryH
 }
 
 /** The reads the summary needs; production binds `redisDeliveryHealthReads`. */
-export interface DeliveryHealthReads {
+interface DeliveryHealthReads {
   readDeliveryLog(): Promise<DeliveryLogEntry[]>;
   listDedupStates(): Promise<DedupStateRow[]>;
   getBriefLastSent(): Promise<number | null>;
