@@ -27,16 +27,12 @@ export {
 } from "./transitions.ts";
 export {
   ADR5_REASONS,
-  CAP_REASON_PREFIX,
   TRIAGE_REASONS,
   isAdr5Reason,
   isAllowedReason,
-  type Adr5Reason,
 } from "./reasons.ts";
 export {
   DESIGN_CONCEPT_FLAG,
-  RESEARCH_TRAILER_PREFIX,
-  bodyClosesIssue,
   evaluateGate,
   gateAdr5,
   gateClaimReleased,
@@ -68,28 +64,17 @@ export {
   isUnsanctionedHoldExit,
 } from "./hold-exit.ts";
 export {
-  CAP_ARMS,
-  CAP_DEFAULTS,
-  CAP_RESET_PREFIX,
-  CAP_TABLE,
-  capEnvName,
   classRole,
   countReviewedFailRoundsAfterReset,
   countReviewedFailRoundsSinceReset,
   evaluateCaps,
   latestResetMs,
   resolveCapLimits,
-  type CapArm,
-  type CapCount,
-  type CapEvaluation,
-  type CapSource,
-  type CapUnit,
   type TimedBody,
 } from "./caps.ts";
 export {
   classifyQaPassedExit,
   classifyQaVerdictTarget,
-  gateQaExit,
   gateQaVerdict,
   type QaExitTarget,
   type QaLivePr,
@@ -126,7 +111,6 @@ export {
   type ClaimPurpose,
   resolveLifecycleMode,
   type OperatorAdvanceInput,
-  type AdvanceInput,
   type AdvanceResult,
   type ClaimInput,
   type ClaimResult,

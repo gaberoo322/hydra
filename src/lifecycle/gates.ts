@@ -302,7 +302,7 @@ export function gateClose(input: GateInput, records: GateRecords): GateResult {
  * must be re-read live at head and {@link classifyQaPassedExit} must name the
  * requested target. Fails closed on a fetch miss.
  */
-export function gateQaExit(input: GateInput, records: GateRecords): GateResult {
+function gateQaExit(input: GateInput, records: GateRecords): GateResult {
   const prNumber = parsePrEvidence(input.evidence);
   if (prNumber === null) return fail("evidence-required:pr");
   const live = records.qaLive;
@@ -317,7 +317,7 @@ export function gateQaExit(input: GateInput, records: GateRecords): GateResult {
  * issue entered `needs-qa`, and its classified target must equal `to`.
  */
 /** The only actor allowed to use the trailer-less `defer=1` evidence. */
-export const QA_DEFER_ACTOR = "hydra-qa";
+const QA_DEFER_ACTOR = "hydra-qa";
 
 export function gateQaVerdict(input: GateInput, records: GateRecords): GateResult {
   const prNumber = parsePrEvidence(input.evidence);
@@ -345,7 +345,7 @@ export function gateQaVerdict(input: GateInput, records: GateRecords): GateResul
   return c.target === input.to ? pass() : fail("qa-verdict-mismatch");
 }
 
-export const RESEARCH_TRAILER_PREFIX = "Hydra-Research:";
+const RESEARCH_TRAILER_PREFIX = "Hydra-Research:";
 
 export type ResearchTrailer =
   | { kind: "ok"; issue: number; next: string }
