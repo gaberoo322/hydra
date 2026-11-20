@@ -1,6 +1,6 @@
 #!/usr/bin/env -S npx tsx
 /**
- * Skill-size ratchet — issue #2946 (parent epic #2944).
+ * Skill-size ratchet — issue #2946 (parent epic #2944), on the Ratchet module (#5654).
  *
  * # The gap this closes
  *
@@ -9,20 +9,21 @@
  * into agent context, and every frontmatter `description` loads into EVERY
  * session's skill list. Nothing bounded their growth, so context load could
  * only creep upward. This check is a SHRINK-ONLY word-count ratchet over the
- * skill sources, in the spirit of the deadcode / seam-check baseline idiom:
+ * skill sources: a COUNTED ceiling (`ratchet.ts`) whose rows are keyed by
+ * repo-relative path.
  *
- *   - body words  > baseline entry            → FAIL (growth needs a deliberate
- *                                                baseline raise in the same PR)
- *   - body words <= baseline entry            → PASS (an untightened shrink
- *                                                stays green; output nudges
- *                                                running --write-baseline)
- *   - description words > max(50, baseline)   → FAIL (grandfathered over-cap
- *                                                descriptions can only shrink;
- *                                                everything at/below 50 — and
- *                                                every NEW playbook — is
- *                                                hard-capped at 50)
- *   - skill source missing from baseline      → FAIL (seed with --write-baseline)
- *   - baseline entry whose file is gone       → FAIL (prune with --write-baseline)
+ *   - `<path>`              body word count of every skill source
+ *   - `<path>/description`  description word count, emitted ONLY when it
+ *                           exceeds DESCRIPTION_WORD_CAP (50)
+ *
+ *   - a row above its baseline, or a new row → FAIL (growth needs a deliberate
+ *                                              baseline raise in the same PR; a
+ *                                              new playbook declares its size at
+ *                                              birth; a description over 50
+ *                                              words is a new row)
+ *   - a row below its baseline, or a vanished file → HINT (the output lists the
+ *                                              tightenable rows; --write-baseline
+ *                                              only ever tightens)
  *
  * # What is measured
  *
@@ -47,43 +48,26 @@
  *
  * Usage:
  *   npx tsx scripts/ci/skill-size-ratchet.ts                    # check
- *   npx tsx scripts/ci/skill-size-ratchet.ts --write-baseline   # (re)seed
+ *   npx tsx scripts/ci/skill-size-ratchet.ts --write-baseline   # tighten only
  *
  * Update flow when a playbook must deliberately grow (STD-BASELINE-EDIT-ROWS):
  * make the change, raise exactly that file's row in
  * scripts/ci/skill-size-baseline.json to the measured count in the same PR
  * (hand-edit; never commit a blanket --write-baseline), and add a PR-body line
- * `Baseline-raise: scripts/ci/skill-size-baseline.json <row-key> - <reason>`.
+ * `Baseline-raise: scripts/ci/skill-size-baseline.json <path> - <reason>`.
  * A new playbook or fragment adds its own row the same way. Descriptions are
  * never raised: shorten them under the cap instead.
  */
 
 import { readFile, readdir } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { GateInvariantError } from "../../src/errors.ts";
 import { frontmatterText, parseFrontmatter } from "../../src/skills/playbook.ts";
-import { execFileSync } from "node:child_process";
-import {
-  formatGrowthAdvice,
-  formatStaleAdvice,
-  loadJsonBaseline,
-  writeJsonBaseline,
-} from "./seam-check-lib.ts";
+import { REPO_ROOT } from "./seam-check-lib.ts";
+import { defineRatchet, runIfCli } from "./ratchet.ts";
 
-const REPO_ROOT = resolve(fileURLToPath(import.meta.url), "../../..");
-const PLAYBOOKS_DIR = join(REPO_ROOT, "docs/operator-playbooks");
-const FRAGMENTS_DIR = join(PLAYBOOKS_DIR, "_fragments");
-const BASELINE_PATH = join(REPO_ROOT, "scripts/ci/skill-size-baseline.json");
-const BASELINE_REL = "scripts/ci/skill-size-baseline.json";
-const WRITE_BASELINE_CMD =
-  "npx tsx scripts/ci/skill-size-ratchet.ts --write-baseline";
-
-/** Hard cap on frontmatter description length for new / at-cap playbooks. */
+/** Frontmatter description length above which a description becomes a (growth) row. */
 export const DESCRIPTION_WORD_CAP = 50;
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 
 /** Word counts measured from a skill source file. */
 export interface MeasuredEntry {
@@ -92,39 +76,6 @@ export interface MeasuredEntry {
   /** Frontmatter description word count. Absent for fragments. */
   description?: number;
 }
-
-/** A committed baseline entry — same shape as MeasuredEntry. */
-export type BaselineEntry = MeasuredEntry;
-
-export interface BaselineFile {
-  note: string;
-  files: Record<string, BaselineEntry>;
-}
-
-export type ViolationRule =
-  | "baseline-missing"
-  | "missing-baseline-entry"
-  | "body-grew"
-  | "description-over-cap"
-  | "stale-baseline-entry";
-
-export interface Violation {
-  path: string;
-  rule: ViolationRule;
-  current?: number;
-  allowed?: number;
-  message: string;
-}
-
-export interface CompareResult {
-  violations: Violation[];
-  /** Files measuring BELOW baseline — green, but the baseline could tighten. */
-  shrunk: Array<{ path: string; current: number; baseline: number }>;
-}
-
-// ---------------------------------------------------------------------------
-// Pure core — exported for the regression test (test/skill-size-ratchet.test.mts)
-// ---------------------------------------------------------------------------
 
 /**
  * Measure one frontmattered playbook source using the shared ADR-0041 core
@@ -138,7 +89,7 @@ export function measureSkillSource(text: string): MeasuredEntry | null {
   const parsed = parseFrontmatter(text);
   if (parsed === null) {
     if (text.startsWith("---\n")) {
-      throw new Error(
+      throw new GateInvariantError(
         "malformed frontmatter: file opens with `---` but has no closing `---` delimiter",
       );
     }
@@ -155,168 +106,6 @@ export function countWords(text: string): number {
   return text.split(/\s+/).filter((w) => w.length > 0).length;
 }
 
-/**
- * Effective description cap for a file: max(50, grandfathered baseline count).
- * Playbooks seeded over 50 words can only shrink; everything at/below 50 —
- * and every new playbook (no baseline entry) — is hard-capped at 50.
- */
-export function effectiveDescriptionCap(baselineEntry?: BaselineEntry): number {
-  return Math.max(DESCRIPTION_WORD_CAP, baselineEntry?.description ?? 0);
-}
-
-/**
- * Compare measured skill-source sizes against the committed baseline.
- * Pure — no I/O. `baseline === null` means the baseline file does not exist.
- */
-export function compareAgainstBaseline(
-  measured: Record<string, MeasuredEntry>,
-  baseline: BaselineFile | null,
-): CompareResult {
-  const violations: Violation[] = [];
-  const shrunk: CompareResult["shrunk"] = [];
-
-  if (baseline === null) {
-    violations.push({
-      path: BASELINE_REL,
-      rule: "baseline-missing",
-      message:
-        `baseline file ${BASELINE_REL} is missing — seed it with ` +
-        `\`${WRITE_BASELINE_CMD}\` and commit the result.`,
-    });
-    return { violations, shrunk };
-  }
-
-  for (const [path, entry] of Object.entries(measured)) {
-    const base = baseline.files[path];
-
-    if (base === undefined) {
-      violations.push({
-        path,
-        rule: "missing-baseline-entry",
-        current: entry.body,
-        message:
-          `${path} is a skill source with NO baseline entry (new playbook/fragment ` +
-          `makes its size declaration at birth). ` +
-          formatGrowthAdvice({
-            cmd: WRITE_BASELINE_CMD,
-            baselineRel: BASELINE_REL,
-            rowKey: `files/${path}`,
-            fixVerb: "add a hand-written row for the new playbook",
-            current: entry.body,
-          }),
-      });
-    } else {
-      if (entry.body > base.body) {
-        violations.push({
-          path,
-          rule: "body-grew",
-          current: entry.body,
-          allowed: base.body,
-          message:
-            `${path} body grew: ${entry.body} words > baseline ${base.body} ` +
-            `(+${entry.body - base.body}). ` +
-            formatGrowthAdvice({
-              cmd: WRITE_BASELINE_CMD,
-              baselineRel: BASELINE_REL,
-              rowKey: `files/${path}/body`,
-              fixVerb: "shrink the file",
-              current: entry.body,
-            }),
-        });
-      } else if (entry.body < base.body) {
-        shrunk.push({ path, current: entry.body, baseline: base.body });
-      }
-    }
-
-    if (entry.description !== undefined) {
-      const cap = effectiveDescriptionCap(base);
-      if (entry.description > cap) {
-        const grandfathered = cap > DESCRIPTION_WORD_CAP;
-        violations.push({
-          path,
-          rule: "description-over-cap",
-          current: entry.description,
-          allowed: cap,
-          message:
-            `${path} frontmatter description is ${entry.description} words > ` +
-            `allowed ${cap} (${grandfathered ? `grandfathered baseline — shrink-only` : `hard cap ${DESCRIPTION_WORD_CAP}`}). ` +
-            `Shorten the description — the cap never rises above its baselined count.`,
-        });
-      }
-    }
-  }
-
-  for (const path of Object.keys(baseline.files)) {
-    if (!(path in measured)) {
-      violations.push({
-        path,
-        rule: "stale-baseline-entry",
-        message:
-          `baseline entry ${path} has no matching skill source (file deleted or ` +
-          `no longer a skill source). ` +
-          formatStaleAdvice({
-            baselineRel: BASELINE_REL,
-            rowAction: `delete the \`${path}\` row`,
-          }),
-      });
-    }
-  }
-
-  return { violations, shrunk };
-}
-
-/**
- * Shrink hints (INV-6): one line per shrunk row whose file is in this PR's
- * diff; a single skipped line when the diff base could not be resolved
- * (`diffedFiles === null`). Pure. Never affects the verdict.
- */
-export function formatShrinkHints(
-  shrunk: CompareResult["shrunk"],
-  diffedFiles: ReadonlySet<string> | null,
-  unresolvableReason = "no git diff base",
-): string[] {
-  if (diffedFiles === null) {
-    return [
-      `[skill-size-ratchet] hint: diff base unresolvable (${unresolvableReason}) — shrink hints skipped`,
-    ];
-  }
-  return shrunk
-    .filter((s) => diffedFiles.has(s.path))
-    .map(
-      (s) =>
-        `[skill-size-ratchet] hint: ${s.path} row can drop ${s.baseline} -> ${s.current} in ${BASELINE_REL} ` +
-        `(file is in this PR's diff; lower only that row — STD-BASELINE-EDIT-ROWS)`,
-    );
-}
-
-/**
- * Files changed in this PR: `git diff --name-only <merge-base>...HEAD` with the
- * base from `--diff-base <ref>`, else `PR_BASE_SHA`, else `origin/master`
- * (mirrors qa-fix-proof). Returns `{files: null, reason}` on any git failure.
- */
-export function resolveDiffedFiles(
-  argv: readonly string[] = process.argv,
-  env: NodeJS.ProcessEnv = process.env,
-): { files: Set<string> | null; reason: string } {
-  const flag = argv.indexOf("--diff-base");
-  const base =
-    (flag >= 0 ? argv[flag + 1] : undefined) || env.PR_BASE_SHA || "origin/master";
-  try {
-    const git = (args: string[]): string =>
-      execFileSync("git", args, { cwd: REPO_ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-    const mergeBase = git(["merge-base", base, "HEAD"]).trim();
-    const out = git(["diff", "--name-only", `${mergeBase}...HEAD`]);
-    return { files: new Set(out.split("\n").filter(Boolean)), reason: "" };
-  } catch (err) {
-    /* intentional: hints are advisory — any git failure degrades to the skipped line, never a verdict change */
-    return { files: null, reason: `${base}: ${(err as Error).message.split("\n")[0]}` };
-  }
-}
-
-// ---------------------------------------------------------------------------
-// I/O — walking the skill sources, loading/writing the baseline
-// ---------------------------------------------------------------------------
-
 async function listMarkdown(dir: string): Promise<string[]> {
   const entries = await readdir(dir, { withFileTypes: true });
   return entries
@@ -326,156 +115,61 @@ async function listMarkdown(dir: string): Promise<string[]> {
 }
 
 /**
- * Measure every skill source: frontmattered playbooks (body + description
- * counts) and _fragments content fragments (whole-file body count).
+ * Measure every skill source under `root`: frontmattered playbooks (body +
+ * description counts) and _fragments content fragments (whole-file body count).
  * Frontmatter-less playbook-dir docs are exempt (sync-skills skips them).
  */
-export async function measureSkillSources(): Promise<Record<string, MeasuredEntry>> {
+export async function measureSkillSources(
+  root: string = REPO_ROOT,
+): Promise<Record<string, MeasuredEntry>> {
+  const playbooksDir = join(root, "docs/operator-playbooks");
+  const fragmentsDir = join(playbooksDir, "_fragments");
   const measured: Record<string, MeasuredEntry> = {};
 
-  for (const name of await listMarkdown(PLAYBOOKS_DIR)) {
-    const abs = join(PLAYBOOKS_DIR, name);
-    const rel = relative(REPO_ROOT, abs);
+  for (const name of await listMarkdown(playbooksDir)) {
+    const abs = join(playbooksDir, name);
+    const rel = relative(root, abs);
     const text = await readFile(abs, "utf8");
     let entry: MeasuredEntry | null;
     try {
       entry = measureSkillSource(text);
     } catch (err) {
-      throw new Error(`${rel}: ${(err as Error).message}`);
+      throw new GateInvariantError(`${rel}: ${(err as Error).message}`);
     }
     if (entry === null) continue; // not a skill source - exempt
     measured[rel] = entry;
   }
 
-  for (const name of await listMarkdown(FRAGMENTS_DIR)) {
-    const abs = join(FRAGMENTS_DIR, name);
-    const rel = relative(REPO_ROOT, abs);
-    const text = await readFile(abs, "utf8");
-    measured[rel] = { body: countWords(text) };
+  for (const name of await listMarkdown(fragmentsDir)) {
+    const abs = join(fragmentsDir, name);
+    const rel = relative(root, abs);
+    measured[rel] = { body: countWords(await readFile(abs, "utf8")) };
   }
 
   return measured;
 }
 
-/**
- * Shape-check the parsed baseline — LOCAL to this check (issue #4580 kept
- * per-check policy at the call site). Throws the same per-mismatch
- * regeneration wording the hand-rolled loader used.
- */
-function validateBaselineShape(parsed: unknown): BaselineFile {
-  const candidate = parsed as BaselineFile;
-  if (typeof candidate !== "object" || candidate === null || typeof candidate.files !== "object" || candidate.files === null) {
-    throw new Error(
-      `malformed baseline at ${BASELINE_REL}: expected {note, files:{...}} — ` +
-        `regenerate with \`${WRITE_BASELINE_CMD}\`.`,
-    );
-  }
-  for (const [path, entry] of Object.entries(candidate.files)) {
-    if (
-      typeof entry !== "object" ||
-      entry === null ||
-      typeof entry.body !== "number" ||
-      (entry.description !== undefined && typeof entry.description !== "number")
-    ) {
-      throw new Error(
-        `malformed baseline entry for ${path} in ${BASELINE_REL}: expected ` +
-          `{body:number, description?:number} — regenerate with \`${WRITE_BASELINE_CMD}\`.`,
-      );
+export const skillSizeRatchet = defineRatchet({
+  id: "skill-size-ratchet",
+  baseline: "scripts/ci/skill-size-baseline.json",
+  shape: "counted",
+  polarity: "ceiling",
+  stale: "hint",
+  enforcement: "required",
+  async measure(root) {
+    const rows: Record<string, number> = {};
+    for (const [path, entry] of Object.entries(await measureSkillSources(resolve(root)))) {
+      rows[path] = entry.body;
+      if (entry.description !== undefined && entry.description > DESCRIPTION_WORD_CAP) {
+        rows[`${path}/description`] = entry.description;
+      }
     }
-  }
-  return candidate;
-}
+    return rows;
+  },
+  help: [
+    "Generated skills load into agent context on every dispatch; this ratchet only shrinks.",
+    "Shrink the file (or shorten a description to 50 words or fewer) rather than raising the row.",
+  ],
+});
 
-/**
- * Load the baseline via the shared primitive in STRICT mode (issue #4580):
- * a missing baseline returns `null` (an unseeded baseline is itself a
- * `baseline-missing` violation, not a soft default), while corruption fails
- * loud — the primitive rethrows the raw SyntaxError and this call site wraps
- * it in the check's regeneration wording; non-SyntaxError errors propagate
- * raw, exactly as the hand-rolled loader behaved.
- */
-export async function loadBaseline(): Promise<BaselineFile | null> {
-  let parsed: unknown;
-  try {
-    parsed = await loadJsonBaseline<unknown>(BASELINE_PATH, null, {
-      strict: true,
-    });
-  } catch (err) {
-    if (err instanceof SyntaxError) {
-      throw new Error(
-        `malformed baseline JSON at ${BASELINE_REL}: ${err.message} — ` +
-          `fix it or regenerate with \`${WRITE_BASELINE_CMD}\`.`,
-      );
-    }
-    throw err;
-  }
-  return validateBaselineShape(parsed);
-}
-
-async function writeBaselineFile(measured: Record<string, MeasuredEntry>): Promise<void> {
-  const files: Record<string, BaselineEntry> = {};
-  for (const path of Object.keys(measured).sort()) files[path] = measured[path];
-  const payload: BaselineFile = {
-    note:
-      `Auto-generated by ${WRITE_BASELINE_CMD} on ${new Date().toISOString()}. ` +
-      `Issue #2946 shrink-only word-count ratchet over playbook-generated skill sources ` +
-      `(docs/operator-playbooks/*.md with frontmatter + _fragments/*.md). Body counts may ` +
-      `only be raised deliberately in the same PR that grows the file; description caps ` +
-      `are max(50, baselined count) and only shrink.`,
-    files,
-  };
-  await writeJsonBaseline(BASELINE_PATH, payload);
-}
-
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
-
-async function main(): Promise<number> {
-  const measured = await measureSkillSources();
-
-  if (process.argv.includes("--write-baseline")) {
-    await writeBaselineFile(measured);
-    console.log(
-      `[skill-size-ratchet] Wrote baseline for ${Object.keys(measured).length} skill source(s) to ${BASELINE_REL}`,
-    );
-    return 0;
-  }
-
-  const baseline = await loadBaseline();
-  const { violations, shrunk } = compareAgainstBaseline(measured, baseline);
-
-  const diff = resolveDiffedFiles();
-  for (const line of formatShrinkHints(shrunk, diff.files, diff.reason)) console.log(line);
-
-  if (violations.length > 0) {
-    console.error(
-      `[skill-size-ratchet] FAIL — ${violations.length} violation(s) (issue #2946 shrink-only skill-size ratchet):`,
-    );
-    for (const v of violations) {
-      console.error(`  [${v.rule}] ${v.message}`);
-    }
-    console.error("");
-    console.error(
-      "Generated skills load into agent context on every dispatch; this ratchet only shrinks.",
-    );
-    return 1;
-  }
-
-  console.log(
-    `[skill-size-ratchet] OK — ${Object.keys(measured).length} skill source(s) within baseline; descriptions within cap.`,
-  );
-  return 0;
-}
-
-// Only run as a CLI — importing the module (from the regression test) must not
-// walk the filesystem or process.exit.
-if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
-  main().then(
-    (code) => process.exit(code),
-    (err) => {
-      console.error("[skill-size-ratchet] crash:", err);
-      process.exit(2);
-    },
-  );
-}
+runIfCli(import.meta.url, skillSizeRatchet);

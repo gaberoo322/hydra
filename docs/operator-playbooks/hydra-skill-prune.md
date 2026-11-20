@@ -157,11 +157,11 @@ When Step 3 passed AND `--apply` is set, in a fresh worktree:
    updates automatically on merge, via `scripts/deploy.sh`.
 3. **Auto-tighten the ratchet, shrink-only.** Lower ONLY the pruned file's
    `body` count in `scripts/ci/skill-size-baseline.json` to its new (smaller)
-   value: `npx tsx scripts/ci/skill-size-ratchet.ts --write-baseline` regenerates
-   the baseline from current sizes, but you MUST verify the diff **only lowers**
-   the pruned file's entry and raises nothing (the shrink-only invariant).
-   If `--write-baseline` would raise any other file's entry, hand-edit only the
-   pruned file's entry instead — never let a prune PR raise a baseline.
+   value (rows are `"<path>": words`): `npx tsx scripts/ci/skill-size-ratchet.ts --write-baseline`
+   only tightens (it refuses growth), but you MUST verify the diff **only lowers**
+   the pruned file's row and raises nothing (the shrink-only invariant).
+   If it lowers any other row, hand-edit only the
+   pruned file's row — never raise a baseline.
 4. Run `npm test` + `npm run typecheck` + `npm run build`.
 5. Open a T1/T2 PR (`gh pr create`) whose body carries `closes #<issue>` when
    run against a tracked pruning issue, the `Tier:` line from the live tier API,
