@@ -227,20 +227,12 @@ LANE=needs-dev-resume   # or needs-qa — the lane the operator's resolution nam
 # without closing the operator's shell.
 (
 # 1. Clear the PR's stranding labels (PR FLAGS, not issue lifecycle state: ready-for-human
-#    on a PR is the pr-gate "surfaced" flag - ADR-0047 D2 scopes state to issues). Name in the URL path — the `-f name=` form
-#    wipes ALL labels. ONLY an HTTP 404 / "Label does not exist" means the label
-#    is already absent and is tolerated. Any other failure (auth, rate limit,
-#    network) prints the error and aborts BEFORE the issue is relabelled.
-for L in ready-for-human conflict-fix-attempted; do
-  if ! ERR=$(gh api -X DELETE "repos/$RREPO/issues/$PR/labels/$L" --silent 2>&1); then
-    if grep -qE 'HTTP 404|Label does not exist' <<<"$ERR"; then
-      echo "note: '$L' was not on PR #$PR (HTTP 404 tolerated)"
-    else
-      echo "ERROR: could not remove '$L' from PR #$PR: $ERR" >&2
-      exit 1
-    fi
-  fi
-done
+#    on a PR is the pr-gate "surfaced" flag - ADR-0047 D2 scopes state to issues).
+#    `gh pr edit` is the PR-label route the state-label hook exempts (it denies a
+#    REST DELETE on issues/<n>/labels/<state>: it cannot tell a PR from an issue).
+#    An absent label exits 0, so any failure aborts BEFORE the issue relabel.
+gh pr edit "$PR" --repo "$RREPO" --remove-label ready-for-human --remove-label conflict-fix-attempted \
+  || { echo "ERROR: could not remove the stranding labels from PR #$PR; issue #$ISSUE NOT relabelled" >&2; exit 1; }
 # 2. Re-read the PR's labels. Refuse to relabel the issue while either
 #    stranding label is still present, because the PR would stay stranded.
 LEFT=$(gh api "repos/$RREPO/issues/$PR/labels" \
@@ -260,9 +252,6 @@ RESP=$(curl -s -X POST http://localhost:4000/api/autopilot/board/relabel \
 echo "issue #$ISSUE relabelled to $LANE"
 )
 ```
-
-The stalled-PR option labels in §4 are unchanged. Only the resolution side effect
-above is new.
 
 **QA-Override recipe (issue #4738).** Run from `~/hydra`. Paste the operator's
 reason VERBATIM between the quoted-heredoc markers. The quoted delimiter means
@@ -417,7 +406,8 @@ Per row:
    bucket's canonical options from §4. One row = one question = one call; never
    batch two rows into one call, and never pre-stage the next row's question.
 5. Execute the pick — Orchestrator rows' state moves ride the board routes
-   (`POST /api/autopilot/board/{promote|relabel|close|reopen}`, ADR-0047); Target
+   (`POST /api/autopilot/board/{promote|relabel|close|reopen}`, ADR-0047; JSON
+   `{"issue":N}`, plus `"confirm":true` for promote, `"label"` for relabel); Target
    rows and flag labels use `gh` with **the row's own repo** (`--repo <TREPO>`). Orchestrator verbs: "Make it agent-ready" = promote,
    "Needs more info" = relabel `needs-info`, "Won't do" = close. Explore that
    repo's checkout (`~/hydra` vs `$TARGET_APP_DIR`) before asking obvious questions.
