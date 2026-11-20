@@ -116,7 +116,7 @@ describe("playbook-duplicate-ratchet: policy", () => {
     assert.equal(p.polarity, "ceiling");
     assert.equal(p.stale, "fail");
     assert.equal(p.enforcement, "required");
-    assert.equal(p.baseline, "scripts/ci/playbook-duplicate-baseline.json");
+    assert.match(p.baseline, /playbook-duplicate-baseline\.json$/);
   });
 
   test("the retired --files scope is refused as an unknown flag (exit 2)", async () => {

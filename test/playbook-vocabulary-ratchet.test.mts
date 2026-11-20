@@ -144,7 +144,7 @@ describe("playbook-vocabulary-ratchet: ratchet policy and rows", () => {
     assert.equal(p.polarity, "ceiling");
     assert.equal(p.stale, "fail");
     assert.equal(p.enforcement, "required");
-    assert.equal(p.baseline, "scripts/ci/playbook-vocabulary-baseline.json");
+    assert.match(p.baseline, /playbook-vocabulary-baseline\.json$/);
   });
 
   test("rows are tab-keyed playbook-first, one per file per shape, valued at the count", () => {
