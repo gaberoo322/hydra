@@ -1521,11 +1521,15 @@ describe("spawned CLIs (production adapter, fake gh on PATH)", () => {
           `echo "$*" >> ${log}`,
           'case "$*" in',
           "  *required_status_checks*) echo '{\"contexts\":[\"test\"]}' ;;",
+          // The seam's one live PR read (fetchQaLive, #5659): number + state + rollup + comments in one call.
+          `  *statusCheckRollup*) echo '{"number":77,"state":"OPEN","isDraft":false,"mergeStateStatus":"CLEAN","headRefOid":"${HEAD}","statusCheckRollup":[{"__typename":"CheckRun","name":"test","status":"COMPLETED","conclusion":"SUCCESS"}],"comments":[{"body":"QA-Verdict: PASS pr=77 round=1 sha=${HEAD.slice(0, 12)} blockers=0 max_severity=none","createdAt":"2026-06-01T00:00:00Z"}],"reviews":[]}' ;;`,
           "  *comments,reviews*) echo '{\"comments\":[],\"reviews\":[]}' ;;",
           `  *headRefOid*) echo '{"headRefOid":"${HEAD}","mergeStateStatus":"CLEAN"}' ;;`,
           // The in-process seam re-reads the issue: needs-qa until the label edit lands, then qa-passed.
           `  *"issue view"*) if [ -f ${dir}/edited ]; then L=qa-passed; else L=needs-qa; fi; printf '{"number":5269,"title":"t","url":"https://github.com/gaberoo322/hydra/issues/5269","createdAt":"2026-01-01T00:00:00Z","labels":[{"name":"%s"}],"body":"b","state":"OPEN"}' "$L" ;;`,
           `  *"issue edit"*) touch ${dir}/edited; exit 0 ;;`,
+          // The seam's state-entry read (#5659): the paginated+slurped issue events, one old needs-qa label.
+          `  *issues/5269/events*) echo '[[{"event":"labeled","label":{"name":"needs-qa"},"created_at":"2026-01-02T00:00:00Z"}]]' ;;`,
           '  *"pr comment"*) exit 0 ;;',
           '  *) echo "fake-gh: unmatched: $*" >&2; exit 1 ;;',
           "esac",
