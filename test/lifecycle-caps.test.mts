@@ -18,6 +18,7 @@ import {
   evaluateCaps,
   latestResetMs,
   parseCapResetTs,
+  resetsCapsOnExit,
   resolveCapLimits,
   timelineArmCounts,
   type CapJournalEntry,
@@ -706,5 +707,14 @@ describe("caps as data (#5421)", () => {
     const res = (await advance({ issue: 42, to: "needs-dev-resume", evidence: { pr: "5" } }, w.deps)) as any;
     assert.equal(res.ok, false);
     assert.equal(res.code, "parked:qa-fail-rounds");
+  });
+});
+
+describe("resetsCapsOnExit (#5661 INV-1)", () => {
+  test("true only for the two Cap Arm human-hold states", () => {
+    for (const s of ["parked", "ready-for-human"]) assert.equal(resetsCapsOnExit(s), true, s);
+    for (const s of ["hitl-grill", "blocked", "needs-triage", "ready-for-agent", "in-progress", "closed", ""]) {
+      assert.equal(resetsCapsOnExit(s), false, s);
+    }
   });
 });

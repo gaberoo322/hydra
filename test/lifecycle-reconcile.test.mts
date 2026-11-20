@@ -466,6 +466,19 @@ describe("external un-park posts one Hydra-Cap-Reset (INV-7)", () => {
     assert.equal((await runReconcile(g.w.deps)).capResetsPosted, 0);
   });
 
+  test("an external hitl-grill exit alone journals no marker (#5661 INV-6)", async () => {
+    const g = world();
+    g.add(84, ["ready-for-agent"]);
+    g.journal(84).push(je({ kind: "transition", to: "hitl-grill", reason: "x" }));
+    g.w.timelines.set(84, [
+      { event: "labeled", label: "hitl-grill", tsMs: T1 },
+      { event: "unlabeled", label: "hitl-grill", tsMs: T2 },
+    ]);
+    const report = await runReconcile(g.w.deps);
+    assert.equal(report.capResetsPosted, 0);
+    assert.equal(g.w.posted.filter((p) => p.body.startsWith("Hydra-Cap-Reset:")).length, 0);
+  });
+
   test("an existing marker at or after the event suppresses a second one; a later re-park gets its own", async () => {
     const { w } = setup();
     w.comments.set(80, [`Hydra-Cap-Reset: by=op ts=${new Date(T2).toISOString()}`]);

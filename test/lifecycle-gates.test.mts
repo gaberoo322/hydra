@@ -611,6 +611,14 @@ describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, IN
       assert.equal(cPosted.length, 0);
     });
 
+    test("leaving hitl-grill posts no marker (#5661 INV-5)", async () => {
+      const o = operatorHarness(["hitl-grill"], "enforce");
+      const posted = recording(o);
+      const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+      assert.equal(res.ok, true);
+      assert.equal(posted.length, 0);
+    });
+
     test("a failed post leaves the transition ok and journals capReset=failed:<code>", async () => {
       const o = operatorHarness(["parked"], "enforce");
       recording(o, "gh-failed");
