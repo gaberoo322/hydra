@@ -326,7 +326,7 @@
       "prompt": 2
     },
     "test/hydra-qa-needs-qa-clear.test.mts": {
-      "code": 5,
+      "code": 2,
       "prompt": 2
     },
     "test/hydra-qa-prompt-verdict.test.mts": {

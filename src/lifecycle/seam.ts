@@ -41,6 +41,7 @@ import {
   latestResetMs,
   resolveCapLimits,
   type CapAttempt,
+  type CapCount,
   type CapEvaluation,
   type TimelineLabelEvent,
 } from "./caps.ts";
@@ -183,7 +184,11 @@ interface CapGuardAttempt {
 }
 
 type CapGuard =
-  | { parked: { code: `parked:${string}`; written: boolean }; stamp?: undefined; shadowOver?: undefined }
+  | {
+      parked: { code: `parked:${string}`; written: boolean; counts: readonly CapCount[] };
+      stamp?: undefined;
+      shadowOver?: undefined;
+    }
   | { parked: null; stamp: CapStamp; shadowOver: CapOver | null };
 
 /**
@@ -214,7 +219,9 @@ export async function guardCaps(a: CapGuardAttempt, deps: SeamDeps, mode: Lifecy
       },
       deps,
     );
-    return { parked: { code: `parked:${over.arm}`, written: park.written } };
+    return {
+      parked: { code: `parked:${over.arm}`, written: park.written, counts: check.evaluation.counts },
+    };
   }
   return { parked: null, stamp, shadowOver: over };
 }
@@ -268,7 +275,15 @@ export type AdvanceResult =
       /** Set when the issue already sat in `to`: nothing was written (#5584 INV-1). */
       noop?: true;
     }
-  | { ok: false; issue: number; code: string; mode: LifecycleMode | null; written: boolean };
+  | {
+      ok: false;
+      issue: number;
+      code: string;
+      mode: LifecycleMode | null;
+      written: boolean;
+      /** A `parked:<arm>` refusal carries the arm counts `parkForCap` rendered, so every caller sees why. */
+      counts?: readonly CapCount[];
+    };
 
 export function entry(
   deps: SeamDeps,
@@ -388,7 +403,7 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
     if (edge !== null) {
       const guard = await guardCaps({ issue, from, attempt: edge.attempt, pr: edge.pr, actor: input.actor }, deps, mode);
       if (guard.parked !== null) {
-        return { ok: false, issue, code: guard.parked.code, mode, written: guard.parked.written };
+        return { ok: false, issue, code: guard.parked.code, mode, written: guard.parked.written, counts: guard.parked.counts };
       }
       stamp = guard.stamp;
       shadowOver = guard.shadowOver;

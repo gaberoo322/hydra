@@ -127,6 +127,15 @@ export function classifyQaPassedExit(live: QaLivePr): QaExitTarget | "none" {
   return "none";
 }
 
+/**
+ * The ONE OPEN/CLOSED -> bounce-exit mapping for a QA FAIL or defer: `needs-dev-resume`
+ * while the PR is OPEN, `ready-for-agent` once it is CLOSED, null for a MERGED (or
+ * unreadable) PR, which reconcile owns.
+ */
+export function qaBounceTargetOf(state: string): "needs-dev-resume" | "ready-for-agent" | null {
+  return state === "OPEN" ? "needs-dev-resume" : state === "CLOSED" ? "ready-for-agent" : null;
+}
+
 export type QaVerdictTarget = "qa-passed" | "needs-dev-resume" | "ready-for-agent";
 
 /**
@@ -164,9 +173,8 @@ export function classifyQaVerdictTarget(
     return live.state === "OPEN" ? { ok: true, target: "qa-passed" } : { ok: false, code: "pr-not-open" };
   }
   if (!isFailVerdict(latest.verdict)) return { ok: false, code: "qa-verdict-missing" };
-  if (live.state === "OPEN") return { ok: true, target: "needs-dev-resume" };
-  if (live.state === "CLOSED") return { ok: true, target: "ready-for-agent" };
-  return { ok: false, code: "pr-not-open" };
+  const bounce = qaBounceTargetOf(live.state);
+  return bounce !== null ? { ok: true, target: bounce } : { ok: false, code: "pr-not-open" };
 }
 
 /** The held dispatch claim for an issue; `held: null` = no claim is open. */
@@ -334,8 +342,7 @@ export function gateQaVerdict(input: GateInput, records: GateRecords): GateResul
   // freshness and cap checks, so no other caller may use it.
   if (input.evidence.defer === "1") {
     if (input.actor !== QA_DEFER_ACTOR) return fail("defer-actor-not-allowed");
-    const deferTarget =
-      live.value.state === "OPEN" ? "needs-dev-resume" : live.value.state === "CLOSED" ? "ready-for-agent" : null;
+    const deferTarget = qaBounceTargetOf(live.value.state);
     if (deferTarget === null) return fail("pr-merged");
     return deferTarget === input.to ? pass() : fail("qa-verdict-mismatch");
   }
