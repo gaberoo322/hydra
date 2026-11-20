@@ -117,6 +117,18 @@ export function classRole(cls: string): DispatchRole {
 
 export const CAP_RESET_PREFIX = "Hydra-Cap-Reset:";
 
+/**
+ * The two human-hold states a Cap Arm can write an item into (`parked`, `ready-for-human`).
+ * An operator exit from either restarts every Cap Arm (ADR-0047 D6). Callers ask
+ * `resetsCapsOnExit`, never a literal list.
+ */
+export const CAP_RESET_EXIT_STATES = ["parked", "ready-for-human"] as const;
+
+/** True when leaving `state` restarts the Cap Arms (one predicate for the board route and reconcile). */
+export function resetsCapsOnExit(state: string): boolean {
+  return (CAP_RESET_EXIT_STATES as readonly string[]).includes(state);
+}
+
 const RESET_LINE_RE = /^Hydra-Cap-Reset:[ \t]+by=(\S+)[ \t]+ts=(\S+)[ \t]*\r?$/;
 
 /** The latest VALID reset ts (epoch ms) in one body; a malformed marker line is ignored. */

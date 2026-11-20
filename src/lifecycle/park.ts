@@ -158,7 +158,8 @@ export type CapResetResult = { ok: true } | { ok: false; code: string };
 
 /**
  * Post `Hydra-Cap-Reset: by=<by> ts=<iso>` on the ISSUE, the only surface the
- * marker is ever written to (ADR-0047 D6). A marker already on a PR is still
+ * marker is ever written to (ADR-0047 D6). The operator exit from `parked` or `ready-for-human`
+ * posts it (`resetsCapsOnExit`, caps.ts). A marker already on a PR is still
  * honoured by its timestamp when read, but nothing here writes one there.
  */
 export async function postCapReset(issue: number, input: CapResetInput, deps: SeamDeps): Promise<CapResetResult> {

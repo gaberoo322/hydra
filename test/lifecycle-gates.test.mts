@@ -595,12 +595,50 @@ describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, IN
       assert.equal(o.h.journal.at(-1)!.evidence.capReset, "posted");
     });
 
+    test("leaving ready-for-human posts exactly one marker; leaving to closed posts none (#5661)", async () => {
+      const o = operatorHarness(["ready-for-human"], "enforce");
+      const posted = recording(o);
+      const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+      assert.equal(res.ok, true);
+      assert.equal(posted.length, 1);
+      assert.match(posted[0].body, /^Hydra-Cap-Reset: by=board:promote ts=\S+$/);
+      assert.equal(o.h.journal.at(-1)!.evidence.capReset, "posted");
+
+      const c = operatorHarness(["ready-for-human"], "enforce");
+      const cPosted = recording(c);
+      const closedRes = await operatorAdvance({ issue: 10, to: "closed", actor: "board:close" }, c.h.deps);
+      assert.equal(closedRes.ok, true);
+      assert.equal(cPosted.length, 0);
+    });
+
+    test("leaving hitl-grill posts no marker (#5661 INV-5)", async () => {
+      const o = operatorHarness(["hitl-grill"], "enforce");
+      const posted = recording(o);
+      const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+      assert.equal(res.ok, true);
+      assert.equal(posted.length, 0);
+    });
+
     test("a failed post leaves the transition ok and journals capReset=failed:<code>", async () => {
       const o = operatorHarness(["parked"], "enforce");
       recording(o, "gh-failed");
       const res = await operatorAdvance({ issue: 10, to: "needs-triage", actor: "board:relabel" }, o.h.deps);
       assert.equal(res.ok, true);
       assert.deepEqual(o.h.state.labels, ["needs-triage"]);
+      assert.equal(o.h.journal.at(-1)!.kind, "transition");
+      assert.equal(o.h.journal.at(-1)!.evidence.capReset, "failed:comment-failed:gh-failed");
+    });
+
+    test("a failed post on a ready-for-human exit leaves the transition ok and journals capReset=failed:<code> (#5661 INV-2)", async () => {
+      const o = operatorHarness(["ready-for-human"], "enforce");
+      const order: string[] = [];
+      const origEdit = o.h.deps.edit;
+      o.h.deps.edit = async (...a: Parameters<typeof origEdit>) => { order.push("edit"); return origEdit(...a); };
+      o.h.deps.comment = async () => { order.push("comment"); return { ok: false, code: "gh-failed" as never, stderr: "x" }; };
+      const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+      assert.equal(res.ok, true);
+      assert.deepEqual(order, ["comment", "edit"]);
+      assert.deepEqual(o.h.state.labels, ["ready-for-agent"]);
       assert.equal(o.h.journal.at(-1)!.kind, "transition");
       assert.equal(o.h.journal.at(-1)!.evidence.capReset, "failed:comment-failed:gh-failed");
     });

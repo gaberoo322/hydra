@@ -441,6 +441,69 @@ describe("external un-park posts one Hydra-Cap-Reset (INV-7)", () => {
     assert.equal(w.posted.filter((p) => p.body.startsWith("Hydra-Cap-Reset:")).length, 1);
   });
 
+  test("an external ready-for-human exit posts the marker once; a hitl-grill exit posts none (#5661 INV-4, INV-5)", async () => {
+    const ctx = world();
+    ctx.add(81, ["ready-for-agent"]);
+    ctx.journal(81).push(je({ kind: "transition", to: "ready-for-human", reason: "deep-qa" }));
+    ctx.w.timelines.set(81, [
+      { event: "labeled", label: "ready-for-human", tsMs: T1 },
+      { event: "unlabeled", label: "ready-for-human", tsMs: T2 },
+      { event: "labeled", label: "ready-for-agent", tsMs: T2 },
+    ]);
+    const first = await runReconcile(ctx.w.deps);
+    assert.equal(first.capResetsPosted, 1);
+    assert.equal(ctx.w.posted.filter((p) => p.number === 81 && p.body.startsWith("Hydra-Cap-Reset:")).length, 1);
+    assert.equal((await runReconcile(ctx.w.deps)).capResetsPosted, 0);
+
+    const g = world();
+    g.add(82, ["ready-for-agent"]);
+    g.journal(82).push(je({ kind: "transition", to: "hitl-grill", reason: "x" }));
+    g.w.timelines.set(82, [
+      { event: "labeled", label: "hitl-grill", tsMs: T1 },
+      { event: "unlabeled", label: "hitl-grill", tsMs: T2 },
+      { event: "labeled", label: "ready-for-agent", tsMs: T2 },
+    ]);
+    assert.equal((await runReconcile(g.w.deps)).capResetsPosted, 0);
+  });
+
+  test("the latest human-hold exit wins: parked -> ready-for-human -> ready-for-agent posts one marker at the later ts (#5661 INV-4)", async () => {
+    const T3 = T2 + 60 * 60_000;
+    const { w, add, journal } = world();
+    add(83, ["ready-for-agent"]);
+    journal(83).push(je({ kind: "transition", to: "parked", reason: "cap:qa-fail-rounds" }));
+    w.timelines.set(83, [
+      { event: "labeled", label: "parked", tsMs: T1 },
+      { event: "unlabeled", label: "parked", tsMs: T2 },
+      { event: "labeled", label: "ready-for-human", tsMs: T2 },
+      { event: "unlabeled", label: "ready-for-human", tsMs: T3 },
+      { event: "labeled", label: "ready-for-agent", tsMs: T3 },
+    ]);
+    const report = await runReconcile(w.deps);
+    assert.equal(report.capResetsPosted, 1);
+    const markers = w.posted.filter((p) => p.number === 83 && p.body.startsWith("Hydra-Cap-Reset:"));
+    assert.deepEqual(markers.map((m) => m.body), [`Hydra-Cap-Reset: by=external ts=${new Date(T3).toISOString()}`]);
+  });
+
+  test("an external close of a ready-for-human issue journals no marker (#5661 INV-4)", async () => {
+    const { w, add, journal } = world();
+    add(85, ["ready-for-human"], { state: "CLOSED" });
+    journal(85).push(je({ kind: "transition", to: "ready-for-human", reason: "deep-qa" }));
+    w.closedRows = [85];
+    const report = await runReconcile(w.deps);
+    assert.equal(report.capResetsPosted, 0);
+    assert.equal(w.posted.filter((p) => p.body.startsWith("Hydra-Cap-Reset:")).length, 0);
+    // Sibling shape: the same hold left externally to ready-for-agent still posts one.
+    const open = world();
+    open.add(86, ["ready-for-agent"]);
+    open.journal(86).push(je({ kind: "transition", to: "ready-for-human", reason: "deep-qa" }));
+    open.w.timelines.set(86, [
+      { event: "labeled", label: "ready-for-human", tsMs: T1 },
+      { event: "unlabeled", label: "ready-for-human", tsMs: T2 },
+      { event: "labeled", label: "ready-for-agent", tsMs: T2 },
+    ]);
+    assert.equal((await runReconcile(open.w.deps)).capResetsPosted, 1);
+  });
+
   test("an existing marker at or after the event suppresses a second one; a later re-park gets its own", async () => {
     const { w } = setup();
     w.comments.set(80, [`Hydra-Cap-Reset: by=op ts=${new Date(T2).toISOString()}`]);
