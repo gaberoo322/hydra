@@ -21,14 +21,9 @@ const {
   parseAvoidTerms,
   findHits,
   countByShape,
-  compareAgainstBaseline,
-  buildBaseline,
-  mergeBaselineForShapes,
-  parseShapeArg,
-  resolveShapeFilter,
-  formatReport,
+  measureRows,
+  vocabularyRatchet,
   scanRepo,
-  loadBaseline,
 } = await import("../scripts/ci/playbook-vocabulary-ratchet.ts");
 const { REPO_ROOT } = await import("../scripts/ci/seam-check-lib.ts");
 
@@ -135,60 +130,46 @@ describe("playbook-vocabulary-ratchet: the Avoid list comes from CONTEXT.md", ()
   });
 });
 
-describe("playbook-vocabulary-ratchet: shrink-only per-file baseline", () => {
+describe("playbook-vocabulary-ratchet: ratchet policy and rows", () => {
   const found = { [PB]: findHits(PB, "ok\nIt currently skips.\nSee src/a.ts:9 — not yet done.", AVOID) };
 
   test("counts are per shape", () => {
     assert.deepEqual(countByShape(found[PB]), { status: 2, "line-cite": 1 });
   });
 
-  test("counts equal to the baseline pass", () => {
-    const cmp = compareAgainstBaseline(found, { note: "", files: { [PB]: { status: 2, "line-cite": 1 } } });
-    assert.deepEqual(cmp, { exceeded: [], stale: [] });
-    assert.equal(formatReport(cmp), "");
+  test("one required counted ceiling ratchet, stale rows fail, on its own baseline", () => {
+    const p = vocabularyRatchet.policy;
+    assert.equal(p.id, "playbook-vocabulary-ratchet");
+    assert.equal(p.shape, "counted");
+    assert.equal(p.polarity, "ceiling");
+    assert.equal(p.stale, "fail");
+    assert.equal(p.enforcement, "required");
+    assert.match(p.baseline, /playbook-vocabulary-baseline\.json$/);
   });
 
-  test("a count above its baseline fails and the report names playbook, line and phrase", () => {
-    const cmp = compareAgainstBaseline(found, { note: "", files: { [PB]: { status: 1, "line-cite": 1 } } });
-    assert.equal(cmp.exceeded.length, 1);
-    assert.deepEqual(
-      { file: cmp.exceeded[0].file, shape: cmp.exceeded[0].shape, count: cmp.exceeded[0].count, baseline: cmp.exceeded[0].baseline },
-      { file: PB, shape: "status", count: 2, baseline: 1 },
-    );
-    const report = formatReport(cmp);
-    assert.ok(report.includes(`${PB}:2  status  "currently"`), report);
-    assert.ok(report.includes(`${PB}:3  status  "not yet"`), report);
-    assert.ok(!report.includes("line-cite"), report);
-    assert.ok(report.includes(STANDARD_REL));
-    assert.match(report, /Historical:/);
-    assert.match(report, /Do not raise the baseline/);
+  test("rows are tab-keyed playbook-first, one per file per shape, valued at the count", () => {
+    const rows = measureRows();
+    const keys = Object.keys(rows);
+    assert.ok(keys.length > 0);
+    for (const k of keys) {
+      const [file, shape, ...rest] = k.split("\t");
+      assert.equal(rest.length, 0, k);
+      assert.match(file, /^docs\/operator-playbooks\/.+\.md$/);
+      assert.ok((SHAPES as readonly string[]).includes(shape), k);
+      assert.ok(rows[k] >= 1);
+    }
   });
 
-  test("a file absent from the baseline is capped at zero", () => {
-    const cmp = compareAgainstBaseline(found, { note: "", files: {} });
-    assert.deepEqual(cmp.exceeded.map((d: { shape: string }) => d.shape), ["status", "line-cite"]);
+  test("the remedy the module prints names the standard, Historical: and the per-shape fixes", () => {
+    const help = (vocabularyRatchet.policy.help ?? []).join("\n");
+    assert.ok(help.includes(STANDARD_REL));
+    assert.match(help, /Historical:/);
+    assert.match(help, /symbol-cite/);
+    assert.match(help, /invariant-cite/);
   });
 
-  test("a count below its baseline is stale until the baseline is lowered", () => {
-    const cmp = compareAgainstBaseline(found, {
-      note: "",
-      files: { [PB]: { status: 5, "line-cite": 1 }, "docs/operator-playbooks/gone.md": { target: 2 } },
-    });
-    assert.deepEqual(cmp.exceeded, []);
-    assert.deepEqual(
-      cmp.stale.map((d: { file: string; shape: string; count: number; baseline: number }) => `${d.file} ${d.shape} ${d.count}<${d.baseline}`),
-      ["docs/operator-playbooks/gone.md target 0<2", `${PB} status 2<5`],
-    );
-    const report = formatReport(cmp);
-    assert.match(report, /lower the baseline/);
-    assert.match(report, /by hand/);
-    assert.ok(!report.includes("--write-baseline"));
-  });
-
-  test("buildBaseline is sorted, per file, and omits clean files and zero counts", () => {
-    const baseline = buildBaseline({ "b.md": found[PB], "a.md": [] });
-    assert.deepEqual(baseline.files, { "b.md": { status: 2, "line-cite": 1 } });
-    assert.doesNotMatch(baseline.note, /\d{4}-\d{2}-\d{2}/);
+  test("the retired --shape scope is refused as an unknown flag (exit 2)", async () => {
+    assert.equal(await vocabularyRatchet.main(["--shape", "status"]), 2);
   });
 });
 
@@ -261,41 +242,6 @@ describe("playbook-vocabulary-ratchet: issue-cite, back-compat and shell-lines s
     assert.deepEqual(SHAPES.slice(0, 4), ["status", "line-cite", "target", "avoid-term"]);
     assert.deepEqual(SHAPES.slice(4), ["issue-cite", "back-compat", "shell-lines", "symbol-cite", "invariant-cite", "process-meta"]);
   });
-
-  test("a shape count above its baseline fails like the original shapes", () => {
-    const found = { [PB]: findHits(PB, "see #1945\nsee #1946", AVOID) };
-    const cmp = compareAgainstBaseline(found, { note: "", files: { [PB]: { "issue-cite": 1 } } });
-    assert.deepEqual(cmp.exceeded.map((d: { shape: string }) => d.shape), ["issue-cite"]);
-  });
-
-  test("--shape re-seeds only the named shapes and leaves every other row and the note", () => {
-    const found = { "a.md": findHits(PB, "see #1945\nIt currently runs.", AVOID), "c.md": findHits(PB, "see #1946", AVOID) };
-    const existing = { note: "keep me", files: { "a.md": { status: 9, "issue-cite": 7 }, "b.md": { "issue-cite": 2 } } };
-    assert.deepEqual(mergeBaselineForShapes(existing, found, ["issue-cite"]), {
-      note: "keep me",
-      files: { "a.md": { status: 9, "issue-cite": 1 }, "c.md": { "issue-cite": 1 } },
-    });
-  });
-
-  test("parseShapeArg accepts known shapes and rejects an unknown one", () => {
-    assert.deepEqual(parseShapeArg("issue-cite, shell-lines"), ["issue-cite", "shell-lines"]);
-    assert.throws(() => parseShapeArg("bogus"), /unknown shape "bogus"/);
-  });
-
-  test("an empty or missing --shape value, or --shape without --write-baseline, throws invalid-argument", () => {
-    const code = { code: "invalid-argument" };
-    assert.throws(() => parseShapeArg(""), code);
-    assert.throws(() => resolveShapeFilter(["--write-baseline", "--shape"]), code);
-    assert.throws(() => resolveShapeFilter(["--write-baseline", "--shape", "--other"]), code);
-    assert.throws(() => resolveShapeFilter(["--write-baseline", "--shape", ""]), code);
-    assert.throws(() => resolveShapeFilter(["--shape", "issue-cite"]), code);
-  });
-
-  test("resolveShapeFilter keeps the full rewrite and the valid filter working", () => {
-    assert.equal(resolveShapeFilter(["--write-baseline"]), undefined);
-    assert.equal(resolveShapeFilter([]), undefined);
-    assert.deepEqual(resolveShapeFilter(["--write-baseline", "--shape", "issue-cite"]), ["issue-cite"]);
-  });
 });
 
 describe("playbook-vocabulary-ratchet: the symbol-cite shape", () => {
@@ -333,12 +279,6 @@ describe("playbook-vocabulary-ratchet: the symbol-cite shape", () => {
     assert.deepEqual(sym(["```text", "EMIT_CAP childLabels() .a.b", "```"].join("\n")), []);
     assert.deepEqual(sym("Historical: EMIT_CAP was here."), []);
   });
-
-  test("a symbol-cite overrun adds the shape-specific fix line", () => {
-    const found = { [PB]: findHits(PB, "EMIT_CAP", AVOID) };
-    const report = formatReport(compareAgainstBaseline(found, { note: "", files: {} }));
-    assert.match(report, /symbol-cite fix: attribute the symbol/);
-  });
 });
 
 describe("playbook-vocabulary-ratchet: the invariant-cite shape", () => {
@@ -361,11 +301,6 @@ describe("playbook-vocabulary-ratchet: the invariant-cite shape", () => {
   test("fenced blocks and a Historical: line are skipped", () => {
     assert.deepEqual(inv(["```text", "INV-009", "```"].join("\n")), []);
     assert.deepEqual(inv("Historical: INV-009 was here."), []);
-  });
-
-  test("an overrun adds the shape-specific fix line", () => {
-    const found = { [PB]: findHits(PB, "INV-009", AVOID) };
-    assert.match(formatReport(compareAgainstBaseline(found, { note: "", files: {} })), /invariant-cite fix: name the invariant's home/);
   });
 });
 
@@ -401,8 +336,10 @@ describe("playbook-vocabulary-ratchet: the process-meta shape", () => {
 
 describe("playbook-vocabulary-ratchet: the real playbooks", () => {
   test("no playbook or fragment is above or below its baselined count", async () => {
-    const report = formatReport(compareAgainstBaseline(scanRepo(), await loadBaseline()));
-    assert.equal(report, "", `\n${report}\n`);
+    const v = await vocabularyRatchet.verdict();
+    assert.equal(v.ok, true, v.advice);
+    assert.equal(v.added.length, 0);
+    assert.equal(v.stale.length, 0);
   });
 
   test("target-seam-preamble.md carries zero symbol-cite hits (cleaned in this PR; INV-4 amendment)", () => {
