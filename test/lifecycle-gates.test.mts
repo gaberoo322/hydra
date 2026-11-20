@@ -120,12 +120,12 @@ describe("mode resolution (INV-12)", () => {
     assert.deepEqual(resolveLifecycleMode({ "lifecycle-seam": "enforce" }), { mode: "enforce", reason: null });
   });
 
-  test("loader maps missing file and bad JSON to shadow, and the committed file says shadow", async () => {
+  test("loader maps missing file and bad JSON to shadow, and the committed file says enforce", async () => {
     const enoent = async () => { throw Object.assign(new Error("nope"), { code: "ENOENT" }); };
     assert.deepEqual(await loadLifecycleMode("/x", { readFile: enoent }), { mode: "shadow", reason: "config-missing" });
     assert.deepEqual(await loadLifecycleMode("/x", { readFile: async () => "{oops" }), { mode: "shadow", reason: "value-malformed" });
     const real = await loadLifecycleMode(process.cwd());
-    assert.deepEqual(real, { mode: "shadow", reason: null });
+    assert.deepEqual(real, { mode: "enforce", reason: null });
   });
 });
 
