@@ -134,6 +134,15 @@ describe("timestamped qa-fail-rounds count (#5437)", () => {
     assert.equal(countReviewedFailRoundsAfterReset([...rounds3, marker, timed(4, 5)], 7, 0), 1);
   });
 
+  test("a count taken after a ready-for-human exit marker starts at zero (#5661 INV-6)", () => {
+    for (const by of ["board:promote", "external"]) {
+      const marker: TimedBody = { body: `Hydra-Cap-Reset: by=${by} ts=${new Date(at(4)).toISOString()}`, tsMs: at(4) };
+      const issueResetMs = latestResetMs([marker.body]);
+      assert.equal(countReviewedFailRoundsAfterReset(rounds3, 7, issueResetMs), 0, by);
+      assert.equal(countReviewedFailRoundsAfterReset([...rounds3, timed(4, 5)], 7, issueResetMs), 1, by);
+    }
+  });
+
   test("a reset older than the FAIL rounds does not hide them", () => {
     assert.equal(countReviewedFailRoundsAfterReset(rounds3, 7, at(0)), 3);
   });

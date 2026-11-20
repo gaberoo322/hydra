@@ -359,11 +359,11 @@ export async function runReconcile(deps: ReconcileDeps, opts: ReconcileOptions =
           report.errors.push(`timeline-fetch-failed:#${issue.number}`);
         } else {
           const moves = externalMoves(tl.value, known, current);
-          let parkExitMs: number | null = null;
-          for (const m of moves) if (resetsCapsOnExit(m.from) && m.tsMs > 0) parkExitMs = m.tsMs;
+          let holdExitMs: number | null = null;
+          for (const m of moves) if (resetsCapsOnExit(m.from) && m.tsMs > 0) holdExitMs = m.tsMs;
           // Marker first: if it cannot be confirmed, append nothing so the diff
           // (journal != GitHub) fires again next tick and the marker is retried.
-          if (parkExitMs !== null && !(await postResetOnce(issue.number, parkExitMs))) return;
+          if (holdExitMs !== null && !(await postResetOnce(issue.number, holdExitMs))) return;
           for (const m of moves) {
             const entry = externalEntry(m.tsMs > 0 ? m.tsMs : now, m.from, m.to, { at: new Date(m.tsMs > 0 ? m.tsMs : now).toISOString() }, "external");
             await append(issue.number, entry);

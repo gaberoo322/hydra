@@ -90,7 +90,7 @@ export async function operatorAdvance(input: OperatorAdvanceInput, deps: SeamDep
   const alreadyThere = (stateLabels as string[]).includes(to);
   const closeReason = normaliseCloseReason(input.closeReason);
   // Leaving Park or ready-for-human (and not closing) restarts every Cap Arm: post the issue-side marker BEFORE the
-  // label write. While `parked` is still set no lane can claim the issue, so the marker is harmless
+  // label write. While the hold label is still set no lane can claim the issue, so the marker is harmless
   // early and there is no window where a claim counts the pre-reset FAIL rounds and re-parks (QA
   // r1 on #5457). The outcome is evidence only; a failed post never changes `ok`.
   let capReset: string | null = null;

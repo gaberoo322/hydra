@@ -629,6 +629,20 @@ describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, IN
       assert.equal(o.h.journal.at(-1)!.evidence.capReset, "failed:comment-failed:gh-failed");
     });
 
+    test("a failed post on a ready-for-human exit leaves the transition ok and journals capReset=failed:<code> (#5661 INV-2)", async () => {
+      const o = operatorHarness(["ready-for-human"], "enforce");
+      const order: string[] = [];
+      const origEdit = o.h.deps.edit;
+      o.h.deps.edit = async (...a: Parameters<typeof origEdit>) => { order.push("edit"); return origEdit(...a); };
+      o.h.deps.comment = async () => { order.push("comment"); return { ok: false, code: "gh-failed" as never, stderr: "x" }; };
+      const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+      assert.equal(res.ok, true);
+      assert.deepEqual(order, ["comment", "edit"]);
+      assert.deepEqual(o.h.state.labels, ["ready-for-agent"]);
+      assert.equal(o.h.journal.at(-1)!.kind, "transition");
+      assert.equal(o.h.journal.at(-1)!.evidence.capReset, "failed:comment-failed:gh-failed");
+    });
+
     test("the marker posts BEFORE the label write, so no claimable window sees the old reset point", async () => {
       const o = operatorHarness(["parked"], "enforce");
       const order: string[] = [];
