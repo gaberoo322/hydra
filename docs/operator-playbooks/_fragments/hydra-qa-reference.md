@@ -2,7 +2,7 @@
 
 This file is the `reference_files:` sidecar of `hydra-qa.md`: it is copied beside `SKILL.md` and read only when a QA pass needs the background below. Nothing here is a step; the steps, the reviewer briefs and the T4 Verifier-Core checklist stay in `hydra-qa.md`. The plumbing is `scripts/qa/{preflight,packet,route,poll}.ts`.
 
-Verification depth, the severity fold, convergent review (class sweep, re-review context, round cap), the verdict literals and the tier table are not described here. Their homes: tier = `GET /api/tier`; depth and reviewer list = preflight `.fanout.mode` / `.fanout.reviewers` (`scripts/qa/preflight.ts`); fold, trailer and round action = the qa-verdict engine (`scripts/ci/qa-verdict.ts`, `src/qa/`, `decideQaRoundAction()`); tier table = `docs/reference.md`.
+Verification depth, the severity fold, convergent review (class sweep, re-review context, round cap), the verdict literals and the tier table are not described here. Their homes: tier = `GET /api/tier`; depth and reviewer list = preflight `.fanout.mode` / `.fanout.reviewers` (`scripts/qa/preflight.ts`); fold, trailer and round action = the qa-verdict engine (`scripts/ci/qa-verdict.ts`, `src/qa/`); tier table = `docs/reference.md`.
 
 ## `deep-qa-gate` — authoritative commit StatusContext vs advisory CheckRun mirror
 
