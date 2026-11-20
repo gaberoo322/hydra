@@ -104,9 +104,9 @@ enforced-by: reviewer
 
 ## Design
 
-Diff-level deep-module checking uses the vendored Fowler smell battery (Middle Man, Shotgun Surgery, Speculative Generality, Duplicated Code and the rest); do not restate its smells as repo rules. Whole-codebase design questions (depth of untouched modules, fan-in hubs, cross-group coupling) belong to `architecture_orch`, not the reviewer.
+Diff-level deep-module checking uses the vendored Fowler smell battery (Middle Man, Shotgun Surgery, Duplicated Code and the rest); do not restate its smells as repo rules. Whole-codebase design questions belong to `architecture_orch`, not the reviewer.
 
-Severity: design findings default to low and become non-blocking follow-ups. The one medium case is STD-DESIGN-NO-REIMPLEMENT where the copy must stay in sync for correctness, meaning drift would make two parts of the system decide the same question differently (a gate, a label predicate, a path rule). Pass-through, a one-adapter seam, Speculative Generality and STD-DESIGN-DEEPEN stay low. Cite a `STD-DESIGN-*` ID or an exact Fowler smell name.
+Design findings default to low, non-blocking follow-ups. The one medium case is STD-DESIGN-NO-REIMPLEMENT where drift would make two parts of the system decide the same question differently (a gate, a label predicate, a path rule). Pass-through, a one-adapter seam, Speculative Generality and STD-DESIGN-DEEPEN stay low. Cite a `STD-DESIGN-*` ID or an exact Fowler smell name.
 
 ### STD-DESIGN-TWO-ADAPTERS
 
@@ -116,7 +116,7 @@ enforced-by: reviewer
 
 ### STD-DESIGN-NO-REIMPLEMENT
 
-Do not hand-copy a rule or predicate an existing module exports; call it.
+Do not hand-copy a rule, predicate, regex, parser or helper another module already has; call it, exporting it from one home when it is private. Sibling scripts, ratchet walkers and test fakes are in scope.
 
 enforced-by: reviewer
 
