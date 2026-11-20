@@ -112,7 +112,6 @@
     "test/risk-critical.test.mts",
     "test/schema-seam-check.test.mts",
     "test/schemas-common.test.mts",
-    "test/seam-check-lib.test.mts",
     "test/sentry-webhook-schema.test.mts",
     "test/silent-catch-lint.test.mts",
     "test/skill-prune-select.test.mts",
