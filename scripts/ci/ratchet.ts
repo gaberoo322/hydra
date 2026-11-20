@@ -62,6 +62,11 @@ export interface RatchetPolicy {
   enforcement: RatchetEnforcement;
   /** Measure the tree. May throw: `verdict` returns the cause as `{ok:false}`. */
   measure(root: string): Promise<RatchetRows>;
+  /**
+   * Per-ratchet fix instructions, printed verbatim (one entry per line) between the
+   * offending-row list and the Baseline-raise paragraph, only when rows are over the ceiling.
+   */
+  help?: readonly string[];
   /** Extra CLI flags the ratchet handles itself; `scope` turns them into a narrowed run. */
   extra?: { flags: readonly string[]; scope(argv: readonly string[]): RatchetScope | undefined };
 }
@@ -189,6 +194,7 @@ function renderAdvice(
     const verb = policy.polarity === "ceiling" ? "over the baseline" : "under the baseline floor";
     lines.push(`[${policy.id}] ${d.added.length} row(s) ${verb} in ${policy.baseline}:`);
     for (const k of d.added) lines.push(`  - ${rowText(k)}`);
+    if (policy.polarity === "ceiling" && policy.help) lines.push("", ...policy.help, "");
     lines.push(
       policy.polarity === "ceiling"
         ? "Fix the code first so the row disappears."

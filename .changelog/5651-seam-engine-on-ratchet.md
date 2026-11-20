@@ -1,0 +1,1 @@
+- refactor: the nine CI Seam checks run on the Ratchet module with set-format baselines; seam-check-lib drops its seam-only engine (#5651)

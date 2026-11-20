@@ -7,7 +7,6 @@
   "fail-loud-catch\tscripts/ci/hydra-emit-shell.ts\tcatch (err) { io.error(` ✗ filing failed: ${errMessage(err)}`); }": 1,
   "fail-loud-catch\tscripts/ci/hydra-knip-source.ts\tcatch (err) { return { ok: false, error: `failed to parse ${path} as JSON: ${err instanceof Error ? err.message : String(err)}`, }; }": 1,
   "fail-loud-catch\tscripts/ci/hydra-target-wire-or-retire-emit.ts\tcatch (err) { return { ok: false, error: `failed to read ledger at ${path}: ${err instanceof Error ? err.message : String(err)}`, }; }": 1,
-  "fail-loud-catch\tscripts/ci/seam-check-lib.ts\tcatch { continue; }": 1,
   "fail-loud-catch\tscripts/ci/stryker-scan.ts\tcatch (err: any) { emit( { status: \"failed\", reason: `could not parse Stryker report: ${err?.message ?? err}`, reportPath, }, cwd, ); return 0; }": 1,
   "fail-loud-catch\tscripts/ci/stryker-scan.ts\tcatch { return \"\"; }": 1,
   "fail-loud-catch\tscripts/ci/wiring-caller-check.ts\tcatch { // A missing root is not fatal — it just contributes no files. return out; }": 1,

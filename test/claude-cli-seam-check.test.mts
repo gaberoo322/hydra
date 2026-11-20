@@ -22,7 +22,7 @@ import { join } from "node:path";
 const { fileViolatesClaudeCliSeam } = await import(
   "../scripts/ci/claude-cli-seam-check.ts"
 );
-const { REPO_ROOT, loadBaseline } = await import("../scripts/ci/seam-check-lib.ts");
+const { REPO_ROOT } = await import("../scripts/ci/seam-check-lib.ts");
 
 describe("claude-cli-seam-check: child_process import grammar", () => {
   test("flags a NEW claude spawn caller outside the family", () => {
@@ -140,14 +140,11 @@ describe("claude-cli-seam-check: the boundary is actually closed (issue #3703)",
     }
   });
 
-  test("the baseline is seeded at ZERO and stays closed", async () => {
-    const baseline = await loadBaseline(
-      join(REPO_ROOT, "scripts/ci/claude-cli-seam-baseline.json"),
-    );
-    assert.deepEqual(
-      baseline.callers,
-      [],
-      "a new Seam is never seeded with its own violations (host-probe precedent)",
-    );
+  test("the ratchet verdict is clean: no added row, no stale row (issue #5651)", async () => {
+    const { claudeCliSeamRatchet } = await import("../scripts/ci/claude-cli-seam-check.ts");
+    const v = await claudeCliSeamRatchet.verdict();
+    assert.deepEqual(v.added, [], "a new claude spawn site must route through src/claude-cli/exec.ts");
+    assert.deepEqual(v.stale, []);
+    assert.equal(v.ok, true, v.advice);
   });
 });

@@ -30,10 +30,13 @@
  * Seeded at ZERO, matching the host-probe precedent — a new Seam is never seeded
  * with its own violations.
  *
- * This is a thin Adapter over the shared baseline-ratchet engine in
+ * This is a thin Adapter over the Ratchet module (`ratchet.ts`, issue #5651) and the shared primitives in
  * `seam-check-lib.ts`, and it runs as one `if: always()` step in the
  * `advisory-checks.yml` fleet, NOT in `ci.yml`. `ci.yml` is exact-match Verifier
  * Core (Tier-4); a sibling workflow keeps this PR Tier-3 and auto-mergeable.
+ *
+ * Baseline provenance (the retired `{callers, note}` envelope's note, issue #5651):
+ * Hand-seeded at ZERO by issue #3703. Claude CLI Adapter closure ratchet: shrink only. Seeded empty — every `claude` CLI child_process spawn lives behind src/claude-cli/exec.ts, matching the host-probe precedent that a new Seam is never seeded with its own violations.
  *
  * Usage:
  *   npx tsx scripts/ci/claude-cli-seam-check.ts
@@ -42,12 +45,13 @@
  * Update flow when intentionally migrating a caller behind the adapter:
  *   1. Remove the `node:child_process` import; route the `claude` spawn through
  *      src/claude-cli/exec.ts (`runClaudeCli` / `defaultClaudeSpawn`).
- *   2. Run with `--write-baseline` to regenerate the baseline file.
+ *   2. Delete the row from `scripts/ci/claude-cli-seam-baseline.json` by hand, or run with
+ *      `--write-baseline`, which only shrinks (growth needs `--allow-grow`).
  *   3. Commit the smaller baseline alongside the migration.
  */
 
-import { join } from "node:path";
-import { REPO_ROOT, isCliEntrypoint, runAsCli } from "./seam-check-lib.ts";
+import { seamMeasure } from "./seam-check-lib.ts";
+import { defineRatchet, runIfCli } from "./ratchet.ts";
 
 /** Any import of `node:child_process` (static `from`, or a `require`/dynamic-import form). */
 const CHILD_PROCESS_PATTERNS = [
@@ -58,8 +62,6 @@ const CHILD_PROCESS_PATTERNS = [
   /import\(\s*['"]node:child_process['"]\s*\)/,
   /import\(\s*['"]child_process['"]\s*\)/,
 ];
-
-const BASELINE_PATH = join(REPO_ROOT, "scripts/ci/claude-cli-seam-baseline.json");
 
 /** The Claude CLI Adapter family prefix. Files inside `src/claude-cli/` ARE the seam (exempt). */
 const CLAUDE_CLI_DIR_PREFIX = "src/claude-cli/";
@@ -104,15 +106,24 @@ export function fileViolatesClaudeCliSeam(relPath: string, body: string): boolea
   return false;
 }
 
-const CONFIG = {
-  name: "claude-cli-seam-check",
-  globs: ["src/*.ts", "src/**/*.ts"],
-  predicate: fileViolatesClaudeCliSeam,
-  baselinePath: BASELINE_PATH,
-  noteSuffix: "Claude CLI Adapter closure ratchet (issue #3703): shrink only.",
-  newViolationsHeadline:
+/**
+ * This Seam's Ratchet: a `set` baseline of caller paths (ceiling, stale rows
+ * fail). `enforcement` records today's wiring — `advisory` (an advisory-checks.yml step).
+ */
+export const claudeCliSeamRatchet = defineRatchet({
+  id: "claude-cli-seam-check",
+  baseline: "scripts/ci/claude-cli-seam-baseline.json",
+  shape: "set",
+  polarity: "ceiling",
+  stale: "fail",
+  enforcement: "advisory",
+  measure: (root) =>
+    seamMeasure(root, {
+      globs: ["src/*.ts", "src/**/*.ts"],
+      predicate: fileViolatesClaudeCliSeam,
+    }),
+  help: [
     "NEW claude-cli-seam violations (Claude CLI Adapter, issue #3703):",
-  newViolationsHelp: [
     "These files import node:child_process directly to shell out to the `claude`",
     "CLI outside the Claude CLI Adapter.",
     "Route the call through the seam: runClaudeCli (src/claude-cli/exec.ts), and",
@@ -120,10 +131,8 @@ const CONFIG = {
     "Do NOT add the file to this baseline — the seam exists so claude spawn sites",
     "have a correct destination instead of an allowlist entry.",
   ],
-};
+});
 
 // Only run as a CLI — importing the module (e.g. from the regression test)
-// must not trigger the git scan or process.exit.
-if (isCliEntrypoint(import.meta.url)) {
-  runAsCli(CONFIG);
-}
+// must not measure or process.exit.
+runIfCli(import.meta.url, claudeCliSeamRatchet);
