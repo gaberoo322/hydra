@@ -208,6 +208,7 @@ export const neverThrowRatchet = defineRatchet({
   baseline: "scripts/ci/never-throw-baseline.json",
   shape: "counted",
   polarity: "ceiling",
+  // INV-4 exception (disclosed in PR #5681 body): hint, not fail. Migration parity (INV-8): the pre-Ratchet script only hinted on stale rows.
   stale: "hint",
   enforcement: "advisory",
   measure,

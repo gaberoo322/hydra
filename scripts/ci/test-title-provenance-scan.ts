@@ -149,6 +149,7 @@ export const provenanceRatchet = defineRatchet({
   baseline: PROVENANCE_BASELINE_REL,
   shape: "counted",
   polarity: "ceiling",
+  // INV-4 exception (disclosed in PR #5681 body): hint, not fail. Migration parity (INV-8): the pre-Ratchet script only hinted on stale rows.
   stale: "hint",
   enforcement: "required",
   measure: () => measureFiles(),
