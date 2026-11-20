@@ -479,6 +479,26 @@ describe("external un-park posts one Hydra-Cap-Reset (INV-7)", () => {
     assert.equal(g.w.posted.filter((p) => p.body.startsWith("Hydra-Cap-Reset:")).length, 0);
   });
 
+  test("an external close of a ready-for-human issue journals no marker (#5661 INV-4)", async () => {
+    const { w, add, journal } = world();
+    add(85, ["ready-for-human"], { state: "CLOSED" });
+    journal(85).push(je({ kind: "transition", to: "ready-for-human", reason: "deep-qa" }));
+    w.closedRows = [85];
+    const report = await runReconcile(w.deps);
+    assert.equal(report.capResetsPosted, 0);
+    assert.equal(w.posted.filter((p) => p.body.startsWith("Hydra-Cap-Reset:")).length, 0);
+    // Sibling shape: the same hold left externally to ready-for-agent still posts one.
+    const open = world();
+    open.add(86, ["ready-for-agent"]);
+    open.journal(86).push(je({ kind: "transition", to: "ready-for-human", reason: "deep-qa" }));
+    open.w.timelines.set(86, [
+      { event: "labeled", label: "ready-for-human", tsMs: T1 },
+      { event: "unlabeled", label: "ready-for-human", tsMs: T2 },
+      { event: "labeled", label: "ready-for-agent", tsMs: T2 },
+    ]);
+    assert.equal((await runReconcile(open.w.deps)).capResetsPosted, 1);
+  });
+
   test("an existing marker at or after the event suppresses a second one; a later re-park gets its own", async () => {
     const { w } = setup();
     w.comments.set(80, [`Hydra-Cap-Reset: by=op ts=${new Date(T2).toISOString()}`]);
