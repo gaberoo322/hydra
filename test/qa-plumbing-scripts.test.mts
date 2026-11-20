@@ -23,10 +23,10 @@ import { runQaVerdictPhase, type QaVerdictFetchers } from "../src/qa/phases.ts";
 import { guardedSeamMove, phaseRunner, type CmdResult, type PlumbingPorts, type SeamMoveInput, type SeamMoveResult } from "../scripts/qa/_lib.ts";
 import { runPreflight, type PreflightOptions } from "../scripts/qa/preflight.ts";
 import { NO_STANDARDS_SENTINEL, runPacket } from "../scripts/qa/packet.ts";
-import { SKIP_REVIEW_REPORT, runRoute, type RouteDeps, type RouteOptions } from "../scripts/qa/route.ts";
+import { SKIP_REVIEW_REPORT, renderParkSummary, runRoute, type RouteDeps, type RouteOptions } from "../scripts/qa/route.ts";
+import type { CapCount } from "../src/lifecycle/caps.ts";
 import { parseChecks, runPoll } from "../scripts/qa/poll.ts";
 import { PreflightResultSchema, type PreflightResult } from "../src/schemas/qa-plumbing-cli.ts";
-import { QA_ESCALATION_LABELS } from "../src/qa/round-action.ts";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const FIXTURE = join(ROOT, "test", "fixtures", "pr-4754-status-check-rollup.json");
@@ -102,6 +102,8 @@ interface HarnessOptions {
   gitHandler?: (argv: string[]) => CmdResult | undefined;
   /** Per-call advance outcome (default: accepted). */
   advanceHandler?: (args: string[]) => Partial<SeamOutcome> | undefined;
+  /** The counts a `parked:<arm>` bounce refusal carries (default: none). */
+  parkCounts?: CapCount[];
   http?: PlumbingPorts["http"];
   fetchers?: QaVerdictFetchers;
   phase?: PlumbingPorts["phase"];
@@ -130,7 +132,7 @@ function harness(o: HarnessOptions = {}): Harness {
       log.push(["lifecycle", "advance", ...args]);
       const out = seamResult({ rc: 0, code: "", ...(o.advanceHandler?.(args) ?? {}) });
       if (out.ok === true) return { ok: true, to: lane.to };
-      return out.code.startsWith("parked:") ? { ok: false, code: out.code, counts: [] } : { ok: false, code: out.code };
+      return out.code.startsWith("parked:") ? { ok: false, code: out.code, counts: o.parkCounts ?? [] } : { ok: false, code: out.code };
     },
     async gh(argv) {
       gh.push(argv);
@@ -650,11 +652,9 @@ interface Canned {
   maxSeverity?: string;
   worst?: string;
   trailer?: string;
-  roundAction?: string;
   deepQa?: { action: string; failNumber?: number } | null;
   passMarker?: string | null;
   failMarker?: string | null;
-  escalationSummary?: string | null;
   foldThrows?: boolean;
   trailerThrows?: boolean;
   roundThrows?: boolean;
@@ -688,11 +688,8 @@ function cannedPhase(c: Canned): PlumbingPorts["phase"] {
     }
     if (c.roundThrows) throw new Error("round-action down");
     return {
-      round: { action: c.roundAction ?? "bounce", round: 1, failRound: 1, reason: "r" },
       deepQa: c.deepQa ?? null,
       passMarker: c.passMarker ?? null,
-      escalationSummary: c.escalationSummary ?? null,
-      labels: QA_ESCALATION_LABELS,
       failMarker: c.failMarker ?? null,
       degraded: [],
     };
@@ -724,6 +721,12 @@ const refuse = (target: string, code: string, rc = 1) => (args: string[]): Parti
   args[1] === target ? { rc, code } : undefined;
 const advTo = (args: string[]): string => args[1] as string;
 
+/** The counts a real `parked:qa-fail-rounds` refusal carries: the seam's timestamped count over its limit. */
+const PARK_COUNTS: CapCount[] = [
+  { arm: "qa-fail-rounds", unit: "pr", count: 3, limit: 3, source: "trailer", applicable: true },
+  { arm: "total-claims", unit: "issue", count: 4, limit: 10, source: "journal", applicable: true },
+];
+
 /** A `gh` fake: answers the live PR-state read, records the rest. */
 const withState = (state: string | "fail" | "empty") => (argv: string[]): CmdResult | undefined => {
   if (argv[0] === "pr" && argv[1] === "view" && argv.includes("state")) {
@@ -750,13 +753,13 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
 
   test("route PASS at T4 posts the engine's PASS marker comment only when it is non-empty", async () => {
     const pre = readyPre({ tier: { num: 4, adversarial: true } });
-    const withMarker = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "PASS", passMarker: "MARKER-LINE", roundAction: "deep-qa", deepQa: { action: "proceed" } }) });
+    const withMarker = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "PASS", passMarker: "MARKER-LINE", deepQa: { action: "proceed" } }) });
     await runRoute(ROUTE_OPTS, pre, withMarker.ports, realDeps());
     const bodies = withMarker.writes().filter((a) => a[1] === "comment").map((a) => argAfter(a, "--body"));
     assert.equal(bodies.length, 2);
     assert.match(bodies[1] ?? "", /^> \*T4 Verifier-Core deep-QA — PASS proof\*\n\nMARKER-LINE\n\n/);
 
-    const without = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "PASS", passMarker: null, roundAction: "deep-qa", deepQa: { action: "proceed" } }) });
+    const without = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "PASS", passMarker: null, deepQa: { action: "proceed" } }) });
     const r = await runRoute(ROUTE_OPTS, pre, without.ports, realDeps());
     assert.equal(without.writes().filter((a) => a[1] === "comment").length, 1, "no marker comment on an empty .passMarker");
     assert.ok(r.degraded.includes("pass-marker"));
@@ -805,7 +808,8 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
     const h = harness({
       ghHandler: withState("OPEN"),
       advanceHandler: refuse("needs-dev-resume", "parked:qa-fail-rounds"),
-      phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 2, maxSeverity: "high", roundAction: "escalate", escalationSummary: "ESCALATION-SUMMARY" }),
+      parkCounts: PARK_COUNTS,
+      phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 2, maxSeverity: "high" }),
     });
     const r = await runRoute(ROUTE_OPTS, readyPre(), h.ports, realDeps());
     assert.deepEqual(h.advances.map(advTo), ["needs-dev-resume"], "the seam parked in the same call; QA adds nothing");
@@ -813,30 +817,41 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
     assert.ok(!h.advances.some((a) => a.includes("ready-for-human")), "a T1-T3 round cap never writes ready-for-human");
     const last = argAfter(h.writes().at(-1) as string[], "--body") as string;
     assert.match(last, /round cap reached/);
-    assert.match(last, /ESCALATION-SUMMARY/);
+    assert.ok(last.includes(renderParkSummary("parked:qa-fail-rounds", PARK_COUNTS)), "the summary is rendered from the seam's counts");
+    assert.match(last, /qa-fail-rounds=3\/3/);
     assert.equal(h.writes().filter((a) => a[1] === "comment" && a[0] === "issue").length, 1, "enforce: the seam posted the cap-park comment, QA posts only its own");
     assert.ok(r.effects.some((e) => e.kind === "fail-bounce-advance" && !e.ok));
   });
 
-  test("route acts on the seam park, never on round.action: a positional 'escalate' with an allowed advance parks nothing (#5437)", async () => {
+  test("route acts on the seam park only: an allowed advance parks nothing (#5437)", async () => {
     const h = harness({
       ghHandler: withState("OPEN"),
-      phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "medium", roundAction: "escalate", escalationSummary: "ESC" }),
+      phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "medium" }),
     });
     await runRoute(ROUTE_OPTS, readyPre(), h.ports, realDeps());
     const bodies = h.writes().filter((a) => a[0] === "issue" && a[1] === "comment").map((a) => argAfter(a as string[], "--body") as string);
     assert.ok(!bodies.some((b) => /round cap reached/.test(b)), "no escalation comment without the seam refusal");
   });
 
-  test("route still escalates on the seam refusal when round.action says 'bounce' (sibling shape)", async () => {
+  test("a park after an operator reset renders its summary from the seam's timestamped count, never fallback prose", async () => {
+    // The seam counts only rounds newer than the Hydra-Cap-Reset marker (countReviewedFailRoundsAfterReset);
+    // the route renders exactly the counts the refusal carries.
     const h = harness({
       ghHandler: withState("OPEN"),
       advanceHandler: refuse("needs-dev-resume", "parked:qa-fail-rounds"),
-      phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "medium", roundAction: "bounce" }),
+      parkCounts: [{ arm: "qa-fail-rounds", unit: "pr", count: 3, limit: 3, source: "trailer", applicable: true }],
+      phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "medium" }),
     });
     await runRoute(ROUTE_OPTS, readyPre(), h.ports, realDeps());
     const last = argAfter(h.writes().at(-1) as string[], "--body") as string;
-    assert.match(last, /round cap reached/);
+    assert.match(last, /`qa-fail-rounds` is at 3\/3 \(per pr\)/);
+    assert.doesNotMatch(last, /See the PR thread/);
+  });
+
+  test("renderParkSummary is total: an empty or arm-less counts array still names the arm from the code", () => {
+    assert.match(renderParkSummary("parked:qa-fail-rounds", []), /`qa-fail-rounds`/);
+    assert.match(renderParkSummary("parked:qa-fail-rounds", undefined), /`qa-fail-rounds`/);
+    assert.match(renderParkSummary("parked:qa-fail-rounds", [PARK_COUNTS[1] as CapCount]), /total-claims=4\/10/);
   });
 
   test("route escalate (shadow): a live-arm park is the same parked:qa-fail-rounds refusal - no shadow-park branch, no caller-side cap comment", async () => {
@@ -845,7 +860,7 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
     const h = harness({
       ghHandler: withState("OPEN"),
       advanceHandler: refuse("needs-dev-resume", "parked:qa-fail-rounds"),
-      phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high", escalationSummary: "ESC" }),
+      phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high" }),
     });
     await runRoute(ROUTE_OPTS, readyPre(), h.ports, realDeps());
     assert.deepEqual(h.advances.map(advTo), ["needs-dev-resume"], "no explicit follow-up park advance");
@@ -877,13 +892,13 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
 
   test("route T4 FAIL: disarm, then the PR comment carrying .failMarker, then block-and-escalate or the 1st-fail bounce through the seam", async () => {
     const pre = readyPre({ tier: { num: 4, adversarial: true } });
-    const block = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high", roundAction: "deep-qa", deepQa: { action: "block-and-escalate", failNumber: 2 }, failMarker: "FAIL-MARKER" }) });
+    const block = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high", deepQa: { action: "block-and-escalate", failNumber: 2 }, failMarker: "FAIL-MARKER" }) });
     await runRoute(ROUTE_OPTS, pre, block.ports, realDeps());
     assert.deepEqual(block.writes().map((a) => `${a[0]} ${a[1]}`), ["pr merge", "pr comment", "lifecycle advance", "issue comment"]);
     assert.deepEqual(block.advances[0]?.slice(0, 4), ["5269", "ready-for-human", "--reason", "t4-deep-qa-exhausted"]);
     assert.match(argAfter(block.writes()[1] as string[], "--body") ?? "", /\n\nFAIL-MARKER \(fail #2 on this PR\)\n\n/);
 
-    const bounce = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high", roundAction: "deep-qa", deepQa: { action: "bounce", failNumber: 1 }, failMarker: "FAIL-MARKER" }) });
+    const bounce = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high", deepQa: { action: "bounce", failNumber: 1 }, failMarker: "FAIL-MARKER" }) });
     await runRoute(ROUTE_OPTS, pre, bounce.ports, realDeps());
     assert.deepEqual(bounce.advances, [["5269", "needs-dev-resume", "--evidence", "pr=77", "--actor", "hydra-qa"]]);
   });
@@ -907,11 +922,6 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
       assert.deepEqual(w[0]?.slice(0, 3), ["pr", "comment", "77"]);
       assert.equal(argAfter(w[0] as string[], "--body"), errorComment);
     }
-    // An action-less round-action result is a pre-verdict exit too.
-    const h = harness({ phase: async (p) => (p === "round-action" ? { round: {} } : cannedPhase({ verdict: "PASS" })(p, {})) });
-    await assert.rejects(runRoute(ROUTE_OPTS, readyPre(), h.ports, realDeps()), /round\.action is missing/);
-    assert.equal(argAfter(h.writes()[0] as string[], "--body"), errorComment);
-    assert.equal(h.writes().length, 1);
   });
 
   test("route: the error comment is best-effort (a failing post still rethrows the original error) and never posted on --dry-run", async () => {
@@ -923,7 +933,7 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
   });
 
   test("route: a T4 FAIL without a deepQa decision still posts the QA-Verdict-Error comment (pre-verdict exit)", async () => {
-    const h = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high", roundAction: "deep-qa", deepQa: null }) });
+    const h = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high", deepQa: null }) });
     await assert.rejects(runRoute(ROUTE_OPTS, readyPre({ tier: { num: 4, adversarial: true } }), h.ports, realDeps()), /deepQa decision/);
     assert.equal(h.writes().length, 1, "only the error comment; no disarm, no relabel");
     assert.equal(argAfter(h.writes()[0] as string[], "--body"), errorComment);
@@ -1013,7 +1023,7 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
     let n = 0;
     const h = harness({
       ghHandler: (a) => (a[0] === "pr" && a[1] === "comment" && ++n === 2 ? fail("gh: 502") : undefined),
-      phase: cannedPhase({ verdict: "PASS", passMarker: "MARKER", roundAction: "deep-qa", deepQa: { action: "proceed" } }),
+      phase: cannedPhase({ verdict: "PASS", passMarker: "MARKER", deepQa: { action: "proceed" } }),
     });
     const r = await runRoute(ROUTE_OPTS, readyPre({ tier: { num: 4, adversarial: true } }), h.ports, realDeps());
     assert.equal(r.nextStep, "none");
@@ -1071,7 +1081,7 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
     });
     const r = await runRoute({ ...ROUTE_OPTS, findingsPath: undefined, summariesPath: undefined }, pre, h.ports, realDeps());
     assert.deepEqual(calls, ["trailer", "round-action"], "no fold on a CI-only round");
-    assert.equal((inputs["round-action"] as { currentReviewed: boolean }).currentReviewed, false);
+    assert.deepEqual(Object.keys(inputs["round-action"] as object).sort(), ["pr", "reviewVerdict", "tier", "verdict"], "the round-action input carries no round-decision fields");
     assert.equal((inputs["trailer"] as { blockers: number }).blockers, 2);
     assert.equal((inputs["trailer"] as { maxSeverity: string }).maxSeverity, "high");
     assert.equal(r.worstFinding, "required CI check(s) red: test, tier-gate");
@@ -1266,17 +1276,17 @@ describe("route golden bodies (posted bytes frozen, issue #5269 INV-7)", () => {
       name: "escalate (enforce: the seam parked)",
       pre: readyPre(),
       advance: (a) => (a[1] === "needs-dev-resume" ? { rc: 1, code: "parked:qa-fail-rounds" } : undefined),
-      canned: { ...failCanned, roundAction: "escalate", escalationSummary: "ESCALATION-SUMMARY" },
+      canned: { ...failCanned },
       state: "OPEN",
       bodies: [
         failPr,
-        `> *Automated QA escalated — round cap reached*\n\n\`FAIL\` on PR #77 — ${sum}. The issue is \`parked\`; no dev lane will pick it up until the operator un-parks it.\n\nESCALATION-SUMMARY\n\n${TRAILER}`,
+        `> *Automated QA escalated — round cap reached*\n\n\`FAIL\` on PR #77 — ${sum}. The issue is \`parked\`; no dev lane will pick it up until the operator un-parks it.\n\n${renderParkSummary("parked:qa-fail-rounds", [])}\n\n${TRAILER}`,
       ],
     },
     {
       name: "T4 bounce",
       pre: readyPre({ tier: { num: 4, adversarial: true } }),
-      canned: { ...failCanned, roundAction: "deep-qa", deepQa: { action: "bounce", failNumber: 1 }, failMarker: "Verifier-Core deep-QA: FAIL" },
+      canned: { ...failCanned, deepQa: { action: "bounce", failNumber: 1 }, failMarker: "Verifier-Core deep-QA: FAIL" },
       state: "OPEN",
       bodies: [
         `> *Automated QA — T4 Verifier-Core deep review*\n\nREPORT\n\n---\n\n**Verdict:** \`FAIL\` — REASON\n\nVerifier-Core deep-QA: FAIL (fail #1 on this PR)\n\nCHECKS\n\n${TRAILER}`,
@@ -1286,7 +1296,7 @@ describe("route golden bodies (posted bytes frozen, issue #5269 INV-7)", () => {
     {
       name: "T4 block",
       pre: readyPre({ tier: { num: 4, adversarial: true } }),
-      canned: { ...failCanned, roundAction: "deep-qa", deepQa: { action: "block-and-escalate", failNumber: 2 }, failMarker: "Verifier-Core deep-QA: FAIL" },
+      canned: { ...failCanned, deepQa: { action: "block-and-escalate", failNumber: 2 }, failMarker: "Verifier-Core deep-QA: FAIL" },
       bodies: [
         `> *Automated QA — T4 Verifier-Core deep review*\n\nREPORT\n\n---\n\n**Verdict:** \`FAIL\` — REASON\n\nVerifier-Core deep-QA: FAIL (fail #2 on this PR)\n\nCHECKS\n\n${TRAILER}`,
         `> *T4 Deep-QA blocked — operator decision needed*\n\nPR #77 failed the Verifier-Core deep-QA gate **twice consecutively** (fail #2). Per the Deep-QA Remediation Loop the PR is now **blocked** and routed to the operator instead of bouncing again.\n\n\`FAIL\` — ${sum}. Full findings on PR #77 (both passes).\n\nThis issue is now on the \`/hydra-review\` pickup set. Resolve by either fixing the Verifier-Core concern and re-running QA, or closing the PR.\n\n${TRAILER}`,
@@ -1358,7 +1368,7 @@ describe("route golden bodies (posted bytes frozen, issue #5269 INV-7)", () => {
     for (const arm of arms.filter((a) => a.name !== "PASS" && a.name !== "PASS-pending-CI")) {
       const issueBodies = arm.bodies.slice(1);
       for (const b of issueBodies) {
-        const limit = b.includes("ESCALATION-SUMMARY") ? 2500 : 800;
+        const limit = b.includes("This PR reached the QA round cap") ? 2500 : 800;
         assert.ok(b.length <= limit, `arm '${arm.name}': ${b.length} chars`);
         assert.ok(!b.includes("REPORT"), `arm '${arm.name}': the full review lives only on the PR`);
       }

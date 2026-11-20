@@ -33,7 +33,6 @@ import {
   buildQaVerdictTrailer,
   classifyVerdict,
   decideDeepQaAction,
-  decideQaRoundAction,
   decideReviewerFanout,
   foldReviewFindings,
   isPromptOnlyChange,
@@ -42,7 +41,6 @@ import {
   priorFindingsSection,
   redRequiredChecks,
   renderCiSummary,
-  renderQaEscalationSummary,
   renderQaVerdictErrorLine,
   renderQaVerdictTrailer,
   renderReviewReport,
@@ -60,10 +58,9 @@ import {
   aggregateAdversarialReview,
   reviewerGroup,
 } from "../src/qa/fold.ts";
-import {
-  QA_ADMISSION_SKIP_MARKER,
-  QA_FAIL_ROUND_CAP,
-} from "../src/qa/round-action.ts";
+import { QA_ADMISSION_SKIP_MARKER } from "../src/qa/round-action.ts";
+import { CAP_TABLE, countReviewedFailRoundsAfterReset, type CapCount } from "../src/lifecycle/caps.ts";
+import { renderParkSummary } from "../scripts/qa/route.ts";
 import { glmLane } from "../src/glm/eligibility.ts";
 
 // ---------------------------------------------------------------------------
@@ -106,7 +103,7 @@ describe("hydra-qa emits the QA-Verdict trailer on every verdict post (issue #47
     const firstEffect = routeSrc.indexOf('if (verdict === "PASS")');
     assert.ok(trailerAt > 0 && roundAt > trailerAt && firstEffect > roundAt, "engine calls precede every PASS/FAIL effect");
     assert.match(routeSrc, /const trailer = requireField\(trailerOut\.trailer/, "an absent trailer is a pre-verdict exit");
-    assert.match(routeSrc, /const roundAction = requireField\(round\.action/, "an action-less round-action result is a pre-verdict exit");
+    assert.doesNotMatch(routeSrc, /round\.action|roundAction/, "route never reads or branches on a QA round decision (#5660 INV-1)");
     assert.doesNotMatch(playbook, /trailer \| jq -r/, "a pipe into jq masks the node exit status");
   });
 
@@ -198,13 +195,10 @@ function fillWorstCase(body: string): string {
     QA_VERDICT_TRAILER: trailer.length >= errorLine.length ? trailer : errorLine,
     ESC_LABEL_NOTE:
       "**Label routing FAILED** (see the QA log): add `ready-for-human` and remove `needs-qa`, `ready-for-agent`, `needs-dev-resume` and `in-progress` by hand, or QA will re-run on this issue.",
-    QA_ESCALATION_SUMMARY: renderQaEscalationSummary({
-      pr: 99999,
-      priorBodies: Array.from({ length: 12 }, (_, i) =>
-        renderQaVerdictTrailer({ verdict: "FAIL-pending-CI", pr: 99999, round: 990 + i, sha: FULL_HEAD, blockers: 999, maxSeverity: "medium" }),
-      ),
-      currentTrailer: trailer,
-    }),
+    QA_ESCALATION_SUMMARY: renderParkSummary(
+      "parked:qa-fail-rounds",
+      CAP_TABLE.map((r): CapCount => ({ arm: r.arm, unit: r.unit, count: 999, limit: 999, source: "journal", applicable: true })),
+    ),
   };
   const expand = (s: string): string =>
     s
@@ -432,9 +426,10 @@ describe("hydra-qa step 10 label effects stay plain text pins (issue #4735, INV-
     assert.ok(/at most one `QA-Verdict-Error` comment/.test(QA_PLAYBOOK) && !/exits 1 with NOTHING posted/.test(QA_PLAYBOOK), "pre-verdict exit wording matches route");
   });
 
-  test("the escalation summary still comes from the round-action JSON", () => {
+  test("the park comment's summary comes from the seam's counts, with no fallback prose", () => {
     const routeSrc = readFileSync(join(REPO_ROOT, "scripts", "qa/route.ts"), "utf8");
-    assert.ok(routeSrc.includes("roundOut.escalationSummary"));
+    assert.ok(routeSrc.includes("renderParkSummary(adv.code"));
+    assert.ok(!routeSrc.includes("escalationSummary") && !routeSrc.includes("ESC_FALLBACK_SUMMARY"));
   });
 });
 
@@ -509,12 +504,10 @@ describe("no demotion path: step 9 always folds with plain foldReviewFindings (i
     }
   });
 
-  test("decideQaRoundAction counts a fold-failed FAIL round as a reviewed round", () => {
+  test("countReviewedFailRoundsAfterReset counts a fold-failed FAIL round as a reviewed round", () => {
     const foldFailed = (round: number, sha: string) =>
       verdictBody(round, "FAIL", sha, 1, "high", "### Findings\n\n_Findings fold failed; raw reviewer reports follow._");
-    const d = decideQaRoundAction({ tier: 3, verdict: "FAIL", pr: 7, priorBodies: [foldFailed(1, SHA_A), foldFailed(2, SHA_B)], currentReviewed: true });
-    assert.equal(d.action, "escalate");
-    assert.equal(d.failRound, QA_FAIL_ROUND_CAP);
+    const bodies = [foldFailed(1, SHA_A), foldFailed(2, SHA_B)].map((body) => ({ body, tsMs: 1 }));
+    assert.equal(countReviewedFailRoundsAfterReset(bodies, 7, 0), 2);
   });
 });
-
