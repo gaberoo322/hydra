@@ -22,7 +22,7 @@
  * test/watchdog-spawn-timeout-ratchet.test.mts.
  *
  * HOW TO SATISFY IT. Add your cases to the test file that already covers the
- * subject. If a new file is genuinely right, run
+ * subject. The escape hatch is STD-BASELINE-EDIT-ROWS. If a new file is genuinely right, run
  * `npx tsx scripts/ci/test-subject-map.ts`, set exactly the printed row in
  * test/fixtures/test-subject-baseline.json (or use `--write-baseline
  * --allow-grow` when it moves no other row) and add a PR-body
