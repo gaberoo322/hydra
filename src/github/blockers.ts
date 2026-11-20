@@ -8,7 +8,7 @@
  *   1. {@link extractStrictBlockerRefs} — a STRICT body parser that pulls the
  *      `#N` numbers an issue declares it is *blocked by* / *depends on*. Unlike
  *      the loose `extractIssueRefs` (which returns every `#N` mention), this
- *      only matches anchored `blocked by #N` / `blocks #N` / `depends on #N`
+ *      only matches anchored `blocked by #N` / `depends on #N`
  *      conventions. A false positive here silently STARVES real work
  *      (a bare `#N` "see also" reference would wrongly gate dispatch), so the
  *      dispatch filter must use the strict form. Code-span-safe: `#N` inside a
@@ -43,18 +43,20 @@ import {
 /**
  * The strict blocker conventions. Two anchored patterns only:
  *
- *   - `blocked by #N` / `blocked-by #N` / `blocks #N` / `blocked #N`
- *     (epic-close's `blockedBy` regex, reused verbatim — see
- *     `scripts/ci/epic-close.ts`).
+ *   - `blocked by #N` / `blocked-by #N` / `Blocked: #N` / `blocked #N`.
  *   - `depends on #N` / `depends-on #N` / `depend on #N` / `dependent on #N`.
  *
- * A bare `#N` (a "see also", a "part of", an incidental mention) deliberately
- * does NOT match — it must not gate dispatch.
+ * `blocks #N` / `block #N` deliberately do NOT match (issue #5685): "this
+ * issue blocks #N" is a forward link (#N waits on THIS issue), and reading it
+ * as "blocked by #N" gated a prerequisite on the very issue it unblocks. A
+ * bare `#N` (a "see also", a "part of", an incidental mention) does not match
+ * either — it must not gate dispatch.
  */
 /**
  * The strict-blocker regex pattern SOURCES — the **single source of truth** for
- * "what counts as a strict blocker ref". Reused verbatim from
- * `scripts/ci/epic-close.ts` (`parseEpicReferences`).
+ * "what counts as a strict blocker ref". `scripts/ci/epic-close.ts`
+ * (`parseEpicReferences`) keeps its own broader regex on purpose: it collects
+ * every `#N` an epic references, a different question from dispatch gating.
  *
  * The autopilot's anchor-SELECTION path (the Turn Snapshot picks collector,
  * src/autopilot/turn-snapshot/picks.ts) applies the SAME predicate the
@@ -69,7 +71,7 @@ import {
  * derived. Do not inline a second copy elsewhere — extend this array.
  */
 const STRICT_BLOCKER_PATTERN_SOURCES: readonly string[] = [
-  "\\bblock(?:ed|s)?(?:[\\s-]+by)?\\s*:?\\s*#(\\d+)",
+  "\\bblocked(?:[\\s-]+by)?\\s*:?\\s*#(\\d+)",
   "\\bdepend(?:s|ent)?(?:[\\s-]+on)?\\s*:?\\s*#(\\d+)",
 ];
 
