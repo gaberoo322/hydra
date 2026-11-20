@@ -54,25 +54,12 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { InvalidArgumentError } from "../../src/errors.ts";
 import { attributedSymbols, listPlaybooks } from "./playbook-reference-check.ts";
-import {
-  REPO_ROOT,
-  compareCountRows,
-  escapeRegExp,
-  formatStaleAdvice,
-  isCliEntrypoint,
-  loadJsonBaseline,
-  mergeCountRows,
-  resolveListFlag,
-  runBaselineRatchet,
-  type CountDelta,
-} from "./seam-check-lib.ts";
+import { defineRatchet, runIfCli } from "./ratchet.ts";
+import { REPO_ROOT, escapeRegExp } from "./seam-check-lib.ts";
 import { HISTORICAL_EXEMPT_RE, classifyFile } from "./target-coupling-check.ts";
 
-export const BASELINE_REL = "scripts/ci/playbook-vocabulary-baseline.json";
 export const STANDARD_REL = "CODING_STANDARDS.md";
-export const WRITE_BASELINE_CMD = "npx tsx scripts/ci/playbook-vocabulary-ratchet.ts --write-baseline";
 
 export const SHAPES = ["status", "line-cite", "target", "avoid-term", "issue-cite", "back-compat", "shell-lines", "symbol-cite", "invariant-cite", "process-meta"] as const;
 export type Shape = (typeof SHAPES)[number];
@@ -87,26 +74,6 @@ export interface Hit {
 }
 
 export type ShapeCounts = Partial<Record<Shape, number>>;
-
-export interface Baseline {
-  note: string;
-  files: Record<string, ShapeCounts>;
-}
-
-/** A file whose count for one shape differs from its baseline. */
-export interface Delta {
-  file: string;
-  shape: Shape;
-  count: number;
-  baseline: number;
-  /** Every hit of this shape in the file (which of them is new is unknowable). */
-  hits: Hit[];
-}
-
-export interface Comparison {
-  exceeded: Delta[];
-  stale: Delta[];
-}
 
 // ---------------------------------------------------------------------------
 // Detection
@@ -303,101 +270,6 @@ export function countByShape(hits: readonly Hit[]): ShapeCounts {
 }
 
 // ---------------------------------------------------------------------------
-// Baseline
-// ---------------------------------------------------------------------------
-
-const shapeCounts = (found: Record<string, Hit[]>): Record<string, ShapeCounts> => {
-  const out: Record<string, ShapeCounts> = {};
-  for (const [file, hits] of Object.entries(found)) out[file] = countByShape(hits);
-  return out;
-};
-
-export function compareAgainstBaseline(found: Record<string, Hit[]>, baseline: Baseline): Comparison {
-  const cmp = compareCountRows(shapeCounts(found), baseline.files, SHAPES);
-  const toDelta = (d: CountDelta<Shape>): Delta => ({
-    file: d.file,
-    shape: d.key,
-    count: d.count,
-    baseline: d.baseline,
-    hits: (found[d.file] ?? []).filter((h) => h.shape === d.key),
-  });
-  return { exceeded: cmp.exceeded.map(toDelta), stale: cmp.stale.map(toDelta) };
-}
-
-export function buildBaseline(found: Record<string, Hit[]>): Baseline {
-  return {
-    note:
-      `Shrink-only per-file counts of banned playbook vocabulary (issue #5500). ` +
-      `Never raise a count: rewrite the sentence per ${STANDARD_REL}. Lower with ${WRITE_BASELINE_CMD}.`,
-    files: mergeCountRows({}, shapeCounts(found), SHAPES),
-  };
-}
-
-/**
- * Re-seed only the named shapes' rows: every other key and the note stay as
- * they are, a file row is added only when a named shape is non-zero there and
- * dropped only when it ends up empty (STD-BASELINE-EDIT-ROWS).
- */
-export function mergeBaselineForShapes(existing: Baseline, found: Record<string, Hit[]>, shapes: readonly Shape[]): Baseline {
-  return { note: existing.note, files: mergeCountRows(existing.files, shapeCounts(found), SHAPES, { keys: shapes }) };
-}
-
-/** Parse a `--shape a,b` argument; an unknown name throws. */
-export function parseShapeArg(arg: string): Shape[] {
-  const out: Shape[] = [];
-  for (const name of arg.split(",").map((n) => n.trim()).filter(Boolean)) {
-    if (!(SHAPES as readonly string[]).includes(name)) {
-      throw new InvalidArgumentError(`unknown shape "${name}"; expected one of ${SHAPES.join(", ")}`);
-    }
-    out.push(name as Shape);
-  }
-  if (out.length === 0) throw new InvalidArgumentError(`--shape needs at least one shape name; expected one of ${SHAPES.join(", ")}`);
-  return out;
-}
-
-/**
- * Resolve the writer's `--shape` filter from argv: `undefined` = rewrite every
- * shape. A `--shape` with no/empty value, or given without `--write-baseline`,
- * throws instead of silently doing nothing.
- */
-export function resolveShapeFilter(argv: readonly string[]): Shape[] | undefined {
-  const names = resolveListFlag(argv, "--shape", "--shape needs a value");
-  return names === undefined ? undefined : parseShapeArg(names.join(","));
-}
-
-/** Empty string when clean. */
-export function formatReport(cmp: Comparison): string {
-  const out: string[] = [];
-  if (cmp.exceeded.length > 0) {
-    out.push("Banned playbook vocabulary above the baseline:");
-    for (const d of cmp.exceeded) {
-      out.push(`  ${d.file}: ${d.shape} count ${d.count} > baseline ${d.baseline}`);
-      for (const h of d.hits) out.push(`    ${d.file}:${h.line}  ${h.shape}  "${h.phrase}"`);
-    }
-    if (cmp.exceeded.some((d) => d.shape === "symbol-cite")) {
-      out.push(
-        "symbol-cite fix: attribute the symbol to its file with an attribution phrase (so playbook-reference-check resolves it), or name the fact's home without copying the symbol.",
-      );
-    }
-    if (cmp.exceeded.some((d) => d.shape === "invariant-cite")) {
-      out.push(
-        "invariant-cite fix: name the invariant's home (the design-concept artifact, or the assert_invariants.py docstring) instead of copying the invariant id.",
-      );
-    }
-    out.push(
-      `Fix: rewrite the sentence so it states current behaviour and points at the fact's home (${STANDARD_REL}, STD-PLAYBOOK-*). ` +
-        "A provenance note kept on one line may start it with `Historical:`; a wrapped continuation line is counted. Do not raise the baseline.",
-    );
-  }
-  if (cmp.stale.length > 0) {
-    out.push("Counts now below the baseline (lower the baseline so they cannot creep back):");
-    for (const d of cmp.stale) out.push(`  ${d.file}: ${d.shape} count ${d.count} < baseline ${d.baseline}`);
-    out.push(formatStaleAdvice({ baselineRel: BASELINE_REL, rowAction: "lower the listed counts to the printed values" }));
-  }
-  return out.join("\n");
-}
-
-// ---------------------------------------------------------------------------
 // Repository adapter
 // ---------------------------------------------------------------------------
 
@@ -411,25 +283,31 @@ export function scanRepo(root: string = REPO_ROOT): Record<string, Hit[]> {
   return out;
 }
 
-export async function loadBaseline(root: string = REPO_ROOT): Promise<Baseline> {
-  return loadJsonBaseline<Baseline>(join(root, BASELINE_REL), { note: "unseeded", files: {} }, { strict: true });
+/** One `<playbook>\t<shape>` row per file per shape, valued at the shape's count (shell-lines: weighted lines). */
+export function measureRows(root: string = REPO_ROOT): Record<string, number> {
+  const rows: Record<string, number> = {};
+  for (const [file, hits] of Object.entries(scanRepo(root))) {
+    for (const [shape, n] of Object.entries(countByShape(hits))) {
+      if (n > 0) rows[`${file}\t${shape}`] = n;
+    }
+  }
+  return rows;
 }
 
-async function main(): Promise<void> {
-  const code = await runBaselineRatchet({
-    name: "playbook-vocabulary-ratchet",
-    baselineRel: BASELINE_REL,
-    scan: () => scanRepo(),
-    load: () => loadBaseline(),
-    build: buildBaseline,
-    merge: mergeBaselineForShapes,
-    filter: resolveShapeFilter,
-    compare: compareAgainstBaseline,
-    report: formatReport,
-  });
-  if (code !== 0) process.exit(code);
-}
+export const vocabularyRatchet = defineRatchet({
+  id: "playbook-vocabulary-ratchet",
+  baseline: "scripts/ci/playbook-vocabulary-baseline.json",
+  shape: "counted",
+  polarity: "ceiling",
+  stale: "fail",
+  enforcement: "required",
+  measure: async (root) => measureRows(root),
+  help: [
+    `Rewrite the sentence so it states current behaviour and points at the fact's home (${STANDARD_REL}, STD-PLAYBOOK-*). A provenance note kept on one line may start it with \`Historical:\`; a wrapped continuation line is counted.`,
+    "symbol-cite: attribute the symbol to its file with an attribution phrase (so playbook-reference-check resolves it), or name the fact's home without copying the symbol.",
+    "invariant-cite: name the invariant's home (the design-concept artifact, or the assert_invariants.py docstring) instead of copying the invariant id.",
+    "To find the hit, diff the named playbook against master; findHits(file, text, avoidTerms) lists every hit with its line.",
+  ],
+});
 
-if (isCliEntrypoint(import.meta.url)) {
-  await main();
-}
+runIfCli(import.meta.url, vocabularyRatchet);

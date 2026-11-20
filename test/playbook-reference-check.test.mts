@@ -18,15 +18,8 @@ const {
   findUnresolved,
   routeResolves,
   looksLikeSymbol,
-  compareAgainstBaseline,
-  buildBaseline,
-  mergeBaselineForFiles,
-  resolveFilesFilter,
-  formatReport,
-  scanRepo,
-  loadBaseline,
+  referenceRatchet,
   listPlaybooks,
-  WRITE_BASELINE_CMD,
   EXAMPLE_MARKER,
 } = await import("../scripts/ci/playbook-reference-check.ts");
 
@@ -207,61 +200,27 @@ describe("playbook-reference-check: what is deliberately not a reference", () =>
   });
 });
 
-describe("playbook-reference-check: shrink-only baseline", () => {
-  const found = { [PB]: [{ kind: "path" as const, ref: "src/gone.ts", line: 7 }] };
-
-  test("a baselined unresolved reference passes", () => {
-    const cmp = compareAgainstBaseline(found, { note: "", files: { [PB]: ["path src/gone.ts"] } });
-    assert.deepEqual(cmp, { violations: [], stale: [] });
-    assert.equal(formatReport(cmp), "");
+describe("playbook-reference-check: ratchet policy", () => {
+  test("one required set ceiling ratchet, stale rows fail, on its own baseline", () => {
+    const p = referenceRatchet.policy;
+    assert.equal(p.id, "playbook-reference-check");
+    assert.equal(p.shape, "set");
+    assert.equal(p.polarity, "ceiling");
+    assert.equal(p.stale, "fail");
+    assert.equal(p.enforcement, "required");
+    assert.equal(p.baseline, "scripts/ci/playbook-reference-baseline.json");
   });
 
-  test("a new unresolved reference fails and the report names file, line and reference", () => {
-    const cmp = compareAgainstBaseline(found, { note: "", files: {} });
-    assert.deepEqual(cmp.violations, [{ file: PB, line: 7, kind: "path", ref: "src/gone.ts" }]);
-    const report = formatReport(cmp);
-    assert.match(report, new RegExp(`${PB}:7  path src/gone\\.ts`));
-    assert.ok(report.includes(EXAMPLE_MARKER));
-    assert.ok(report.includes(WRITE_BASELINE_CMD));
-  });
-
-  test("a baseline entry that no longer fails is stale and must be removed", () => {
-    const cmp = compareAgainstBaseline(
-      {},
-      { note: "", files: { [PB]: ["path src/gone.ts"] } },
-    );
-    assert.deepEqual(cmp.stale, [{ file: PB, entry: "path src/gone.ts" }]);
-    assert.match(formatReport(cmp), /lower the baseline/);
-  });
-
-  test("buildBaseline is sorted, deduplicated and omits clean files", () => {
-    const baseline = buildBaseline(
-      {
-        "b.md": [
-          { kind: "route", ref: "/api/x", line: 2 },
-          { kind: "path", ref: "src/z.ts", line: 1 },
-        ],
-        "a.md": [],
-      },
-    );
-    assert.deepEqual(baseline.files, { "b.md": ["path src/z.ts", "route /api/x"] });
-    assert.doesNotMatch(baseline.note, /\d{4}-\d{2}-\d{2}/);
+  test("the remedy the module prints names the example marker and every reference kind", () => {
+    const help = (referenceRatchet.policy.help ?? []).join("\n");
+    assert.ok(help.includes(EXAMPLE_MARKER));
+    for (const kind of ["path", "route", "npm", "adr", "superseded-adr", "symbol"]) assert.ok(help.includes(kind), kind);
   });
 });
 
-describe("playbook-reference-check: scoped re-seed (--files)", () => {
-  test("mergeBaselineForFiles rewrites only the named rows and keeps the note", () => {
-    const existing = { note: "n", files: { "a.md": ["path x"], "b.md": ["npm y"] } };
-    const merged = mergeBaselineForFiles(existing, { "a.md": [{ kind: "path", ref: "z", line: 1 }] }, ["a.md", "b.md"]);
-    assert.deepEqual(merged, { note: "n", files: { "a.md": ["path z"] } });
-    assert.deepEqual(mergeBaselineForFiles(existing, {}, ["a.md"]), { note: "n", files: { "b.md": ["npm y"] } });
-  });
-
-  test("resolveFilesFilter rejects a filter without --write-baseline or without a value", () => {
-    assert.equal(resolveFilesFilter(["--write-baseline"]), undefined);
-    assert.deepEqual(resolveFilesFilter(["--write-baseline", "--files", "a.md,b.md"]), ["a.md", "b.md"]);
-    assert.throws(() => resolveFilesFilter(["--files", "a.md"]), /only applies together with --write-baseline/);
-    assert.throws(() => resolveFilesFilter(["--write-baseline", "--files"]), /needs a comma-separated value/);
+describe("playbook-reference-check: retired scoped flags", () => {
+  test("--files is refused as an unknown flag (exit 2)", async () => {
+    assert.equal(await referenceRatchet.main(["--files", "a.md"]), 2);
   });
 });
 
@@ -274,7 +233,9 @@ describe("playbook-reference-check: the real playbooks", () => {
   });
 
   test("no unresolved reference outside the baseline, and no stale baseline entry", async () => {
-    const report = formatReport(compareAgainstBaseline(scanRepo(), await loadBaseline()));
-    assert.equal(report, "", `\n${report}\n`);
+    const v = await referenceRatchet.verdict();
+    assert.equal(v.ok, true, v.advice);
+    assert.equal(v.added.length, 0);
+    assert.equal(v.stale.length, 0);
   });
 });
