@@ -580,7 +580,6 @@ carries on its next tick. That is the point of the cockpit — count it.
 - Explore the codebase before asking obvious questions.
 - "Skip" / "later" → move on without action.
 - Track before/after states as you go — don't re-read labels at the end.
-- **An issue filed mid-review never says `blocks #N` / `depends on #N`**: `src/github/blockers.ts` reads both as blockers of the new issue, so `board/promote` refuses it. Write "needed before #N"; put `Blocked by #<new>` on the dependent.
 - **Before closing any issue, check for open PRs that reference it.** Tracking parents in particular can have in-flight work that supersedes a stale "no plan / no signal" close-comment. Run:
   ```bash
   gh pr list --repo gaberoo322/hydra --state open --search "#<num>" --json number,title,body \
