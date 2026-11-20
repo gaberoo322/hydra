@@ -75,12 +75,9 @@ export {
 } from "../../src/qa/prior-round.ts";
 export {
   DEEP_QA_FAIL_MARKER,
-  QA_ESCALATION_LABELS,
   decideDeepQaAction,
-  decideQaRoundAction,
   hasFreshDeepQaPass,
   renderDeepQaPassMarker,
-  renderQaEscalationSummary,
 } from "../../src/qa/round-action.ts";
 
 // temporary bridge — the re-export trim is a follow-up (#5081 shipped the

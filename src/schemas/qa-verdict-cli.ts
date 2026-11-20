@@ -93,8 +93,6 @@ export const QaVerdictCliSchemas = {
     verdict: z.string(),
     reviewVerdict: z.enum(["PASS", "FAIL"]),
     headSha: z.string().optional(),
-    currentReviewed: z.boolean().optional(),
-    currentTrailer: z.string().optional(),
     priorBodies: bodies,
   }),
 } as const satisfies Record<QaVerdictPhase, z.ZodType>;
