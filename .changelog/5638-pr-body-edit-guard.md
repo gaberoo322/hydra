@@ -1,0 +1,1 @@
+- fix: forward-fix PR-body edits go through a guarded helper and reap no longer re-queues a forward-fix whose PR lost its closing ref (#5638)

@@ -189,6 +189,19 @@ describe("dispatch: composite verb (INV-6, INV-8)", () => {
     assert.equal(draft.w.claims.get(10)?.artifactHash, null);
   });
 
+  test("a forward-fix claim records its PR and purpose; a fresh claim carries neither pr key", async () => {
+    const ff = world();
+    ff.w.labels.set(10, ["ready-for-agent"]);
+    await openClaim({ issue: 10, dispatchId: "ff1", class: "dev_orch", run: "r", pr: 5635, purpose: "forward-fix" }, ff.seam);
+    assert.equal(ff.w.claims.get(10)?.pr, 5635);
+    assert.equal(ff.w.claims.get(10)?.purpose, "forward-fix");
+
+    const fresh = world();
+    fresh.w.labels.set(10, ["ready-for-agent"]);
+    await openClaim({ issue: 10, dispatchId: "f1", class: "dev_orch", run: "r" }, fresh.seam);
+    assert.equal(fresh.w.claims.get(10)?.pr, undefined);
+  });
+
   test("a qa role opens a label-free claim", async () => {
     const { w, seam } = world();
     w.labels.set(10, ["needs-qa"]);

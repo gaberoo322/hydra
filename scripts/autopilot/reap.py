@@ -1598,6 +1598,43 @@ def _release_dispatch_claim(cls: str, dispatch_id: str | None, outcome: str) -> 
     _append_log(f"claim_release cls={cls} dispatch_id={dispatch_id} outcome={outcome} result={result}")
 
 
+def _forward_fix_pr_from_claim(anchor_ref: str | None, dispatch_id: str | None) -> int | None:
+    """The PR a forward-fix dispatch was opened against, read from its seam claim (#5638).
+
+    Only called on the dev_orch stall path (no PR references the anchor), BEFORE
+    the claim is released. ONE `lifecycle claim-show` subprocess; returns the PR
+    number only when the claim is OURS (`dispatchId` matches), its purpose is
+    `forward-fix` and it carries a `pr`. Any other shape (no claim, mismatch,
+    unreadable CLI or output) returns None and the caller keeps today's path.
+    Never raises (STD-CATCH-FAIL-LOUD: failures log one run-log line)."""
+    m = re.match(r"^issue-(\d+)$", (anchor_ref or "").strip())
+    if not m or not dispatch_id:
+        return None
+    argv = _lifecycle_argv("claim-show", m.group(1))
+    try:
+        r = subprocess.run(
+            argv, capture_output=True, text=True, check=False, timeout=60,
+            cwd=_no_work_repo_root(),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        _append_log(f"claim_show anchor={anchor_ref} result=error:{type(exc).__name__}")
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        parsed = json.loads((r.stdout or "").strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        _append_log(f"claim_show anchor={anchor_ref} result=error:unparsable")
+        return None
+    claim = parsed.get("claim") if isinstance(parsed, dict) else None
+    if not isinstance(claim, dict) or claim.get("dispatchId") != dispatch_id:
+        return None
+    pr = claim.get("pr")
+    if claim.get("purpose") != "forward-fix" or isinstance(pr, bool) or not isinstance(pr, int):
+        return None
+    return pr
+
+
 def _qa_anchor_still_needs_qa(anchor_ref: str | None) -> bool | None:
     """Does the qa_orch anchor issue still carry `needs-qa` right now? (#5318 INV-8)
 
@@ -2175,8 +2212,18 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # the accounting writes and the hoisted PR-list fetch. Non-fatal, order-neutral.
     # The outcome (which may read one issue's labels, qa_orch, #5318 INV-8) is
     # only computed when there is a claim to release.
+    # #5638: a forward-fix whose PR no longer references the anchor (its body lost
+    # the `Closes #N` line) is NOT a no-PR stall: read the claim BEFORE it is
+    # released, and release it `released` (never the `no-pr` the dev-nopr-resume
+    # Cap Arm counts). Only on the stall path, so the common path pays nothing.
+    forward_fix_pr: int | None = None
+    if cls == "dev_orch" and pr_exists is False and snap.slot_occupied:
+        forward_fix_pr = _forward_fix_pr_from_claim(snap.anchor_ref, snap.dispatch_id)
     if snap.slot_occupied and snap.dispatch_id and not cls.endswith("_target"):
-        _release_dispatch_claim(cls, snap.dispatch_id, _claim_release_outcome(cls, pr_exists, snap.anchor_ref))
+        _release_dispatch_claim(
+            cls, snap.dispatch_id,
+            "released" if forward_fix_pr is not None else _claim_release_outcome(cls, pr_exists, snap.anchor_ref),
+        )
 
     # Issue #1820: the reflection-record WRITE producer wired in #1119 Slice 1
     # (self_heal.append_failure → _fire_reflection_record) was dead on the live
@@ -2199,7 +2246,7 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # pinned resume dispatch. Fully best-effort/non-fatal.
     _handle_dev_orch_stall(
         s, cls, skill, snap.anchor_ref, task_id, snap.worktree_branch,
-        dev_orch_pr_list_json, snap.dispatch_id,
+        dev_orch_pr_list_json, snap.dispatch_id, forward_fix_pr=forward_fix_pr,
     )
 
     # Issue #4045: the flip side of the stall check above — a dev_orch

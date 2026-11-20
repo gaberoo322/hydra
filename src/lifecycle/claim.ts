@@ -86,6 +86,8 @@ export async function openClaim(input: ClaimInput, deps: SeamDeps): Promise<Clai
     run: input.run,
     artifactHash: input.artifactHash ?? null,
     openedAt: deps.now(),
+    ...(input.pr != null ? { pr: input.pr } : {}),
+    ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
   };
 
   // INV-10: the claim-held check runs BEFORE any counting or park.

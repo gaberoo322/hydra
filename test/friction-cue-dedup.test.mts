@@ -489,6 +489,12 @@ describe("explicit cue alias table (issue #2527)", () => {
     }
   });
 
+  test("canonicalizeCue: the forward-fix body-wipe cue aliases to pr-body-lost-closing-ref", () => {
+    const canonical = "pr-body-lost-closing-ref";
+    assert.equal(canonicalizeCue("forward-fix-body-file-edit-wipes-pr-body-outside-repo"), canonical);
+    assert.equal(canonicalizeCue(canonical), canonical);
+  });
+
   test("canonicalizeCue: unknown cues pass through unchanged", () => {
     assert.equal(canonicalizeCue("scope-check-codespan-trap"), "scope-check-codespan-trap");
     assert.equal(canonicalizeCue("stale-local-master-ref"), "stale-local-master-ref");
