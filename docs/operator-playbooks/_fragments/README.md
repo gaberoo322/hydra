@@ -59,13 +59,30 @@ The rules for writing a playbook or fragment are the `STD-PLAYBOOK-*` entries in
 [`CODING_STANDARDS.md`](../../../CODING_STANDARDS.md). Their mechanical part is
 counted by `test/playbook-vocabulary-ratchet.test.mts` in the required `npm test`
 suite, per file and per shape: status and history phrases, file-and-line-number
-cites, hardcoded Target names, and the retired terms `CONTEXT.md` lists under
-`_Avoid_`. A count above its baseline fails and names the file, line and phrase;
-rewrite the sentence, never raise the baseline. A count below its baseline fails
-too, until `npx tsx scripts/ci/playbook-vocabulary-ratchet.ts --write-baseline`
-lowers it. A provenance note that starts its line with `Historical:` is exempt on
-that line only: write the note on one line, because the continuation lines of a
-hard-wrapped note are counted.
+cites, hardcoded Target names, the retired terms `CONTEXT.md` lists under
+`_Avoid_`, and the other banned shapes listed in the script header. The baseline
+`scripts/ci/playbook-vocabulary-baseline.json` is a sorted `{key: n}` object keyed
+`<playbook>\t<shape>`, valued at that shape's count in that playbook. All three
+playbook ratchets run on the Ratchet module (`scripts/ci/ratchet.ts`), which renders
+every failure: the row, its baseline and measured counts, and the fix. A count above
+its baseline fails; rewrite the sentence, never raise the baseline. A count below
+its baseline fails too, until `npx tsx scripts/ci/playbook-vocabulary-ratchet.ts --write-baseline`
+lowers it (`--allow-grow` only for reviewed growth, with a `Baseline-raise:` PR-body
+line). Per-shape remedies: `symbol-cite` attribute the symbol to its file with an
+attribution phrase, or name the fact's home; `invariant-cite` name the invariant's
+home instead of copying the id. A provenance note that starts its line with
+`Historical:` is exempt on that line only: write the note on one line, because the
+continuation lines of a hard-wrapped note are counted. The advice names the playbook
+and shape, not the line: diff the playbook against master to find the hit.
+
+## Duplicate ratchet (issue #5587)
+
+`test/playbook-duplicate-ratchet.test.mts` counts passages a playbook shares verbatim
+with another playbook source. `scripts/ci/playbook-duplicate-baseline.json` is a
+sorted `{playbook: spans}` object. A row above its baseline fails: move the passage
+into a `_fragments/` file and `@include` it from every holder. A removed copy also
+lowers its partner playbook's row, so tighten that row in the same PR
+(`--write-baseline`).
 
 ## Reference check (issue #5499)
 
@@ -90,5 +107,6 @@ routes behind `$TARGET_WEB_URL` are skipped without a marker. This `README.md` i
 Dead references that predate the check sit in
 `scripts/ci/playbook-reference-baseline.json`. The baseline only shrinks: fix a
 dead cite and the suite fails until you lower it with
-`npx tsx scripts/ci/playbook-reference-check.ts --write-baseline`. Never add an
+`npx tsx scripts/ci/playbook-reference-check.ts --write-baseline`. The baseline is a
+sorted JSON array of `<playbook>\t<kind> <ref>` strings (a set: one row per dead cite). Never add an
 entry to make a new dead cite pass — fix the cite or mark it as an example.

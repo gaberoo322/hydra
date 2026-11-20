@@ -18,13 +18,7 @@ const {
   tokenise,
   scanTexts,
   countSpans,
-  compareAgainstBaseline,
-  buildBaseline,
-  mergeBaselineForFiles,
-  resolveFilesFilter,
-  formatReport,
-  scanRepo,
-  loadBaseline,
+  duplicateRatchet,
 } = await import("../scripts/ci/playbook-duplicate-ratchet.ts");
 const { REPO_ROOT } = await import("../scripts/ci/seam-check-lib.ts");
 
@@ -114,57 +108,34 @@ describe("playbook-duplicate-ratchet: spans", () => {
   });
 });
 
-describe("playbook-duplicate-ratchet: baseline", () => {
-  const span = (file: string, partner = "b.md") => ({ file, line: 4, tokens: 13, partners: [partner], head: ["one", "two"] });
-
-  test("growth fails, a shrink is stale, an absent file is capped at 0", () => {
-    const found = { "a.md": [span("a.md"), span("a.md")], "c.md": [span("c.md")] };
-    const cmp = compareAgainstBaseline(found, { note: "", files: { "a.md": { spans: 1 }, "d.md": { spans: 2 } } });
-    assert.deepEqual(cmp.exceeded.map((d: { file: string }) => d.file), ["a.md", "c.md"]);
-    assert.deepEqual(cmp.stale.map((d: { file: string }) => d.file), ["d.md"]);
-    assert.equal(compareAgainstBaseline({ "a.md": [span("a.md")] }, { note: "", files: { "a.md": { spans: 1 } } }).exceeded.length, 0);
+describe("playbook-duplicate-ratchet: policy", () => {
+  test("one required counted ceiling ratchet, stale rows fail, on its own baseline", () => {
+    const p = duplicateRatchet.policy;
+    assert.equal(p.id, "playbook-duplicate-ratchet");
+    assert.equal(p.shape, "counted");
+    assert.equal(p.polarity, "ceiling");
+    assert.equal(p.stale, "fail");
+    assert.equal(p.enforcement, "required");
+    assert.equal(p.baseline, "scripts/ci/playbook-duplicate-baseline.json");
   });
 
-  test("mergeBaselineForFiles rewrites only the named rows and keeps the note", () => {
-    const existing = { note: "keep me", files: { "a.md": { spans: 3 }, "b.md": { spans: 2 }, "c.md": { spans: 1 } } };
-    const found = { "a.md": [span("a.md")], "b.md": [span("b.md"), span("b.md")], "c.md": [] };
-    const next = mergeBaselineForFiles(existing, found, ["a.md", "c.md"]);
-    assert.deepEqual(next, { note: "keep me", files: { "a.md": { spans: 1 }, "b.md": { spans: 2 } } });
+  test("the retired --files scope is refused as an unknown flag (exit 2)", async () => {
+    assert.equal(await duplicateRatchet.main(["--files", "a.md"]), 2);
   });
 
-  test("buildBaseline seeds every file with spans, sorted, note free of dates", () => {
-    const b = buildBaseline({ "z.md": [span("z.md")], "a.md": [span("a.md")], "e.md": [] });
-    assert.deepEqual(Object.keys(b.files), ["a.md", "z.md"]);
-    assert.doesNotMatch(b.note, /\d{4}-\d{2}-\d{2}/);
-  });
-
-  test("--files without --write-baseline, or without a value, throws an invalid-argument error", () => {
-    assert.equal(resolveFilesFilter(["node", "x"]), undefined);
-    assert.deepEqual(resolveFilesFilter(["--write-baseline", "--files", "a.md, b.md"]), ["a.md", "b.md"]);
-    for (const argv of [["--files", "a.md"], ["--write-baseline", "--files"], ["--write-baseline", "--files", "--x"], ["--write-baseline", "--files", ","]]) {
-      assert.throws(() => resolveFilesFilter(argv), (err: { code?: string }) => err.code === "invalid-argument");
-    }
-  });
-
-  test("the exceeded report names file:line, token count, partner, leading tokens and the remedy", () => {
-    const report = formatReport(compareAgainstBaseline({ "a.md": [span("a.md")] }, { note: "", files: {} }));
-    assert.match(report, /a\.md:4 {2}13 tokens {2}also in b\.md {2}"one two"/);
-    assert.match(report, /STD-PLAYBOOK-ONE-HOME/);
-    assert.match(report, /_fragments\//);
-  });
-
-  test("the stale report names the partner and the write-baseline command; clean is empty", () => {
-    const report = formatReport(compareAgainstBaseline({ "a.md": [span("a.md", "p.md")] }, { note: "", files: { "a.md": { spans: 2 } } }));
-    assert.match(report, /still shared with p\.md/);
-    assert.match(report, /--write-baseline --files/);
-    assert.equal(formatReport({ exceeded: [], stale: [] }), "");
+  test("the remedy the module prints names STD-PLAYBOOK-ONE-HOME and _fragments/", () => {
+    const help = (duplicateRatchet.policy.help ?? []).join("\n");
+    assert.match(help, /STD-PLAYBOOK-ONE-HOME/);
+    assert.match(help, /_fragments\//);
   });
 });
 
 describe("playbook-duplicate-ratchet: the real playbooks", () => {
   test("no playbook or fragment is above or below its baselined span count", async () => {
-    const report = formatReport(compareAgainstBaseline(scanRepo(), await loadBaseline()));
-    assert.equal(report, "", `\n${report}\n`);
+    const v = await duplicateRatchet.verdict();
+    assert.equal(v.ok, true, v.advice);
+    assert.equal(v.added.length, 0);
+    assert.equal(v.stale.length, 0);
   });
 
   test("the standard the report points at defines STD-PLAYBOOK-ONE-HOME and names this ratchet", () => {

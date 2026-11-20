@@ -31,24 +31,11 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { InvalidArgumentError } from "../../src/errors.ts";
 import { listPlaybooks } from "./playbook-reference-check.ts";
-import {
-  REPO_ROOT,
-  buildRowBaseline,
-  compareCountRows,
-  formatStaleAdvice,
-  isCliEntrypoint,
-  loadJsonBaseline,
-  mergeCountRows,
-  resolveListFlag,
-  runBaselineRatchet,
-  type CountDelta,
-} from "./seam-check-lib.ts";
+import { defineRatchet, runIfCli } from "./ratchet.ts";
+import { REPO_ROOT } from "./seam-check-lib.ts";
 
-export const BASELINE_REL = "scripts/ci/playbook-duplicate-baseline.json";
 export const STANDARD_REL = "CODING_STANDARDS.md";
-export const WRITE_BASELINE_CMD = "npx tsx scripts/ci/playbook-duplicate-ratchet.ts --write-baseline";
 /** Shortest shared token run that counts as a duplicated passage. */
 export const MIN_SPAN_TOKENS = 12;
 
@@ -66,23 +53,6 @@ export interface Span {
   tokens: number;
   partners: string[];
   head: string[];
-}
-
-export interface Baseline {
-  note: string;
-  files: Record<string, { spans: number }>;
-}
-
-export interface Delta {
-  file: string;
-  count: number;
-  baseline: number;
-  spans: Span[];
-}
-
-export interface Comparison {
-  exceeded: Delta[];
-  stale: Delta[];
 }
 
 /** A CommonMark fence line, optionally inside blockquote prefixes. */
@@ -224,79 +194,6 @@ export function countSpans(found: Record<string, Span[]>): Record<string, number
 }
 
 // ---------------------------------------------------------------------------
-// Baseline
-// ---------------------------------------------------------------------------
-
-const SPAN_KEYS = ["spans"] as const;
-
-const spanCounts = (found: Record<string, Span[]>): Record<string, { spans?: number }> => {
-  const out: Record<string, { spans?: number }> = {};
-  for (const [file, spans] of Object.entries(found)) out[file] = { spans: spans.length };
-  return out;
-};
-
-export function compareAgainstBaseline(found: Record<string, Span[]>, baseline: Baseline): Comparison {
-  const cmp = compareCountRows(spanCounts(found), baseline.files, SPAN_KEYS);
-  const toDelta = (d: CountDelta<"spans">): Delta => ({ file: d.file, count: d.count, baseline: d.baseline, spans: found[d.file] ?? [] });
-  return { exceeded: cmp.exceeded.map(toDelta), stale: cmp.stale.map(toDelta) };
-}
-
-export function buildBaseline(found: Record<string, Span[]>): Baseline {
-  const rows: Record<string, { spans: number }> = {};
-  for (const [file, spans] of Object.entries(found)) rows[file] = { spans: spans.length };
-  return buildRowBaseline(
-    rows,
-    `Shrink-only per-file counts of playbook passages shared verbatim with another playbook source (issue #5587). ` +
-      `Never raise a count: move the passage into a _fragments/ file per ${STANDARD_REL} STD-PLAYBOOK-ONE-HOME. ` +
-      `Lower with ${WRITE_BASELINE_CMD} [--files a.md,b.md].`,
-    (row) => row.spans === 0,
-  );
-}
-
-/** Re-seed only the named files' rows; every other row and the note stay as they are. */
-export function mergeBaselineForFiles(existing: Baseline, found: Record<string, Span[]>, files: readonly string[]): Baseline {
-  const rows = mergeCountRows(existing.files, spanCounts(found), SPAN_KEYS, { files }) as Record<string, { spans: number }>;
-  return { note: existing.note, files: rows };
-}
-
-/**
- * Resolve the writer's `--files a.md,b.md` filter from argv: `undefined` = rewrite
- * every row. `--files` without `--write-baseline`, or with no/empty value, throws.
- */
-export function resolveFilesFilter(argv: readonly string[]): string[] | undefined {
-  const names = resolveListFlag(argv, "--files", "--files needs a comma-separated value");
-  if (names !== undefined && names.length === 0) throw new InvalidArgumentError("--files needs at least one file name");
-  return names;
-}
-
-/** Empty string when clean. */
-export function formatReport(cmp: Comparison): string {
-  const out: string[] = [];
-  if (cmp.exceeded.length > 0) {
-    out.push("Playbook passages duplicated across files above the baseline:");
-    for (const d of cmp.exceeded) {
-      out.push(`  ${d.file}: duplicated spans ${d.count} > baseline ${d.baseline}`);
-      for (const s of d.spans) {
-        out.push(`    ${s.file}:${s.line}  ${s.tokens} tokens  also in ${s.partners.join(", ")}  "${s.head.join(" ")}"`);
-      }
-    }
-    out.push(
-      `Fix (${STANDARD_REL} STD-PLAYBOOK-ONE-HOME): move the passage into a _fragments/ file and @include it from every holder. Do not raise the baseline.`,
-    );
-  }
-  if (cmp.stale.length > 0) {
-    out.push("Counts now below the baseline (lower the baseline so they cannot creep back):");
-    for (const d of cmp.stale) {
-      const partners = [...new Set(d.spans.flatMap((s) => s.partners))];
-      out.push(`  ${d.file}: duplicated spans ${d.count} < baseline ${d.baseline}${partners.length ? ` (still shared with ${partners.join(", ")})` : ""}`);
-    }
-    out.push(formatStaleAdvice({ baselineRel: BASELINE_REL, rowAction: "lower the listed counts to the printed values" }));
-    out.push(`A removed copy lowers its partner's row too; rewrite only the named rows with ${WRITE_BASELINE_CMD} --files <a.md,b.md>.`);
-  }
-  return out.join("\n");
-}
-
-// ---------------------------------------------------------------------------
 // Repository adapter
 // ---------------------------------------------------------------------------
 
@@ -306,25 +203,20 @@ export function scanRepo(root: string = REPO_ROOT): Record<string, Span[]> {
   return scanTexts(texts);
 }
 
-export async function loadBaseline(root: string = REPO_ROOT): Promise<Baseline> {
-  return loadJsonBaseline<Baseline>(join(root, BASELINE_REL), { note: "unseeded", files: {} }, { strict: true });
-}
+export const duplicateRatchet = defineRatchet({
+  id: "playbook-duplicate-ratchet",
+  baseline: "scripts/ci/playbook-duplicate-baseline.json",
+  shape: "counted",
+  polarity: "ceiling",
+  stale: "fail",
+  enforcement: "required",
+  // One row per playbook, valued at its span count.
+  measure: async (root) => countSpans(scanRepo(root)),
+  help: [
+    `Move the passage into a _fragments/ file and @include it from every holder (${STANDARD_REL} STD-PLAYBOOK-ONE-HOME).`,
+    "A removed copy also lowers its partner playbook's row; tighten that row too, with a Baseline-raise line if it rises.",
+    "To find the span, diff the named playbook against master; scanTexts(texts) lists every span with its line and partners.",
+  ],
+});
 
-async function main(): Promise<void> {
-  const code = await runBaselineRatchet({
-    name: "playbook-duplicate-ratchet",
-    baselineRel: BASELINE_REL,
-    scan: () => scanRepo(),
-    load: () => loadBaseline(),
-    build: buildBaseline,
-    merge: mergeBaselineForFiles,
-    filter: resolveFilesFilter,
-    compare: compareAgainstBaseline,
-    report: formatReport,
-  });
-  if (code !== 0) process.exit(code);
-}
-
-if (isCliEntrypoint(import.meta.url)) {
-  await main();
-}
+runIfCli(import.meta.url, duplicateRatchet);
