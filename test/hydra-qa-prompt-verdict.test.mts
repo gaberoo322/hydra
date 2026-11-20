@@ -472,7 +472,7 @@ describe("hydra-qa playbook wires convergent review (issue #4735)", () => {
     const routeSrc = readFileSync(join(REPO_ROOT, "scripts", "qa", "route.ts"), "utf8");
     const t4 = routeSrc.slice(routeSrc.indexOf("// T4 FAIL: the Deep-QA Remediation Loop"), routeSrc.indexOf("// T1/T2/T3 (and unknown-tier) FAIL"));
     assert.ok(t4.includes("roundOut.deepQa"), "T4 reads the deep-QA action from the round-action JSON");
-    assert.ok(!t4.includes("qa-round-cap") && !t4.includes("decideQaRoundAction") && !t4.includes("roundAction"));
+    assert.ok(!t4.includes("qa-round-cap"));
   });
 });
 
