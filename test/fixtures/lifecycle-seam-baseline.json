@@ -1,5 +1,1 @@
-{
-  "rule": "lifecycle-seam",
-  "note": "Shrink-only ratchet (ADR-0047, #5311): per-file count of direct lifecycle state-label write sites. Never raise a row; migrate the site to scripts/lifecycle.ts then run: npx tsx scripts/ci/lifecycle-seam-check.ts --shrink-baseline",
-  "files": {}
-}
+{}

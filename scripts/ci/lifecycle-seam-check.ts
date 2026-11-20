@@ -15,12 +15,13 @@
  *
  * State names are imported from `src/lifecycle/` (`OPEN_STATES`), never copied.
  *
- * CLI (convenience only):
- *   npx tsx scripts/ci/lifecycle-seam-check.ts              # report
- *   npx tsx scripts/ci/lifecycle-seam-check.ts --seed       # write fixture iff absent
- *   npx tsx scripts/ci/lifecycle-seam-check.ts --shrink-baseline
+ * CLI (the Ratchet module's `main`, convenience only):
+ *   npx tsx scripts/ci/lifecycle-seam-check.ts                    # report
+ *   npx tsx scripts/ci/lifecycle-seam-check.ts --write-baseline   # tighten only
  *
- * There is no tool path that grows a baseline row.
+ * Fix a new site by routing the transition through
+ * `npx tsx scripts/lifecycle.ts advance <issue> <to> ...`; growth needs
+ * `--write-baseline --allow-grow` plus a reviewed `Baseline-raise:` PR line.
  *
  * The scanner is a best-effort heuristic behind a shrink-only ratchet, not a
  * sound analysis (#5359 round-4 ruling). Beyond plain flags and calls it counts:
@@ -47,11 +48,12 @@
  *    aliasing evasion `PR=$ISSUE; gh api -X DELETE repos/o/r/issues/$PR/labels/x` is not counted.
  */
 
-import { readdir, readFile, writeFile } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { ORCH_BOARD_LABELS } from "../../src/board-labels.ts";
 import { OPEN_STATES } from "../../src/lifecycle/index.ts";
-import { REPO_ROOT, isCliEntrypoint, stripComments } from "./seam-check-lib.ts";
+import { defineRatchet, runIfCli } from "./ratchet.ts";
+import { REPO_ROOT, stripComments } from "./seam-check-lib.ts";
 
 export { REPO_ROOT };
 
@@ -60,12 +62,6 @@ export const LIFECYCLE_STATE_NAMES: readonly string[] = [...OPEN_STATES];
 const STATE_SET: ReadonlySet<string> = new Set(LIFECYCLE_STATE_NAMES);
 
 export const LIFECYCLE_SEAM_BASELINE_REL = "test/fixtures/lifecycle-seam-baseline.json";
-
-/** The one fix message every new-site failure names. */
-export const LIFECYCLE_FIX_COMMAND =
-  "npx tsx scripts/lifecycle.ts advance <issue> <to> [--evidence k=v] [--reason R --rationale T]";
-export const LIFECYCLE_SHRINK_COMMAND =
-  "npx tsx scripts/ci/lifecycle-seam-check.ts --shrink-baseline";
 
 /** Exemptions: the ONLY carve-outs, one reason each. */
 export const LIFECYCLE_EXEMPTIONS: ReadonlyArray<{
@@ -679,12 +675,6 @@ export interface FileSites {
 }
 export type Observed = Record<string, FileSites>;
 
-export interface LifecycleBaseline {
-  rule: "lifecycle-seam";
-  note: string;
-  files: Record<string, number>;
-}
-
 const SKIP_DIRS = new Set(["node_modules", ".git", ".worktrees", "dist"]);
 
 const TS_LIKE_RE = /\.(?:ts|mts|cts|tsx|js|cjs|mjs)$/;
@@ -736,129 +726,28 @@ export async function scanLifecycleSeam(root: string = REPO_ROOT): Promise<Obser
   return observed;
 }
 
-export async function loadLifecycleBaseline(
-  root: string = REPO_ROOT,
-): Promise<LifecycleBaseline> {
-  return parseLifecycleBaseline(await readFile(join(root, LIFECYCLE_SEAM_BASELINE_REL), "utf8"));
-}
+/**
+ * The lifecycle-seam ratchet on the Ratchet module: per-file count of direct
+ * state-label write sites. Fix a failure by routing the transition through
+ * `npx tsx scripts/lifecycle.ts advance <issue> <to> [--evidence k=v]
+ * [--reason R --rationale T]`, never by raising a row.
+ */
+export const lifecycleSeamRatchet = defineRatchet({
+  id: "lifecycle-seam-check",
+  baseline: LIFECYCLE_SEAM_BASELINE_REL,
+  shape: "counted",
+  polarity: "ceiling",
+  stale: "fail",
+  enforcement: "required",
+  help: [
+    "Each counted site is a direct lifecycle state-label write. Route the transition through the lifecycle seam:",
+    "  npx tsx scripts/lifecycle.ts advance <issue> <to> [--evidence k=v] [--reason R --rationale T]",
+  ],
+  async measure(root) {
+    const rows: Record<string, number> = {};
+    for (const [file, { count }] of Object.entries(await scanLifecycleSeam(root))) rows[file] = count;
+    return rows;
+  },
+});
 
-/** Pure shape check of the baseline JSON text; throws on a malformed baseline. */
-export function parseLifecycleBaseline(raw: string): LifecycleBaseline {
-  const parsed = JSON.parse(raw) as Partial<LifecycleBaseline> | null;
-  const files = parsed?.files;
-  if (
-    !parsed ||
-    parsed.rule !== "lifecycle-seam" ||
-    typeof files !== "object" ||
-    files === null ||
-    !Object.values(files).every((n) => Number.isInteger(n) && n >= 0)
-  ) {
-    throw new Error(`[lifecycle-seam-check] malformed baseline ${LIFECYCLE_SEAM_BASELINE_REL}`);
-  }
-  return parsed as LifecycleBaseline;
-}
-
-export interface RatchetVerdict {
-  ok: boolean;
-  messages: string[];
-  total: number;
-}
-
-/** Shrink-only verdict. An unlisted file has baseline 0. */
-export function checkLifecycleRatchet(
-  observed: Observed,
-  baseline: Pick<LifecycleBaseline, "files">,
-): RatchetVerdict {
-  const messages: string[] = [];
-  let total = 0;
-  for (const [file, { count, lines }] of Object.entries(observed)) {
-    total += count;
-    const allowed = baseline.files[file] ?? 0;
-    if (count > allowed) {
-      messages.push(
-        `new direct state-label write in ${file} (${count} sites, baseline ${allowed}; lines ${lines.join(", ")}). ` +
-          `Route the transition through the lifecycle seam: ${LIFECYCLE_FIX_COMMAND} (scripts/lifecycle.ts)`,
-      );
-    }
-  }
-  for (const [file, allowed] of Object.entries(baseline.files)) {
-    const seen = observed[file]?.count ?? 0;
-    if (seen < allowed) {
-      messages.push(
-        `baseline is stale — shrink it: ${file} now has ${seen} sites (baseline ${allowed}). ` +
-          `Run: ${LIFECYCLE_SHRINK_COMMAND}`,
-      );
-    }
-  }
-  return { ok: messages.length === 0, messages, total };
-}
-
-function serializeBaseline(files: Record<string, number>): string {
-  const sorted: Record<string, number> = {};
-  for (const k of Object.keys(files).sort()) if (files[k]! > 0) sorted[k] = files[k]!;
-  const b: LifecycleBaseline = {
-    rule: "lifecycle-seam",
-    note: `Shrink-only ratchet (ADR-0047, #5311): per-file count of direct lifecycle state-label write sites. Never raise a row; migrate the site to scripts/lifecycle.ts then run: ${LIFECYCLE_SHRINK_COMMAND}`,
-    files: sorted,
-  };
-  return JSON.stringify(b, null, 2) + "\n";
-}
-
-async function cli(): Promise<number> {
-  const observed = await scanLifecycleSeam(REPO_ROOT);
-  const path = join(REPO_ROOT, LIFECYCLE_SEAM_BASELINE_REL);
-  const argv = process.argv;
-  if (argv.includes("--seed")) {
-    let exists = true;
-    try {
-      await readFile(path, "utf8");
-    } catch (err) {
-      /* intentional: ENOENT is the only state in which --seed may write */
-      exists = (err as NodeJS.ErrnoException).code !== "ENOENT";
-    }
-    if (exists) {
-      console.error(`[lifecycle-seam-check] --seed refused: ${relative(REPO_ROOT, path)} already exists`);
-      return 1;
-    }
-    const files: Record<string, number> = {};
-    for (const [f, s] of Object.entries(observed)) files[f] = s.count;
-    await writeFile(path, serializeBaseline(files));
-    console.log(`[lifecycle-seam-check] seeded ${Object.keys(files).length} files`);
-    return 0;
-  }
-  if (argv.includes("--shrink-baseline")) {
-    const baseline = await loadLifecycleBaseline(REPO_ROOT);
-    const grown = Object.entries(observed).filter(([f, s]) => s.count > (baseline.files[f] ?? 0));
-    if (grown.length > 0) {
-      console.error(
-        `[lifecycle-seam-check] --shrink-baseline refused (nothing written); new sites in: ${grown.map(([f]) => f).join(", ")}`,
-      );
-      return 1;
-    }
-    const files: Record<string, number> = {};
-    for (const [f, allowed] of Object.entries(baseline.files)) {
-      const n = Math.min(observed[f]?.count ?? 0, allowed);
-      if (n > 0) files[f] = n;
-    }
-    await writeFile(path, serializeBaseline(files));
-    console.log(`[lifecycle-seam-check] baseline now ${Object.keys(files).length} files`);
-    return 0;
-  }
-  const verdict = checkLifecycleRatchet(observed, await loadLifecycleBaseline(REPO_ROOT));
-  if (!verdict.ok) {
-    for (const m of verdict.messages) console.error(`[lifecycle-seam-check] ${m}`);
-    return 1;
-  }
-  console.log(`[lifecycle-seam-check] OK — ${verdict.total} known sites, no new ones.`);
-  return 0;
-}
-
-if (isCliEntrypoint(import.meta.url)) {
-  cli().then(
-    (code) => process.exit(code),
-    (err) => {
-      console.error("[lifecycle-seam-check] crash:", err);
-      process.exit(2);
-    },
-  );
-}
+runIfCli(import.meta.url, lifecycleSeamRatchet);

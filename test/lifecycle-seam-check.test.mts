@@ -8,16 +8,17 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 
 const { OPEN_STATES } = await import("../src/lifecycle/index.ts");
 const {
   LIFECYCLE_STATE_NAMES,
   REPO_ROOT,
-  checkLifecycleRatchet,
   isExemptPath,
   isSurface,
-  loadLifecycleBaseline,
-  parseLifecycleBaseline,
+  lifecycleSeamRatchet,
   scanFileSites,
   scanLifecycleSeam,
 } = await import("../scripts/ci/lifecycle-seam-check.ts");
@@ -29,46 +30,89 @@ describe("lifecycle-seam-check: live tree vs committed baseline", () => {
   });
 
   test("no new direct state-label write sites and the baseline is not stale", async () => {
-    const verdict = checkLifecycleRatchet(
-      await scanLifecycleSeam(REPO_ROOT),
-      await loadLifecycleBaseline(REPO_ROOT),
-    );
-    assert.deepEqual(verdict.messages, []);
-    assert.equal(verdict.ok, true);
+    const v = await lifecycleSeamRatchet.verdict();
+    assert.equal(v.ok, true, v.advice);
+    assert.deepEqual(v.added, []);
+    assert.deepEqual(v.stale, []);
   });
 });
 
-describe("lifecycle-seam-check: ratchet verdicts", () => {
-  const observed = { "docs/operator-playbooks/hydra-x.md": { count: 2, lines: [3, 9] } };
+describe("lifecycle-seam-check: ratchet verdicts on a throwaway tree", () => {
+  const FILE = "docs/operator-playbooks/hydra-x.md";
+  // Two write sites in one playbook: the state literal after --add-label is a site.
+  const PLAYBOOK = "gh issue edit 5 --add-label needs-qa\ngh issue edit 6 --add-label needs-qa\n";
 
-  test("observed above baseline (unlisted = 0) fails naming the file, lines and scripts/lifecycle.ts", () => {
-    const v = checkLifecycleRatchet(observed, { files: {} });
-    assert.equal(v.ok, false);
-    assert.match(v.messages[0]!, /new direct state-label write in docs\/operator-playbooks\/hydra-x\.md/);
-    assert.match(v.messages[0]!, /lines 3, 9/);
-    assert.match(v.messages[0]!, /scripts\/lifecycle\.ts advance/);
+  async function withTree(baseline: Record<string, number>, run: (root: string) => Promise<void>) {
+    const root = await mkdtemp(join(tmpdir(), "lifecycle-seam-"));
+    try {
+      const put = async (rel: string, body: string) => {
+        await mkdir(dirname(join(root, rel)), { recursive: true });
+        await writeFile(join(root, rel), body);
+      };
+      await put(FILE, PLAYBOOK);
+      await put(lifecycleSeamRatchet.policy.baseline, `${JSON.stringify(baseline)}\n`);
+      await run(root);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+
+  test("a file above its baseline (unlisted = 0) fails naming the file row", async () => {
+    await withTree({}, async (root) => {
+      const v = await lifecycleSeamRatchet.verdict(root);
+      assert.equal(v.ok, false);
+      assert.deepEqual(v.added, [FILE]);
+      assert.match(v.advice, /docs\/operator-playbooks\/hydra-x\.md \(baseline 0, measured 2\)/);
+    });
   });
 
-  test("a new site in an already-baselined file still fails (per-file count)", () => {
-    const v = checkLifecycleRatchet(observed, { files: { "docs/operator-playbooks/hydra-x.md": 1 } });
-    assert.equal(v.ok, false);
-    assert.match(v.messages[0]!, /new direct state-label write/);
+  test("failure advice carries the lifecycle advance fix command; a passing run does not", async () => {
+    await withTree({}, async (root) => {
+      const v = await lifecycleSeamRatchet.verdict(root);
+      assert.match(v.advice, /npx tsx scripts\/lifecycle\.ts advance <issue> <to>/);
+    });
+    await withTree({ [FILE]: 2 }, async (root) => {
+      const v = await lifecycleSeamRatchet.verdict(root);
+      assert.doesNotMatch(v.advice, /lifecycle\.ts advance/);
+    });
   });
 
-  test("observed below baseline, or a vanished file, fails with the shrink command", () => {
-    const below = checkLifecycleRatchet(observed, { files: { "docs/operator-playbooks/hydra-x.md": 3 } });
-    assert.equal(below.ok, false);
-    assert.match(below.messages[0]!, /baseline is stale/);
-    assert.match(below.messages[0]!, /--shrink-baseline/);
-    const gone = checkLifecycleRatchet({}, { files: { "docs/gone.md": 1 } });
-    assert.equal(gone.ok, false);
-    assert.match(gone.messages[0]!, /baseline is stale/);
+  test("a new site in an already-baselined file still fails (per-file count)", async () => {
+    await withTree({ [FILE]: 1 }, async (root) => {
+      const v = await lifecycleSeamRatchet.verdict(root);
+      assert.equal(v.ok, false);
+      assert.deepEqual(v.added, [FILE]);
+    });
   });
 
-  test("an exact match passes with the total", () => {
-    const v = checkLifecycleRatchet(observed, { files: { "docs/operator-playbooks/hydra-x.md": 2 } });
-    assert.equal(v.ok, true);
-    assert.equal(v.total, 2);
+  test("a row above the measured count, or a vanished file, is stale and fails", async () => {
+    await withTree({ [FILE]: 3, "docs/gone.md": 1 }, async (root) => {
+      const v = await lifecycleSeamRatchet.verdict(root);
+      assert.equal(v.ok, false);
+      assert.deepEqual(v.added, []);
+      assert.deepEqual(v.stale, ["docs/gone.md", FILE]);
+    });
+  });
+
+  test("an exact match passes with the total", async () => {
+    await withTree({ [FILE]: 2 }, async (root) => {
+      const v = await lifecycleSeamRatchet.verdict(root);
+      assert.equal(v.ok, true, v.advice);
+      assert.equal(v.measured, 2);
+    });
+  });
+
+  test("a malformed baseline fails closed as crashed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lifecycle-seam-"));
+    try {
+      await mkdir(join(root, "test/fixtures"), { recursive: true });
+      await writeFile(join(root, lifecycleSeamRatchet.policy.baseline), '{"a":-1}\n');
+      const v = await lifecycleSeamRatchet.verdict(root);
+      assert.equal(v.ok, false);
+      assert.equal(v.crashed, true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 
@@ -581,17 +625,5 @@ describe("lifecycle-seam-check: fails closed", () => {
 
   test("a missing scan root has no sites", async () => {
     assert.deepEqual(await scanLifecycleSeam(`${REPO_ROOT}/no-such-root-5311`), {});
-  });
-
-  test("a malformed baseline throws", () => {
-    assert.throws(() => parseLifecycleBaseline('{"rule":"x"}'), /malformed baseline/);
-    assert.throws(
-      () => parseLifecycleBaseline('{"rule":"lifecycle-seam","files":{"a":-1}}'),
-      /malformed baseline/,
-    );
-    assert.deepEqual(
-      parseLifecycleBaseline('{"rule":"lifecycle-seam","files":{"a":2}}').files,
-      { a: 2 },
-    );
   });
 });
