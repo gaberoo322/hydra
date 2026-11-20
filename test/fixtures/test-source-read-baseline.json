@@ -131,6 +131,7 @@
     "test/operator-notify-cli.test.mts": "behaviour",
     "test/otel-ingest.test.mts": "grandfathered",
     "test/pace-gate-allow.test.mts": "behaviour",
+    "test/pr-body-edit.test.mts": "behaviour",
     "test/qa-catch-rate.test.mts": "grandfathered",
     "test/qa-merge-guard-callsites.test.mts": "invariant-lint",
     "test/qa-merge-guard.test.mts": "invariant-lint",

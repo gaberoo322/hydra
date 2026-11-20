@@ -406,7 +406,7 @@ checks pass AND resolve the blocking findings of its latest QA FAIL.
    existing PR's CI re-runs on the push.
 4. **Design-concept-reconcile failure specifically:** the gate reads the PR
    body captured at push time (webhook snapshot). Correct the body FIRST via
-   `gh pr edit <pr> --body-file <file>`, THEN push the fix commit — a push
+   `npx tsx scripts/pr-body-edit.ts <pr> --body-file <file>` (guarded: refuses an empty body or lost `Closes #N`), THEN push the fix commit — a push
    that lands before the body edit replays the stale body and re-fails the
    check (bit #4242 twice).
 5. **Verify in the foreground** (`npm test`, `npm run typecheck` AND `npm run typecheck:test`, before the push that is meant to be final), commit, push — the same commit-before-verify discipline as any dev dispatch: commit and push first, verify, push again once green. When done, post exactly ONE comment on the PR naming what was fixed and which required check(s) or QA finding(s) the fix targets, plus any finding you rebutted and why, naming both tests (the red-without-the-fix test and the sibling-shape pin) for each QA-FAIL finding fixed with a code change — none for a rebutted finding or a CI-only fix. Do not relabel the

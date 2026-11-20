@@ -53,6 +53,10 @@ export interface DispatchClaim {
   run: string;
   artifactHash: string | null;
   openedAt: number;
+  /** The PR a `forward-fix` claim targets (stamped when the claim carries one; reap reads it, #5638). */
+  pr?: number;
+  /** The dispatch purpose the claim was opened with (`fresh`/`resume`/`forward-fix`). */
+  purpose?: string;
 }
 
 export function lifecycleJournalKey(repo: string, issue: number): string {
