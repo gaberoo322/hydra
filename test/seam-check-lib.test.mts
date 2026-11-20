@@ -336,7 +336,9 @@ describe("seam-check-lib: writeJsonBaseline growth refusal (chokepoint for every
     const { execFileSync } = await import("node:child_process");
     const files = execFileSync("git", ["grep", "-l", "writeJsonBaseline(", "--", "scripts/ci/*.ts"], { cwd: REPO_ROOT, encoding: "utf8" })
       .split("\n").filter(Boolean).filter((f: string) => !f.endsWith("seam-check-lib.ts"));
-    assert.ok(files.length >= 6);
+    // ratchet.ts, skill-size-ratchet.ts, target-coupling-check.ts, test-typecheck-check.ts:
+    // the scan scripts that moved onto the Ratchet module (#5650/#5652) no longer call it directly.
+    assert.ok(files.length >= 4);
     for (const f of files) {
       const src = await readFile(join(REPO_ROOT, f), "utf8");
       assert.doesNotMatch(src, /\bwriteFile(Sync)?\(\s*[^)]*baseline/i, `${f} writes a baseline without the chokepoint`);

@@ -34,7 +34,7 @@
     },
     "docs/operator-playbooks/_fragments/hydra-dev-child-flow.md": {
       "issue-cite": 8,
-      "shell-lines": 100,
+      "shell-lines": 99,
       "symbol-cite": 3,
       "invariant-cite": 4
     },
