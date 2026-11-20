@@ -12,9 +12,9 @@
  * is enforced here is that every row names a known kind, an existing file, and a
  * file that still reads a code path.
  *
- * Per-SITE pin counts (issue #5487): the fixture's `pinSites` map is shrink-only per file
- * and counter; a new regex / substring / indexOf pin over a code or playbook read fails
- * here as `pin-count-grew`.
+ * Per-SITE pin counts (issue #5487): the fixture's `pins` rows are shrink-only per file
+ * and counter; a new regex / substring / indexOf pin over a code or playbook read is an
+ * added `pins` row and fails here. The verdict is scripts/ci/ratchet.ts's (issue #5652).
  *
  * Detection rules live in scripts/ci/test-source-read-scan.ts; the trailing
  * describe pins them against synthetic sources.
@@ -22,7 +22,8 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -30,34 +31,26 @@ import {
   READ_KINDS,
   RULE_ID,
   advisoryPromptSites,
-  checkReadRatchet,
   isCodePathLiteral,
-  planBaselineWrite,
+  pinRow,
   pinSitesOf,
+  readerRow,
   readsCodePath,
-  scanPinSites,
-  scanTestReaders,
+  testSourceReadRatchet,
 } from "../scripts/ci/test-source-read-scan.ts";
-import type { ReadBaseline } from "../scripts/ci/test-source-read-scan.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const BASELINE_PATH = "test/fixtures/test-source-read-baseline.json";
 
 describe("test-source-read ratchet (live tree)", () => {
-  const baseline = JSON.parse(readFileSync(join(ROOT, BASELINE_PATH), "utf8")) as ReadBaseline;
-  const readers = scanTestReaders(ROOT);
-  const violations = checkReadRatchet(readers, baseline, (p) => existsSync(join(ROOT, p)), scanPinSites(ROOT));
-
-  it("every code-reading test file is listed under a sanctioned kind, and no row is stale", () => {
-    assert.deepEqual(
-      violations.map((v) => v.message),
-      [],
-      `Fix per message above; rule ${RULE_ID}`,
-    );
+  it("every code-reading test file is listed under a sanctioned kind, no pin count grew, and no row is stale", async () => {
+    const v = await testSourceReadRatchet.verdict();
+    assert.ok(v.ok, `${v.advice}\nRules: ${RULE_ID} (code reads / pins), ${PROMPT_RULE_ID} (prompt pins)`);
   });
 
   it("the ratchet test lists itself as invariant-lint", () => {
-    assert.equal(baseline.files["test/test-source-read-ratchet.test.mts"], "invariant-lint");
+    const rows = JSON.parse(readFileSync(join(ROOT, BASELINE_PATH), "utf8")) as Record<string, number>;
+    assert.equal(rows[readerRow("test/test-source-read-ratchet.test.mts", "invariant-lint")], 1);
   });
 });
 
@@ -84,20 +77,6 @@ describe("test-source-read ratchet (detection rules, synthetic sources)", () => 
       'readFileSync("docs/x.md");',
     ].join("\n");
     assert.equal(readsCodePath(src), false);
-  });
-
-  it("an unlisted reader, an unknown kind and stale rows are each reported with the rule id", () => {
-    const v = checkReadRatchet(
-      ["test/new.test.mts"],
-      { files: { "test/gone.test.mts": "grandfathered", "test/bad.test.mts": "nope", "test/nolonger.test.mts": "behaviour" } },
-      (p) => p !== "test/gone.test.mts",
-    );
-    const byCode = new Map(v.map((x) => [x.code + ":" + x.file, x.message]));
-    assert.match(byCode.get("unlisted-reader:test/new.test.mts") ?? "", /"test\/new\.test\.mts": "behaviour"/);
-    assert.match(byCode.get("unlisted-reader:test/new.test.mts") ?? "", new RegExp(RULE_ID));
-    assert.ok(byCode.has("unknown-kind:test/bad.test.mts"));
-    assert.ok(byCode.has("stale-missing-file:test/gone.test.mts"));
-    assert.ok(byCode.has("stale-no-longer-reads:test/nolonger.test.mts"));
   });
 
   it("a code pin site needs a subject bound from a code-path read (one-statement, one-hop const, inline)", () => {
@@ -135,53 +114,60 @@ describe("test-source-read ratchet (detection rules, synthetic sources)", () => 
     assert.equal(advisoryPromptSites(sentence.join("\n")), 1);
   });
 
-  it("pin counts are shrink-only per (file, counter): grew and stale name the rule and the command", () => {
-    const baseline: ReadBaseline = { files: {}, pinSites: { "test/a.test.mts": { code: 2, prompt: 1 }, "test/gone.test.mts": { code: 1 } } };
-    const v = checkReadRatchet(
-      [],
-      baseline,
-      () => true,
-      { "test/a.test.mts": { code: 3, prompt: 0 }, "test/new.test.mts": { code: 0, prompt: 1 } },
-    );
-    const grew = v.filter((x) => x.code === "pin-count-grew");
-    const stale = v.filter((x) => x.code === "pin-count-stale");
-    assert.deepEqual(grew.map((x) => x.file).sort(), ["test/a.test.mts", "test/new.test.mts"]);
-    assert.match(grew.find((x) => x.file === "test/a.test.mts")?.message ?? "", new RegExp(RULE_ID));
-    assert.match(grew.find((x) => x.file === "test/new.test.mts")?.message ?? "", new RegExp(PROMPT_RULE_ID));
-    assert.deepEqual(stale.map((x) => x.file).sort(), ["test/a.test.mts", "test/gone.test.mts"]);
-    assert.ok(stale.every((x) => x.message.includes("--write-baseline")));
-    assert.deepEqual(checkReadRatchet([], baseline, () => true, { "test/a.test.mts": { code: 2, prompt: 1 }, "test/gone.test.mts": { code: 1, prompt: 0 } }), []);
-  });
-
   it("the kind set is closed", () => {
     assert.deepEqual([...READ_KINDS], ["drift-guard", "invariant-lint", "dashboard-pin", "behaviour", "grandfathered"]);
   });
 });
 
-describe("test-source-read ratchet (baseline write decision, INV-3)", () => {
-  const baseline: ReadBaseline = {
-    files: { "test/a.test.mts": "behaviour" },
-    pinSites: { "test/a.test.mts": { code: 2, prompt: 1 } },
-  };
+describe("test-source-read ratchet (measure against a tmp root, INV-3)", () => {
+  const READER = 'import { readFileSync } from "node:fs";\nreadFileSync("src/a.ts");\n';
+  const PINNED = `${READER}const s = readFileSync("src/a.ts", "utf8");\nassert.match(s, /x/);\n`;
 
-  it("--write-baseline refuses growth and names the grown file", () => {
-    const plan = planBaselineWrite({ "test/a.test.mts": { code: 3, prompt: 1 } }, baseline, false);
-    assert.equal(plan.ok, false);
-    if (!plan.ok) assert.deepEqual(plan.refusals.map((r) => r.file), ["test/a.test.mts"]);
-  });
-
-  it("--write-baseline accepts a shrink and never touches the files rows", () => {
-    const plan = planBaselineWrite({ "test/a.test.mts": { code: 1, prompt: 0 } }, baseline, false);
-    assert.equal(plan.ok, true);
-    if (plan.ok) {
-      assert.deepEqual(plan.next.pinSites, { "test/a.test.mts": { code: 1, prompt: 0 } });
-      assert.deepEqual(plan.next.files, baseline.files);
+  function treeWith(files: Record<string, string>, baseline: Record<string, number>): string {
+    const root = mkdtempSync(join(tmpdir(), "source-read-"));
+    mkdirSync(join(root, "test", "fixtures"), { recursive: true });
+    for (const [name, src] of Object.entries(files)) writeFileSync(join(root, "test", name), src);
+    writeFileSync(join(root, BASELINE_PATH), `${JSON.stringify(baseline)}\n`);
+    return root;
+  }
+  async function verdictFor(files: Record<string, string>, baseline: Record<string, number>) {
+    const root = treeWith(files, baseline);
+    try {
+      return await testSourceReadRatchet.verdict(root);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
+  }
+
+  it("a listed reader keeps its baseline kind; an unlisted reader is an added behaviour row", async () => {
+    const ok = await verdictFor({ "a.test.mts": READER }, { [readerRow("test/a.test.mts", "drift-guard")]: 1 });
+    assert.equal(ok.ok, true, ok.advice);
+    const added = await verdictFor({ "a.test.mts": READER }, {});
+    assert.deepEqual(added.added, [readerRow("test/a.test.mts", "behaviour")]);
+    assert.match(added.advice, /--write-baseline --allow-grow/);
   });
 
-  it("--init is the only growth path", () => {
-    const plan = planBaselineWrite({ "test/a.test.mts": { code: 9, prompt: 9 } }, baseline, true);
-    assert.equal(plan.ok, true);
-    if (plan.ok) assert.deepEqual(plan.next.pinSites, { "test/a.test.mts": { code: 9, prompt: 9 } });
+  it("a row whose file stopped reading code, or vanished, is stale and fails", async () => {
+    const v = await verdictFor(
+      { "a.test.mts": "export {};\n" },
+      { [readerRow("test/a.test.mts", "behaviour")]: 1, [readerRow("test/gone.test.mts", "behaviour")]: 1 },
+    );
+    assert.equal(v.ok, false);
+    assert.deepEqual(v.stale, [readerRow("test/a.test.mts", "behaviour"), readerRow("test/gone.test.mts", "behaviour")]);
+  });
+
+  it("an unknown kind is stale and its corrected behaviour row is added", async () => {
+    const v = await verdictFor({ "a.test.mts": READER }, { [readerRow("test/a.test.mts", "nope")]: 1 });
+    assert.deepEqual(v.stale, [readerRow("test/a.test.mts", "nope")]);
+    assert.deepEqual(v.added, [readerRow("test/a.test.mts", "behaviour")]);
+  });
+
+  it("a new pin site is an added pins row; a removed pin site is stale", async () => {
+    const kind = { [readerRow("test/a.test.mts", "behaviour")]: 1 };
+    const grew = await verdictFor({ "a.test.mts": PINNED }, kind);
+    assert.deepEqual(grew.added, [pinRow("test/a.test.mts", "code")]);
+    const shrank = await verdictFor({ "a.test.mts": READER }, { ...kind, [pinRow("test/a.test.mts", "code")]: 1 });
+    assert.deepEqual(shrank.stale, [pinRow("test/a.test.mts", "code")]);
+    assert.equal(shrank.ok, false);
   });
 });

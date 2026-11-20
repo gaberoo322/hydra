@@ -47,17 +47,17 @@
  * `test/fixtures/suite-count-baseline.json` and
  * `test/fixtures/adr-area-baseline.json`.
  *
- * The escape hatch is deliberately that baseline regeneration, NOT a marker
- * in the PR body. A PR-body escape hatch would mean reading
- * `GITHUB_EVENT_PATH` from inside the test suite — exactly the coupling issue
- * #4132 removed, where a lint on the PR description caused 12 of 19 red
- * `test` jobs and could not self-clear on re-run. A baseline bump is visible
- * in the diff, reviewable, and needs no webhook payload.
+ * The escape hatch is STD-BASELINE-EDIT-ROWS: set exactly the printed row (or
+ * run `npx tsx scripts/ci/test-subject-map.ts --write-baseline --allow-grow`
+ * when it moves no other row) and add a `Baseline-raise:` PR-body line. The
+ * suite itself reads no PR body: the advisory baseline-raise-check workflow
+ * checks that line, so the #4132 coupling (a lint on the PR description
+ * reddening the `test` job) stays removed.
  */
 
 import { readFileSync, readdirSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { writeJsonBaseline } from "./seam-check-lib.ts";
+import { join } from "node:path";
+import { defineRatchet, runIfCli } from "./ratchet.ts";
 
 /** A test file that legitimately owns more than one file per subject. */
 export type SubjectCounts = Record<string, number>;
@@ -312,43 +312,25 @@ export function countBySubject(subjects: Map<string, string | null>): SubjectCou
   return counts;
 }
 
-export type Overgrowth = { subject: string; baseline: number; observed: number };
-
-/**
- * Subjects that gained test files versus the baseline. A subject absent from
- * the baseline is allowed ONE file (a genuinely new module gets its first
- * test); a second file for an unbaselined subject is already sprawl.
- */
-export function findOvergrowth(observed: SubjectCounts, baseline: SubjectCounts): Overgrowth[] {
-  const out: Overgrowth[] = [];
-  for (const [subject, count] of Object.entries(observed)) {
-    const allowed = Object.prototype.hasOwnProperty.call(baseline, subject) ? baseline[subject] : 1;
-    if (count > allowed) out.push({ subject, baseline: allowed, observed: count });
-  }
-  return out.sort((a, b) => b.observed - a.observed || a.subject.localeCompare(b.subject));
-}
-
 export function buildSubjectCounts(testDir: string): SubjectCounts {
   return countBySubject(resolvePrimarySubjects(readTestFacts(testDir)));
 }
 
-// --------------------------------------------------------------------------
-// CLI — regenerate the baseline. Same convention as
-// `node scripts/test/suite-count-check.mjs --update-baseline`. The write goes
-// through seam-check-lib's writeJsonBaseline (issue #4580) so the on-disk
-// form (pretty two-space JSON + trailing newline) stays shared with the rest
-// of the baseline-ratchet family.
-// --------------------------------------------------------------------------
+/**
+ * The sprawl ratchet (Ratchet module, issue #5652): `counted`, ceiling, keyed by
+ * subject. Only subjects owning >= 2 test files are rows, so a genuinely new
+ * module's first test file is free and its second is `added` (measured 2,
+ * baseline 0). Consolidating 3->2 or 2->1 leaves a stale row, which fails.
+ */
+export const testSubjectRatchet = defineRatchet({
+  id: "test-subject-map",
+  baseline: "test/fixtures/test-subject-baseline.json",
+  shape: "counted",
+  polarity: "ceiling",
+  stale: "fail",
+  enforcement: "required",
+  measure: async (root: string) =>
+    Object.fromEntries(Object.entries(buildSubjectCounts(join(root, "test"))).filter(([, n]) => n >= 2)),
+});
 
-const REPO_ROOT = resolve(import.meta.dirname, "..", "..");
-export const TEST_DIR = join(REPO_ROOT, "test");
-export const BASELINE_PATH = join(REPO_ROOT, "test/fixtures/test-subject-baseline.json");
-
-if (process.argv[2] === "--update-baseline") {
-  const counts = buildSubjectCounts(TEST_DIR);
-  const sorted = Object.fromEntries(Object.entries(counts).sort(([a], [b]) => a.localeCompare(b)));
-  await writeJsonBaseline(BASELINE_PATH, sorted);
-  console.error(
-    `[test-subject-map] wrote ${Object.keys(sorted).length} subject entries to test/fixtures/test-subject-baseline.json`,
-  );
-}
+runIfCli(import.meta.url, testSubjectRatchet);

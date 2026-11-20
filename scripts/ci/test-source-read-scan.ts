@@ -2,6 +2,7 @@
  * scripts/ci/test-source-read-scan.ts — detect test files that READ CODE PATHS,
  * and compare them against a kind-tagged fixture (issue #5262, ADR-0046), plus a
  * shrink-only per-SITE pin count (issue #5487, ADR-0046 Decision 4).
+ * (The former fixture `note` prose lives in this header.)
  *
  * # Why
  *
@@ -31,6 +32,18 @@
  * the reviewer's rule under STD-TEST-RUN-THE-CODE. What is enforced here: every
  * row names a known kind, an existing file, and a file that still reads code.
  *
+ * # Baseline format (Ratchet module, issue #5652)
+ *
+ * One `counted` baseline (scripts/ci/ratchet.ts, ceiling, stale rows fail) with
+ * two tab-joined namespaces, spelled only by `readerRow` / `pinRow`:
+ *   reader TAB <test file> TAB <kind>   count 1  (a sanctioned code reader)
+ *   pins   TAB <test file> TAB <code|prompt>  count n  (shrink-only pin sites)
+ * Reader kinds are CARRIED FORWARD from the baseline, not measured: `measure`
+ * emits the kind the baseline already holds for a file, else `behaviour`. An
+ * unlisted reader is therefore an `added` `behaviour` row; a file that stopped
+ * reading code (or vanished) is a stale row; an unknown kind is stale and its
+ * corrected `behaviour` row is added.
+ *
  * # Per-SITE pin counts (issue #5487)
  *
  * The file-level gate alone lets a file already in the fixture grow any number of
@@ -38,22 +51,23 @@
  * file, the assertion sites whose subject is bound (in the same file) from a read
  * of a CODE path (`code`, STD-TEST-RUN-THE-CODE) or of a prompt / playbook path
  * (`prompt`, STD-TEST-PIN-PHRASE: `indexOf` block-order pins and step-number
- * pins). The fixture's sibling `pinSites` map holds the baseline; counts are
- * shrink-only: observed > baseline is `pin-count-grew`, observed < baseline is
- * `pin-count-stale` (regenerate with `--write-baseline`). Helper-function
+ * pins). The `pins` rows hold the baseline; counts are shrink-only: a `pins`
+ * row over its baseline is `added`, one under it is stale (tighten with
+ * `--write-baseline`). Helper-function
  * returns, loop variables and destructured reads are NOT tracked (documented
  * undercount - those stay the Standards reviewer's). Long-sentence prompt pins
- * are reported as advisory only and never counted.
+ * are never counted (`advisoryPromptSites` stays exported).
  *
- * CLI: `npx tsx scripts/ci/test-source-read-scan.ts [--write-baseline | --init]`.
+ * CLI (scripts/ci/ratchet.ts contract):
+ * `npx tsx scripts/ci/test-source-read-scan.ts [--write-baseline [--allow-grow]]`.
  *
  * Pure / result-object style: nothing here throws on malformed input.
  */
 
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { defineRatchet, runIfCli } from "./ratchet.ts";
 import { stripComments } from "./test-subject-map.ts";
-import { REPO_ROOT, isCliEntrypoint, writeJsonBaseline } from "./seam-check-lib.ts";
 
 /** The closed set of sanctioned kinds a fixture row may carry. */
 export const READ_KINDS = ["drift-guard", "invariant-lint", "dashboard-pin", "behaviour", "grandfathered"] as const;
@@ -70,28 +84,6 @@ export interface PinCounts {
   code: number;
   prompt: number;
 }
-
-/** `fixture.files`: test file (repo-relative) -> kind; `pinSites`: shrink-only per-site counts. */
-export interface ReadBaseline {
-  note?: string;
-  files: Record<string, string>;
-  pinSites?: Record<string, Partial<PinCounts>>;
-}
-
-export interface ReadViolation {
-  file: string;
-  code:
-    | "unlisted-reader"
-    | "unknown-kind"
-    | "stale-missing-file"
-    | "stale-no-longer-reads"
-    | "pin-count-grew"
-    | "pin-count-stale";
-  message: string;
-}
-
-export const WRITE_COMMAND = "npx tsx scripts/ci/test-source-read-scan.ts --write-baseline";
-export const BASELINE_REL = "test/fixtures/test-source-read-baseline.json";
 
 const FS_READ_RE = /\b(?:readFileSync|readFile|readdirSync|readdir)\s*\(/;
 /** Static and dynamic import specifiers are not reads. */
@@ -338,158 +330,58 @@ export function scanTestReaders(repoRoot: string): string[] {
   return out;
 }
 
-/** The exact fixture line a reviewer adds to sanction a reader. */
-export function fixtureLine(file: string, kind: ReadKind | string): string {
-  return `    ${JSON.stringify(file)}: ${JSON.stringify(kind)}`;
+const BASELINE_REL = "test/fixtures/test-source-read-baseline.json";
+const KINDS: readonly string[] = READ_KINDS;
+
+/** The only place the reader namespace and separator are spelled. */
+export function readerRow(file: string, kind: string): string {
+  return `reader\t${file}\t${kind}`;
 }
 
-/**
- * Compare the live readers against the fixture.
- *
- * @param readers files the scanner found reading a code path
- * @param baseline the parsed fixture
- * @param fileExists predicate over a repo-relative path
- */
-export function checkReadRatchet(
-  readers: readonly string[],
-  baseline: ReadBaseline,
-  fileExists: (path: string) => boolean,
-  observedPins?: Record<string, PinCounts>,
-): ReadViolation[] {
-  const violations: ReadViolation[] = [];
-  const rows = baseline && typeof baseline.files === "object" && baseline.files ? baseline.files : {};
-  const readerSet = new Set(readers);
-  const kinds = READ_KINDS as readonly string[];
+/** The only place the pins namespace and separator are spelled. */
+export function pinRow(file: string, counter: keyof PinCounts): string {
+  return `pins\t${file}\t${counter}`;
+}
 
-  for (const file of readers) {
-    if (!(file in rows)) {
-      violations.push({
-        file,
-        code: "unlisted-reader",
-        message:
-          `${file} reads a code path but is not in test/fixtures/test-source-read-baseline.json (${RULE_ID}).\n` +
-          `  Prefer running the code over reading it. If a read is truly the right test, add ONE line to "files" ` +
-          `with a sanctioned kind (${READ_KINDS.join(" | ")}):\n${fixtureLine(file, "behaviour")},`,
-      });
-    }
+/** Kinds the baseline at `root` already assigns to reader files (unreadable baseline: none). */
+function baselineKinds(root: string): Map<string, string> {
+  const out = new Map<string, string>();
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(join(root, BASELINE_REL), "utf8"));
+  } catch (err) {
+    /* intentional: an unreadable baseline just carries no kinds; the ratchet's own baseline read reports the failure (fail closed) */
+    return out;
   }
-  for (const [file, kind] of Object.entries(rows)) {
-    if (!kinds.includes(kind)) {
-      violations.push({
-        file,
-        code: "unknown-kind",
-        message: `${file}: kind ${JSON.stringify(kind)} is not one of ${READ_KINDS.join(" | ")} (${RULE_ID}).`,
-      });
-    }
-    if (!fileExists(file)) {
-      violations.push({
-        file,
-        code: "stale-missing-file",
-        message: `${file} no longer exists - delete its row from the fixture (${RULE_ID}).`,
-      });
-    } else if (!readerSet.has(file)) {
-      violations.push({
-        file,
-        code: "stale-no-longer-reads",
-        message: `${file} no longer reads a code path - delete its row from the fixture (stale row; ${RULE_ID}).`,
-      });
-    }
+  if (raw === null || typeof raw !== "object") return out;
+  for (const key of Object.keys(raw as Record<string, unknown>)) {
+    const [ns, file, kind] = key.split("\t");
+    if (ns === "reader" && file && kind && KINDS.includes(kind)) out.set(file, kind);
   }
-  if (observedPins) violations.push(...checkPinSites(observedPins, baseline));
-  return violations;
+  return out;
 }
 
-const COUNTERS: Array<[keyof PinCounts, string]> = [
-  ["code", RULE_ID],
-  ["prompt", PROMPT_RULE_ID],
-];
-
-/** Shrink-only per-(file, counter) comparison. Absent baseline file or counter = 0. */
-export function checkPinSites(observed: Record<string, PinCounts>, baseline: ReadBaseline): ReadViolation[] {
-  const violations: ReadViolation[] = [];
-  const base = baseline && typeof baseline.pinSites === "object" && baseline.pinSites ? baseline.pinSites : {};
-  const files = [...new Set([...Object.keys(observed), ...Object.keys(base)])].sort();
-  for (const file of files) {
-    for (const [counter, rule] of COUNTERS) {
-      const seen = observed[file]?.[counter] ?? 0;
-      const allowed = base[file]?.[counter] ?? 0;
-      if (seen > allowed) {
-        violations.push({
-          file,
-          code: "pin-count-grew",
-          message:
-            `${file}: ${seen} \`${counter}\` pin site(s), baseline allows ${allowed} (${rule}).\n` +
-            `  A regex / substring / indexOf assertion over a ${counter === "code" ? "code" : "playbook / prompt"} read was added. ` +
-            `Run the code (or the renderer) and assert on its output instead. Do NOT raise the baseline.`,
-        });
-      } else if (seen < allowed) {
-        violations.push({
-          file,
-          code: "pin-count-stale",
-          message:
-            `${file}: ${seen} \`${counter}\` pin site(s), baseline records ${allowed} (${rule}) - shrink it with: ${WRITE_COMMAND}`,
-        });
-      }
-    }
+/** Measure the tree: reader rows (kind carried forward, else `behaviour`) + non-zero pin rows. */
+export async function measureSourceReads(root: string): Promise<Record<string, number>> {
+  const kinds = baselineKinds(root);
+  const rows: Record<string, number> = {};
+  for (const file of scanTestReaders(root)) rows[readerRow(file, kinds.get(file) ?? "behaviour")] = 1;
+  for (const [file, c] of Object.entries(scanPinSites(root))) {
+    if (c.code > 0) rows[pinRow(file, "code")] = c.code;
+    if (c.prompt > 0) rows[pinRow(file, "prompt")] = c.prompt;
   }
-  return violations;
+  return rows;
 }
 
-export type BaselineWritePlan =
-  | { ok: true; next: ReadBaseline; refusals?: undefined }
-  | { ok: false; refusals: ReadViolation[]; next?: undefined };
+export const testSourceReadRatchet = defineRatchet({
+  id: "test-source-read",
+  baseline: BASELINE_REL,
+  shape: "counted",
+  polarity: "ceiling",
+  stale: "fail",
+  enforcement: "required",
+  measure: measureSourceReads,
+});
 
-/**
- * Pure write/refuse decision behind `--write-baseline` / `--init` (INV-3).
- * `--write-baseline` never raises a count: any growth refuses. `--init` is the
- * only growth path. Only `pinSites` is rewritten; the `files` rows are untouched.
- */
-export function planBaselineWrite(
-  observed: Record<string, PinCounts>,
-  baseline: ReadBaseline,
-  init: boolean,
-): BaselineWritePlan {
-  const grew = checkPinSites(observed, baseline).filter((v) => v.code === "pin-count-grew");
-  if (!init && grew.length > 0) return { ok: false, refusals: grew };
-  return { ok: true, next: { ...baseline, pinSites: observed } };
-}
+runIfCli(import.meta.url, testSourceReadRatchet);
 
-async function main(): Promise<number> {
-  const args = process.argv.slice(2);
-  const init = args.includes("--init");
-  const write = init || args.includes("--write-baseline");
-  const baseline = JSON.parse(readFileSync(join(REPO_ROOT, BASELINE_REL), "utf8")) as ReadBaseline;
-  const observed = scanPinSites(REPO_ROOT);
-  const violations = checkPinSites(observed, baseline);
-  if (write) {
-    const plan = planBaselineWrite(observed, baseline, init);
-    if (!plan.ok) {
-      for (const v of plan.refusals ?? []) console.error(v.message);
-      console.error("test-source-read-scan: refusing to grow the baseline (use --init only to seed).");
-      return 1;
-    }
-    await writeJsonBaseline(join(REPO_ROOT, BASELINE_REL), plan.next as ReadBaseline);
-    console.log(`test-source-read-scan: wrote pinSites for ${Object.keys(observed).length} file(s).`);
-    return 0;
-  }
-  const dir = join(REPO_ROOT, "test");
-  for (const name of readdirSync(dir).sort()) {
-    if (!name.endsWith(".test.mts")) continue;
-    const n = advisoryPromptSites(readFileSync(join(dir, name), "utf8"));
-    if (n > 0) console.log(`advisory: test/${name}: ${n} long-sentence prompt pin(s) (${PROMPT_RULE_ID}, not counted)`);
-  }
-  for (const v of violations) console.error(v.message);
-  if (violations.length > 0) return 1;
-  console.log(`test-source-read-scan: OK (${Object.keys(observed).length} file(s) with pin sites).`);
-  return 0;
-}
-
-if (isCliEntrypoint(import.meta.url)) {
-  main().then(
-    (code) => process.exit(code),
-    (err) => {
-      console.error("test-source-read-scan: crashed:", err);
-      process.exit(2);
-    },
-  );
-}
