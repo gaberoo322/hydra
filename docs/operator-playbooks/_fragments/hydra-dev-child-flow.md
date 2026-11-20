@@ -81,7 +81,7 @@ Run these numbered steps.
    changed `.sh` files and `typed-error-throw` over changed `src/`/`scripts/` `.ts`
    files (bare `throw new Error`, STD-ERROR-TYPED-CODE), and fix every hit before `gh pr create` (the shrink-only
    `test/fail-loud-ratchet.test.mts` in `npm test` blocks any new or edited hit). Recipe: "Fail-loud lint — changed files" below.
-   Also run the whole-tree pin-site ratchet (`npx tsx scripts/ci/test-source-read-scan.ts`, under a second) and convert any `pin-count-grew` hit in a test file this PR touches before `gh pr create` (STD-TEST-RUN-THE-CODE / STD-TEST-PIN-PHRASE, #5487).
+   Also run the whole-tree pin-site ratchet (`npx tsx scripts/ci/test-source-read-scan.ts`, under a second) and convert any `pins` row over its baseline in a test file this PR touches before `gh pr create` (STD-TEST-RUN-THE-CODE / STD-TEST-PIN-PHRASE, #5487).
 7b. **Test-can-fail proof on changed tests** (STD-TEST-CAN-FAIL) —
    run the same advisory judge CI runs over the test files you added or
    extended; for each `passes-at-merge-base` file make a case red-then-green, or
@@ -337,12 +337,11 @@ blanket writer's output. A raised row needs a PR-body line
 - Added a test file that resolves to a new or already-baselined **subject**
   (`test/test-file-sprawl-guard.test.mts` fails)? First prefer extending the
   subject's existing test file — sprawl is what the ratchet exists to stop.
-  Only when a new file is justified, use the writer as a number source, revert
-  its fixture, and set the single new row by hand so the provenance note
-  survives; say why in the PR body:
+  Only when a new file is justified, run the command below, set the printed
+  row by hand (or `--write-baseline --allow-grow` when it moves no other row),
+  and add the `Baseline-raise:` PR-body line:
   ```bash
-  npx tsx scripts/ci/test-subject-map.ts --update-baseline
-  git checkout -- <fixture>
+  npx tsx scripts/ci/test-subject-map.ts
   ```
 - Any other ratchet baseline (word counts, skill size): edit only your files'
   rows by hand; run no unscoped writer.
@@ -501,7 +500,7 @@ done < <(git diff --name-only --diff-filter=AM origin/master...HEAD -- '*.ts')
 if [ "${#TE_ARGS[@]}" -gt 0 ]; then
   npx tsx scripts/ast-search.ts --rule typed-error-throw --text "${TE_ARGS[@]}"
 fi
-# Pin-site ratchet (#5487): whole tree, <1 s; `pin-count-grew` names the test file to fix.
+# Pin-site ratchet (#5487): whole tree, <1 s; an added `pins` row names the test file to fix.
 npx tsx scripts/ci/test-source-read-scan.ts
 # STD-TEST-OWN-FEATURE (#5511): QA-history provenance in titles/comments of changed test files.
 TP_FILES=()
