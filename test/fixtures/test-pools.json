@@ -139,6 +139,7 @@
     "test/versions-format.test.mts",
     "test/wire-or-retire-carveout-drift.test.mts",
     "test/wiring-liveness-outcomes.test.mts",
+    "test/zizmor-ratchet.test.mts",
     "test/zizmor-scan.test.mts"
   ],
   "serialPinned": {

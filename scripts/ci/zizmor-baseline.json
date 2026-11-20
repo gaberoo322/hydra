@@ -1,0 +1,73 @@
+{
+  "note": "Shrink-only per-workflow zizmor finding counts by ident (issue #5640). Never raise a count: fix the finding. Lower with npx tsx scripts/ci/zizmor-ratchet.ts --input <json> --write-baseline.",
+  "files": {
+    ".github/workflows/advisory-checks.yml": {
+      "artipacked": 1
+    },
+    ".github/workflows/allow-scripts.yml": {
+      "artipacked": 2,
+      "unpinned-uses": 2
+    },
+    ".github/workflows/audit-nightly.yml": {
+      "artipacked": 1,
+      "unpinned-uses": 1
+    },
+    ".github/workflows/changelog-check.yml": {
+      "artipacked": 1,
+      "unpinned-uses": 1
+    },
+    ".github/workflows/ci.yml": {
+      "artipacked": 5,
+      "unpinned-uses": 5
+    },
+    ".github/workflows/deep-qa-gate.yml": {
+      "artipacked": 1,
+      "dangerous-triggers": 1,
+      "unpinned-uses": 1
+    },
+    ".github/workflows/deps-check.yml": {
+      "artipacked": 1,
+      "unpinned-uses": 2
+    },
+    ".github/workflows/design-concept-comment.yml": {
+      "excessive-permissions": 1
+    },
+    ".github/workflows/design-concept-reconcile.yml": {
+      "artipacked": 1,
+      "unpinned-uses": 1
+    },
+    ".github/workflows/issue-label-validation.yml": {
+      "artipacked": 2,
+      "excessive-permissions": 1,
+      "unpinned-uses": 2
+    },
+    ".github/workflows/osv-scan.yml": {
+      "artipacked": 1,
+      "unpinned-uses": 2
+    },
+    ".github/workflows/protected-paths.yml": {
+      "artipacked": 1,
+      "unpinned-uses": 1
+    },
+    ".github/workflows/qa-fix-proof.yml": {
+      "artipacked": 2,
+      "unpinned-uses": 2
+    },
+    ".github/workflows/secret-scan.yml": {
+      "artipacked": 1,
+      "unpinned-uses": 1
+    },
+    ".github/workflows/stryker-check.yml": {
+      "artipacked": 1,
+      "unpinned-uses": 2
+    },
+    ".github/workflows/test-typecheck.yml": {
+      "artipacked": 1,
+      "unpinned-uses": 1
+    },
+    ".github/workflows/vendor-drift.yml": {
+      "artipacked": 1,
+      "unpinned-uses": 2
+    }
+  }
+}

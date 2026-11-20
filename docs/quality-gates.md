@@ -216,6 +216,31 @@ run on at least 10 PRs. If the broader Stryker catalog surfaces no survivors the
 homegrown gate misses, the correct recommendation is **drop**, and that is a
 success outcome for the experiment, not a failure.
 
+### zizmor finding ratchet (advisory — `advisory-checks.yml`, issue #5640)
+
+**What it does.** `scripts/ci/zizmor-ratchet.ts` reads the scan step's json-v1
+output (`--input zizmor-results.json`) and caps the findings per workflow file per
+ident at `scripts/ci/zizmor-baseline.json` (shrink-only: a count above its cell
+fails, a count below it prints a lower-the-row nudge). It never runs the scanner
+or touches the network.
+
+**Where it runs.** An `if: always()` step right after the zizmor scan step in
+`advisory-checks.yml`. It is not in `ci.yml`, `npm test` or any required context:
+a downloaded binary inside the required gate would let a release outage redden
+every PR with no code change. `test/zizmor-ratchet.test.mts` unit-tests the logic
+on inline fixtures. A missing or unparseable input exits 2, distinct from a
+ratchet failure (1).
+
+**Scan exit codes.** The scan step treats zizmor exit 0 and 11-14 (findings by
+highest severity) as a completed scan; any other exit is an infrastructure
+failure (`::error`, red step). No step in the workflow swallows an exit with
+`|| true`; the comby rule `scripts/comby-rules/workflow-no-swallowed-exit.toml`
+annotates any that appear (skip one with a `# intentional: <reason>` trailer).
+
+**Reseeding.** `bash scripts/zizmor-scan.sh > /tmp/z.json` (exit 14 is normal),
+then `npx tsx scripts/ci/zizmor-ratchet.ts --input /tmp/z.json --write-baseline
+[--files <workflow paths>]`. Growth is refused without `--allow-grow`.
+
 ### skill-size ratchet (required — via the `test` job)
 
 **What it does.** `scripts/ci/skill-size-ratchet.ts` counts the words in every

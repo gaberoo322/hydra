@@ -16,8 +16,10 @@ set -euo pipefail
 #
 # Usage:
 #   scripts/zizmor-scan.sh [repo-root]   # default: git toplevel
-# Exit status is zizmor's own (non-zero when findings exist); the advisory CI
-# step swallows it with `|| true`. Callers can gate on it without parsing JSON.
+# Exit status is zizmor's own: 0 clean, 11-14 findings by highest severity (a
+# completed scan), anything else (1 audit error, 2 argv, 3 no inputs, or this
+# wrapper's own exit 1 on download failure / SHA mismatch / missing workflows) is
+# an infrastructure failure. The advisory CI step classifies the code (#5640).
 #
 # The scan target is the explicit .github/workflows path (deterministic in a
 # worktree, a fresh checkout, and CI alike).
