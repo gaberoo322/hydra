@@ -9,7 +9,8 @@
  * in test/wiring-liveness-outcomes.test.mts; this file covers the alarm layer.
  */
 
-import { test, describe } from "node:test";
+import { test, describe, mock } from "node:test";
+import { logger } from "../src/logger.ts";
 import assert from "node:assert/strict";
 
 import {
@@ -118,6 +119,20 @@ describe("runDarkOutcomeAlarm (#2805)", () => {
     assert.ok(filed.has("brier"), "the dedup marker is still set");
     assert.equal(res.outcomes[0]!.action, "filed");
     assert.equal((res.outcomes[0] as any).issueNumber, 9001);
+  });
+
+  test("an illegal-transition refusal is logged at warn with { issueNumber, code } (INV-4)", async () => {
+    const warnSpy = mock.method(logger, "warn", () => {});
+    try {
+      const { deps, darkSince } = fakes({ advanceResult: { ok: false, code: "illegal-transition" } });
+      darkSince.set("brier", NOW_MS - (DEFAULT_DARK_ALARM_MS + 1000));
+      await runDarkOutcomeAlarm([darkVerdict("brier")], [], deps);
+      const hit = warnSpy.mock.calls.find((c) => (c.arguments[0] as any)?.code === "illegal-transition");
+      assert.ok(hit, "warn logged with code");
+      assert.equal((hit!.arguments[0] as any).issueNumber, 9001);
+    } finally {
+      warnSpy.mock.restore();
+    }
   });
 
   test("a non-illegal-transition refusal is retried once, then the pass still reports filed (#5673)", async () => {

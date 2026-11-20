@@ -192,8 +192,14 @@ async function fileNeedsTriage(
     for (let attempt = 1; attempt <= 2 && !landed; attempt++) {
       try {
         const adv = await advanceState(issueNumber, "needs-triage");
-        if (adv.ok === true || adv.code === "illegal-transition") landed = true;
-        else lastFailure = adv.code;
+        if (adv.ok === true) landed = true;
+        else if (adv.code === "illegal-transition") {
+          landed = true;
+          logger.warn(
+            { issueNumber, code: adv.code },
+            "wiring-liveness dark-alarm: first-state advance refused (issue already has a state)",
+          );
+        } else lastFailure = adv.code;
       } catch (err: any) {
         lastFailure = `threw: ${err?.message || err}`;
         logger.warn({ issueNumber, attempt, err }, "wiring-liveness dark-alarm: first-state advance threw");
