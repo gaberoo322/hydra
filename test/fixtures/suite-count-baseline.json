@@ -389,7 +389,7 @@
   "test/playbook-vocabulary-ratchet.test.mts": 7,
   "test/post-commit-status.test.mts": 5,
   "test/post-merge-health.test.mts": 19,
-  "test/pr-body-edit.test.mts": 3,
+  "test/pr-body-edit.test.mts": 5,
   "test/pr-lifecycle-bridge.test.mts": 7,
   "test/probe-search.test.mts": 2,
   "test/process-probe.test.mts": 1,

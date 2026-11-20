@@ -626,6 +626,15 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
     assert.doesNotMatch(out.prompt, /Open the PR from the worktree branch/, "no fresh-PR instruction on a forward-fix");
   });
 
+  test("the playbook forward-fix section routes PR-body edits through the guarded helper only (#5638 INV-1)", () => {
+    const secStart = PLAYBOOK.indexOf("**Red-PR forward-fix dispatch contract");
+    const secEnd = PLAYBOOK.indexOf("The cap (red-CI arm only):");
+    assert.ok(secStart >= 0 && secEnd > secStart, "playbook contract section markers present");
+    const section = PLAYBOOK.slice(secStart, secEnd).replace(/\s+/g, " ");
+    assert.ok(section.includes("scripts/pr-body-edit.ts <pr> --body-file <file>"));
+    assert.doesNotMatch(section, /gh pr edit[^`]*--body-file/);
+  });
+
   test("a QA-FAIL forward-fix reads hydra-qa's findings comment and green CI does not complete it (#4849)", () => {
     const out = render(
       "dev_orch",
