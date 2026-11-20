@@ -1,6 +1,7 @@
 {
   "parallel": [
     "test/adr-roster.test.mts",
+    "test/advisory-workflows-fail-loud.test.mts",
     "test/aggregator-autopilot-idle.test.mts",
     "test/aggregator-autopilot-tick.test.mts",
     "test/aggregator-settle.test.mts",
