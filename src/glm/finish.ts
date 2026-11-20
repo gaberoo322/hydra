@@ -373,13 +373,12 @@ export interface FinishDeps {
   /** Journal line sink (stderr in production, `hydra-glm-drainer:` prefixed by the default). */
   log: (msg: string) => void;
   /**
-   * Flag / PR-side label writes only (`glm-withhold`, `glm-authored`): lifecycle
-   * STATE moves go through {@link FinishDeps.advanceState} (ADR-0047 D3, #5318).
+   * Flag writes only: add `glm-withhold` to an issue. Lifecycle STATE moves go through
+   * {@link FinishDeps.advanceState} (ADR-0047 D3, #5318).
    */
-  editIssueLabels: (
-    issue: number,
-    labels: { remove?: string[]; add?: string[] },
-  ) => Promise<IssueActionWriteResult>;
+  withholdIssue: (issue: number) => Promise<IssueActionWriteResult>;
+  /** Flag write: add `glm-authored` to an issue or PR number. */
+  markAuthored: (number: number) => Promise<IssueActionWriteResult>;
   /**
    * The lifecycle seam's `advance` with a `--from` compare-and-set (#5318
    * INV-12). Default: `advance()` over `defaultSeamDeps`. A release counts
@@ -498,7 +497,7 @@ async function releaseClaim(
   if (r && r.ok === false) deps.log(`WARN failed to release issue #${issue} (non-fatal): ${r.code}`);
   if (withhold) {
     const w = await safe(deps, `add glm-withhold to issue #${issue}`, () =>
-      deps.editIssueLabels(issue, { add: [LABEL_WITHHOLD] }),
+      deps.withholdIssue(issue),
     );
     if (w && w.ok === false) {
       deps.log(`WARN failed to add glm-withhold to issue #${issue} (non-fatal)`);
@@ -612,7 +611,7 @@ async function openOrAdoptPr(
       `ANOMALY issue #${issue}: gh pr create failed but PR #${match.number} (${match.url}) already exists for branch=${input.branch} — adopting it instead of releasing the claim (see issue #3900)`,
     );
     const relabel = await safe(deps, `re-apply ${GLM_LABEL_AUTHORED} to adopted PR #${match.number}`, () =>
-      deps.editIssueLabels(match.number, { add: [GLM_LABEL_AUTHORED] }),
+      deps.markAuthored(match.number),
     );
     if (!relabel || relabel.ok === false) {
       deps.log(
@@ -1069,7 +1068,8 @@ export function buildDefaultFinishDeps(env: NodeJS.ProcessEnv = process.env): Fi
     log: (msg) => {
       process.stderr.write(`hydra-glm-drainer: ${msg}\n`);
     },
-    editIssueLabels: (issue, labels) => editIssueLabels(issue, labels, { repo: config.repo }),
+    withholdIssue: (issue) => editIssueLabels(issue, { add: [LABEL_WITHHOLD] }, { repo: config.repo }),
+    markAuthored: (number) => editIssueLabels(number, { add: [GLM_LABEL_AUTHORED] }, { repo: config.repo }),
     advanceState: async (issue, to, opts) => {
       seamDeps ??= defaultSeamDeps(repoRoot);
       const res = await advance(

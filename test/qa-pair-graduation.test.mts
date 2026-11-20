@@ -122,12 +122,12 @@ describe("assessPairGraduation readiness", () => {
 describe("planFlipItem", () => {
   const ready = () => assessPairGraduation(inputs()).report;
 
-  test("files one ready-for-human item when ready and none open", () => {
+  test("files one graduation-flip item when ready and none open", () => {
     const plan = planFlipItem(ready(), []);
     assert.equal(plan.file, true);
     if (plan.file === true) {
       assert.equal(plan.title, FLIP_ITEM_TITLE);
-      assert.deepEqual(plan.labels, ["ready-for-human"]);
+      assert.deepEqual(plan.labels, ["graduation-flip"]);
       assert.equal(plan.body.includes(FLIP_ITEM_MARKER), true);
       assert.equal(plan.body.includes('"two-way-pair": "on"'), true);
     }
@@ -330,5 +330,75 @@ describe("readConfigHistory (temp repo wiring)", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("applyFlipItem (#5673 INV-5)", () => {
+  const plan = () => {
+    const p = planFlipItem(assessPairGraduation(inputs()).report, []);
+    assert.equal(p.file, true);
+    return p as Extract<typeof p, { file: true }>;
+  };
+  const mkDeps = (over: Partial<pg.ApplyDeps> = {}, orchestratorRepo = "o/r") => {
+    const calls: string[] = [];
+    const deps: pg.ApplyDeps = {
+      orchestratorRepo,
+      ensureLabel: (l) => void calls.push(`label:${l}`),
+      createIssue: (_t, _b, l) => {
+        calls.push(`create:${l}`);
+        return "https://github.com/o/r/issues/42";
+      },
+      advance: async (a) => {
+        calls.push(`advance:${a.to}${a.reason ? `:${a.reason}` : ""}`);
+        return { ok: true };
+      },
+      ...over,
+    };
+    return { deps, calls };
+  };
+
+  test("orders label, flag-only create, needs-triage, then parked off-list-escalation", async () => {
+    const { deps, calls } = mkDeps();
+    const res = await pg.applyFlipItem(plan(), "o/r", deps);
+    assert.deepEqual(calls, [
+      "label:graduation-flip",
+      "create:graduation-flip",
+      "advance:needs-triage",
+      "advance:parked:off-list-escalation",
+    ]);
+    assert.deepEqual(res, {
+      ok: true,
+      url: "https://github.com/o/r/issues/42",
+      state: { needsTriage: "ok", parked: "ok" },
+    });
+  });
+
+  test("a refused advance is recorded by code and does not throw", async () => {
+    const { deps } = mkDeps({
+      advance: async (a) => (a.to === "parked" ? { ok: false, code: "illegal-transition" } : { ok: true }),
+    });
+    const res = await pg.applyFlipItem(plan(), "o/r", deps);
+    assert.equal(res.ok, true);
+    if (res.ok === true) assert.deepEqual(res.state, { needsTriage: "ok", parked: "illegal-transition" });
+  });
+
+  test("a non-orchestrator repo is refused before any write", async () => {
+    const { deps, calls } = mkDeps();
+    const res = await pg.applyFlipItem(plan(), "target/repo", deps);
+    assert.deepEqual(res, { ok: false, code: "wrong-repo", expected: "o/r" });
+    assert.deepEqual(calls, []);
+  });
+
+  test("an unparseable issue url skips the advances (sibling shape: still filed)", async () => {
+    const { deps, calls } = mkDeps({ createIssue: () => "no-number" });
+    const res = await pg.applyFlipItem(plan(), "o/r", deps);
+    assert.equal(res.ok, true);
+    assert.equal(calls.some((c) => c.startsWith("advance")), false);
+  });
+
+  test("a legacy ready-for-human flip item (marker in body) still dedups the plan", () => {
+    const report = assessPairGraduation(inputs()).report;
+    const out = planFlipItem(report, [{ number: 9, title: "renamed", body: FLIP_ITEM_MARKER }]);
+    assert.deepEqual(out, { file: false, reason: "flip-item-already-open", existing: 9 });
   });
 });

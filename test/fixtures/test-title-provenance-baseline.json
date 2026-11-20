@@ -64,7 +64,6 @@
   "title\ttest/hydra-qa-prompt-verdict.test.mts\tthe playbook keeps no per-PR re-review state": 1,
   "title\ttest/hydra-qa-prompt-verdict.test.mts\tthe re-review context is APPENDED to the full packet, with the confirm-first instruction": 1,
   "title\ttest/hydra-review-stalled-pr-bucket.test.mts\ta QA round-cap escalation (#4735) the operator keeps is explicitly NOT a hand-back": 1,
-  "title\ttest/hydra-review-stalled-pr-bucket.test.mts\tthe label DELETE fails loud: only an HTTP 404 is tolerated, anything else aborts before the issue relabel (QA round 1)": 1,
   "title\ttest/hydra-review-stalled-pr-bucket.test.mts\t§4's #4739 Target fix-forward text cross-references the Orchestrator analogue": 1,
   "title\ttest/hydra-target-build-fence-skip-steps.test.mts\tStep 0.7 guards mutate via gh api, never gh pr edit (#4854 QA round 2)": 1,
   "title\ttest/hydra-target-build-fence-skip-steps.test.mts\tStep 0.7 label mirror is fail-closed and shell-portable (#4854 QA round 1)": 1,

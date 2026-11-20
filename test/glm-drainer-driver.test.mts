@@ -359,8 +359,12 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
       repoRoot: "/repo",
       now: () => NOW_MS,
       log: (m: string) => { logs.push(`finish:${m}`); },
-      editIssueLabels: async (issue: number, l: { remove?: string[]; add?: string[] }) => {
-        finishCalls.push(`label:${issue}:r=${(l.remove ?? []).join("+")}:a=${(l.add ?? []).join("+")}`);
+      withholdIssue: async (issue: number) => {
+        finishCalls.push(`label:${issue}:r=:a=glm-withhold`);
+        return { ok: true };
+      },
+      markAuthored: async (number: number) => {
+        finishCalls.push(`label:${number}:r=:a=glm-authored`);
         return { ok: true };
       },
       advanceState: async (issue: number, to: string, o: { from: string }) => {
