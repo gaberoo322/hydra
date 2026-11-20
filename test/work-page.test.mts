@@ -216,7 +216,7 @@ describe("toWorkQueueRow — queue projection", () => {
       issue({
         number: 5,
         labels: ["ready-for-agent"],
-        body: "## Files in scope\n\n- `src/a.ts`\n\nBlocked by #9\nblocks #5\ndepends on #12",
+        body: "## Files in scope\n\n- `src/a.ts`\n\nBlocked by #9\nblocked by #5\ndepends on #12",
       }),
       new Set([9, 11]),
       { glmPartitionActive: true },
@@ -231,7 +231,7 @@ describe("toWorkQueueRow — queue projection", () => {
   test("every operator lane surfaces its open strict blockers", () => {
     for (const lane of ["needs-triage", "needs-info", "ready-for-human", "blocked"]) {
       const row = toWorkQueueRow(
-        issue({ number: 5, labels: [lane], body: "Blocked by #9\nblocks #5\ndepends on #12" }),
+        issue({ number: 5, labels: [lane], body: "Blocked by #9\nblocked by #5\ndepends on #12" }),
         new Set([9]),
         { glmPartitionActive: true },
       );
