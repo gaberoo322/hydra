@@ -1,9 +1,9 @@
 /**
- * test/seam-check-lib.test.mts — pin the shared baseline-ratchet engine behind
- * the four CI Seam checks (issue #950). The four per-Seam test files keep
- * pinning their predicates; this pins the machinery the Adapters used to inline
- * four times: the shrink-only diff, the baseline-load fallback, the write/read
- * round-trip over the {callers, note} shape, and the CLI-entrypoint guard.
+ * test/seam-check-lib.test.mts — pin the shared baseline-ratchet primitives
+ * behind the nine CI Seam checks (issue #950). The per-Seam test files keep
+ * pinning their predicates; this pins the shared primitives and (issue #5651)
+ * that all nine Seam checks run on the Ratchet module: policy fields, set-format
+ * baselines, and the live-tree verdict of the required redis seam.
  *
  * Issue #4580 extended the module with the GENERIC JSON-baseline primitives
  * (loadJsonBaseline / writeJsonBaseline) that the sibling baseline-ratchet
@@ -13,20 +13,16 @@
  * propagation skill-size wraps at its call site, and the exact on-disk
  * write format.
  *
- * Pure pieces only — no git scan, no process.exit. (The full runSeamCheck arm
- * wiring is exercised end-to-end by the four per-Seam scripts in CI.)
+ * No process.exit; the one scan runs over a throwaway fixture tree.
  */
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const {
-  diffBaseline,
-  loadBaseline,
-  writeBaselineFile,
   isCliEntrypoint,
   stripComments,
   loadJsonBaseline,
@@ -85,63 +81,6 @@ describe("seam-check-lib: stripComments (token-scan preprocessing, issue #3703)"
       stripComments(`import { spawn } from "node:child_process";`),
       `import { spawn } from "node:child_process";`,
     );
-  });
-});
-
-describe("seam-check-lib: diffBaseline (shrink-only ratchet)", () => {
-  test("a current violation absent from the baseline is NEW (fail closed)", () => {
-    const diff = diffBaseline(
-      ["src/a.ts", "src/b.ts"],
-      { callers: ["src/a.ts"], note: "" },
-    );
-    assert.deepEqual(diff.newViolations, ["src/b.ts"]);
-    assert.deepEqual(diff.fixedCallers, []);
-  });
-
-  test("a baseline entry that no longer violates is a fixedCaller (stale baseline)", () => {
-    const diff = diffBaseline(
-      ["src/a.ts"],
-      { callers: ["src/a.ts", "src/b.ts"], note: "" },
-    );
-    assert.deepEqual(diff.newViolations, []);
-    assert.deepEqual(diff.fixedCallers, ["src/b.ts"]);
-  });
-
-  test("an exact-match baseline yields no new and no fixed (clean pass)", () => {
-    const diff = diffBaseline(
-      ["src/a.ts", "src/b.ts"],
-      { callers: ["src/a.ts", "src/b.ts"], note: "" },
-    );
-    assert.deepEqual(diff.newViolations, []);
-    assert.deepEqual(diff.fixedCallers, []);
-  });
-
-  test("a grown baseline AND a fix surface simultaneously (mixed drift)", () => {
-    // current = {a, c}; baseline = {a, b}: c is new, b is fixed.
-    const diff = diffBaseline(
-      ["src/a.ts", "src/c.ts"],
-      { callers: ["src/a.ts", "src/b.ts"], note: "" },
-    );
-    assert.deepEqual(diff.newViolations, ["src/c.ts"]);
-    assert.deepEqual(diff.fixedCallers, ["src/b.ts"]);
-  });
-
-  test("an empty baseline makes every current violation new (unseeded)", () => {
-    const diff = diffBaseline(
-      ["src/a.ts"],
-      { callers: [], note: "baseline not yet seeded" },
-    );
-    assert.deepEqual(diff.newViolations, ["src/a.ts"]);
-    assert.deepEqual(diff.fixedCallers, []);
-  });
-});
-
-describe("seam-check-lib: loadBaseline fallback", () => {
-  test("a missing baseline file falls back to an empty unseeded baseline", async () => {
-    const missing = join(REPO_ROOT, "scripts/ci/__does-not-exist__.json");
-    const baseline = await loadBaseline(missing);
-    assert.deepEqual(baseline.callers, []);
-    assert.equal(baseline.note, "baseline not yet seeded");
   });
 });
 
@@ -207,26 +146,66 @@ describe("seam-check-lib: loadJsonBaseline / writeJsonBaseline (generic ratchet 
   });
 });
 
-describe("seam-check-lib: writeBaselineFile / loadBaseline round-trip", () => {
-  test("written baseline reloads with identical callers and a stamped note", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "seam-check-lib-"));
+describe("seam-check-lib: the nine Seam checks run on the Ratchet module (issue #5651)", () => {
+  const EXPECTED = [
+    ["redis", "required"],
+    ["schema", "advisory"],
+    ["query", "advisory"],
+    ["github", "advisory"],
+    ["host-probe", "advisory"],
+    ["journal", "advisory"],
+    ["claude-cli", "advisory"],
+    ["anthropic", "advisory"],
+    ["telegram", "advisory"],
+  ] as const;
+  const camel = (n: string): string => n.replace(/-(\w)/g, (_m, c: string) => c.toUpperCase());
+
+  for (const [name, enforcement] of EXPECTED) {
+    test(`${name}-seam-check exports a set/ceiling/stale-fail ratchet (${enforcement})`, async () => {
+      const mod = await import(`../scripts/ci/${name}-seam-check.ts`);
+      const ratchet = mod[`${camel(name)}SeamRatchet`];
+      assert.ok(ratchet, `${name}-seam-check must export ${camel(name)}SeamRatchet`);
+      const p = ratchet.policy;
+      assert.equal(p.id, `${name}-seam-check`);
+      assert.equal(p.baseline, `scripts/ci/${name}-seam-baseline.json`);
+      assert.equal(p.shape, "set");
+      assert.equal(p.polarity, "ceiling");
+      assert.equal(p.stale, "fail");
+      assert.equal(p.enforcement, enforcement);
+      assert.ok(Array.isArray(p.help) && p.help.length > 0, "fix wording rides on policy.help");
+    });
+
+    test(`${name}-seam-baseline.json is a bare sorted JSON array of paths`, async () => {
+      const raw = JSON.parse(await readFile(join(REPO_ROOT, `scripts/ci/${name}-seam-baseline.json`), "utf8"));
+      assert.ok(Array.isArray(raw), "set-format baseline is an array, not a {callers, note} envelope");
+      assert.deepEqual(raw, [...raw].sort());
+    });
+  }
+
+  test("the required redis seam passes on the live tree (zero added, zero stale)", async () => {
+    const { redisSeamRatchet } = await import("../scripts/ci/redis-seam-check.ts");
+    const v = await redisSeamRatchet.verdict();
+    assert.equal(v.ok, true, v.advice);
+    assert.deepEqual(v.added, []);
+    assert.deepEqual(v.stale, []);
+  });
+
+  test("a fixture tree with a new violation fails the verdict and prints the seam's fix wording", async () => {
+    const { redisSeamRatchet } = await import("../scripts/ci/redis-seam-check.ts");
+    const { execFileSync } = await import("node:child_process");
+    const dir = await mkdtemp(join(tmpdir(), "seam-ratchet-fixture-"));
     try {
-      const path = join(dir, "x-seam-baseline.json");
-      const callers = ["src/a.ts", "src/b.ts"];
-      await writeBaselineFile(path, callers, "x-seam-check", "X ratchet: shrink only.");
-
-      const reloaded = await loadBaseline(path);
-      assert.deepEqual(reloaded.callers, callers);
-      assert.match(
-        reloaded.note,
-        /Auto-generated by scripts\/ci\/x-seam-check\.ts --write-baseline on .+\. X ratchet: shrink only\./,
-      );
-
-      // The on-disk form is pretty-printed JSON with a trailing newline,
-      // matching the historic per-check writeBaselineFile output.
-      const raw = await readFile(path, "utf8");
-      assert.ok(raw.endsWith("\n"));
-      assert.equal(raw, JSON.stringify(JSON.parse(raw), null, 2) + "\n");
+      await mkdir(join(dir, "src"), { recursive: true });
+      await mkdir(join(dir, "scripts/ci"), { recursive: true });
+      await writeFile(join(dir, "src/bad.ts"), "import x from './redis/keys.ts';\n");
+      await writeFile(join(dir, "scripts/ci/redis-seam-baseline.json"), "[]\n");
+      execFileSync("git", ["init", "-q"], { cwd: dir });
+      execFileSync("git", ["add", "."], { cwd: dir });
+      const v = await redisSeamRatchet.verdict(dir);
+      assert.equal(v.ok, false);
+      assert.deepEqual(v.added, ["src/bad.ts"]);
+      assert.match(v.advice, /NEW Redis-seam violations/);
+      assert.match(v.advice, /typed accessor in src\/redis/);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
