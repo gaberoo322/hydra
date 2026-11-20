@@ -237,6 +237,18 @@
       "description": null
     },
     {
+      "path": "scripts/pr-body-edit.ts",
+      "name": "pr-body-edit.ts",
+      "execStart": null,
+      "triggers": null,
+      "schedule": null,
+      "source": {
+        "path": "scripts/pr-body-edit.ts"
+      },
+      "kind": "ts",
+      "description": "scripts/pr-body-edit.ts — the one guarded PR-body edit path (issue #5638)."
+    },
+    {
       "path": "scripts/probe-search.ts",
       "name": "probe-search.ts",
       "execStart": null,
