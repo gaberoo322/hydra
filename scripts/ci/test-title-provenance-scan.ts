@@ -19,27 +19,23 @@
  *
  * Fails closed: an unreadable test file or an unparseable fixture is an error.
  *
+ * The baseline is a sorted {key: count} object and the comparison lives in
+ * scripts/ci/ratchet.ts (shape `counted`, ceiling).
+ *
  * CLI (convenience only):
  *   npx tsx scripts/ci/test-title-provenance-scan.ts                  # report
  *   npx tsx scripts/ci/test-title-provenance-scan.ts --files <paths>  # new keys among those files only
- *   npx tsx scripts/ci/test-title-provenance-scan.ts --write-baseline # shrink the baseline
- *   npx tsx scripts/ci/test-title-provenance-scan.ts --init           # alias of --write-baseline (seed); growth needs --allow-grow
+ *   npx tsx scripts/ci/test-title-provenance-scan.ts --write-baseline # shrink the baseline (refuses growth; --allow-grow to seed)
  */
 
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import {
-  REPO_ROOT,
-  isCliEntrypoint,
-  listTrackedFiles,
-  loadJsonBaseline,
-  writeBaselineOrRefuse,
-} from "./seam-check-lib.ts";
+import { GateInvariantError } from "../../src/errors.ts";
+import { defineRatchet, runIfCli } from "./ratchet.ts";
+import { REPO_ROOT, listTrackedFiles } from "./seam-check-lib.ts";
 import { stripComments } from "./test-subject-map.ts";
 
 export const PROVENANCE_BASELINE_REL = "test/fixtures/test-title-provenance-baseline.json";
-export const PROVENANCE_WRITE_COMMAND =
-  "npx tsx scripts/ci/test-title-provenance-scan.ts --write-baseline";
 
 /** The whole grammar: six literal patterns, nothing file-name-dependent. */
 export const PROVENANCE_PATTERNS: readonly RegExp[] = [
@@ -117,37 +113,17 @@ export function scanSource(file: string, source: string): ProvenanceHit[] {
   return hits;
 }
 
-export interface RatchetDiff {
-  newKeys: string[];
-  staleKeys: string[];
-}
-
-function countKeys(keys: string[]): Map<string, number> {
-  const m = new Map<string, number>();
-  for (const k of keys) m.set(k, (m.get(k) ?? 0) + 1);
-  return m;
-}
-
-/** Multiset diff of scanned keys against baseline keys. Pure. */
-export function diffKeys(scanned: string[], baseline: string[]): RatchetDiff {
-  const have = countKeys(scanned);
-  const allowed = countKeys(baseline);
-  const newKeys: string[] = [];
-  const staleKeys: string[] = [];
-  for (const [k, n] of have) {
-    for (let i = 0; i < n - (allowed.get(k) ?? 0); i++) newKeys.push(k);
-  }
-  for (const [k, n] of allowed) {
-    for (let i = 0; i < n - (have.get(k) ?? 0); i++) staleKeys.push(k);
-  }
-  return { newKeys: newKeys.sort(), staleKeys: staleKeys.sort() };
-}
-
 export type ScanResult = { ok: true; keys: string[] } | { ok: false; error: string };
 
 /** Scan test files (default: every tracked test/*.test.mts). Never throws. */
 export async function scanTestFiles(files?: string[]): Promise<ScanResult> {
-  const list = files ?? (await listTrackedFiles(["test/*.test.mts"])).sort();
+  let list: string[];
+  try {
+    list = files ?? (await listTrackedFiles(["test/*.test.mts"])).sort();
+  } catch (err) {
+    /* intentional: the listing error is returned in the result object (STD-VERIFY-NEVER-THROW); callers fail closed */
+    return { ok: false, error: `could not list test files: ${(err as Error).message}` };
+  }
   const keys: string[] = [];
   for (const rel of list) {
     let source: string;
@@ -162,84 +138,33 @@ export async function scanTestFiles(files?: string[]): Promise<ScanResult> {
   return { ok: true, keys };
 }
 
-interface BaselineShape {
-  note?: string;
-  hits: string[];
+async function measureFiles(files?: string[]): Promise<string[]> {
+  const scan = await scanTestFiles(files);
+  if (scan.ok === false) throw new GateInvariantError(scan.error);
+  return scan.keys;
 }
 
-/** Strict load: a corrupt fixture throws (the live test fails closed on it). */
-export async function loadProvenanceBaseline(): Promise<BaselineShape> {
-  const b = await loadJsonBaseline<BaselineShape>(
-    join(REPO_ROOT, PROVENANCE_BASELINE_REL),
-    { hits: [] },
-    { strict: true },
-  );
-  if (!b || !Array.isArray(b.hits)) {
-    throw new Error(`${PROVENANCE_BASELINE_REL} is not {note, hits: string[]}`);
-  }
-  return b;
-}
-
-/** Human message for a failing diff; names the rule and both exits. Pure. */
-export function formatFailure(diff: RatchetDiff): string {
-  return [
-    `STD-TEST-OWN-FEATURE ratchet: ${diff.newKeys.length} new QA-history provenance title/comment hit(s) not in ${PROVENANCE_BASELINE_REL}:`,
-    ...diff.newKeys.map((k) => `  - ${k.split("\t").join(" | ").slice(0, 300)}`),
-    "Fix (default): rename the title/comment to the behaviour it pins, not the review round or sibling issue that prompted it.",
-    "Exception: if the test's SUBJECT is QA-round semantics, add the printed key to the fixture by hand in the same PR; the Standards reviewer judges it.",
-    `Do NOT regenerate to absorb a new hit. After renaming legacy hits, shrink with: ${PROVENANCE_WRITE_COMMAND}`,
-  ].join("\n");
-}
-
-async function main(): Promise<number> {
-  const args = process.argv.slice(2);
-  const write = args.includes("--write-baseline") || args.includes("--init");
-  const fi = args.indexOf("--files");
-  const only = fi >= 0 ? args.slice(fi + 1).filter((a) => !a.startsWith("--")) : undefined;
-  const scan = await scanTestFiles(only);
-  if (scan.ok === false) {
-    console.error(`test-title-provenance: ${scan.error}`);
-    return 2;
-  }
-  const baseline = await loadProvenanceBaseline();
-  const relevant = only
-    ? baseline.hits.filter((k) => only.includes(k.split("\t")[1] ?? ""))
-    : baseline.hits;
-  const diff = diffKeys(scan.keys, relevant);
-  if (write && !only) {
-    const code = await writeBaselineOrRefuse(
-      join(REPO_ROOT, PROVENANCE_BASELINE_REL),
-      {
-        note: `Shrink-only STD-TEST-OWN-FEATURE baseline (issue #5511). Regenerate with: ${PROVENANCE_WRITE_COMMAND}`,
-        hits: [...scan.keys].sort(),
-      },
-      {
-        allowGrow: args.includes("--allow-grow") || undefined,
-        onRefusal: () => {
-          if (diff.newKeys.length > 0) console.error(formatFailure(diff));
-        },
-      },
-    );
-    if (code !== 0) return code;
-    console.log(`test-title-provenance: wrote ${scan.keys.length} baseline hit(s).`);
-    return 0;
-  }
-  if (diff.newKeys.length > 0) {
-    console.error(formatFailure(diff));
-    return 1;
-  }
-  console.log(
-    `test-title-provenance: OK (${scan.keys.length} tolerated legacy hit(s)${diff.staleKeys.length ? `, ${diff.staleKeys.length} stale — run ${PROVENANCE_WRITE_COMMAND}` : ""}).`,
-  );
-  return 0;
-}
-
-if (isCliEntrypoint(import.meta.url)) {
-  main().then(
-    (code) => process.exit(code),
-    (err) => {
-      console.error("test-title-provenance: crashed:", err);
-      process.exit(2);
+export const provenanceRatchet = defineRatchet({
+  id: "test-title-provenance",
+  baseline: PROVENANCE_BASELINE_REL,
+  shape: "counted",
+  polarity: "ceiling",
+  // INV-4 exception (disclosed in PR #5681 body): hint, not fail. Migration parity (INV-8): the pre-Ratchet script only hinted on stale rows.
+  stale: "hint",
+  enforcement: "required",
+  measure: () => measureFiles(),
+  extra: {
+    flags: ["--files"],
+    scope(argv) {
+      const fi = argv.indexOf("--files");
+      if (fi < 0) return undefined;
+      const only = argv.slice(fi + 1).filter((a) => !a.startsWith("--"));
+      return {
+        measure: () => measureFiles(only),
+        keep: (key) => only.includes(key.split("\t")[1] ?? ""),
+      };
     },
-  );
-}
+  },
+});
+
+runIfCli(import.meta.url, provenanceRatchet);

@@ -15,13 +15,11 @@ import assert from "node:assert/strict";
 const { stripComments } = await import("../scripts/ci/test-subject-map.ts");
 const {
   commentLines,
-  diffKeys,
-  formatFailure,
   hitKey,
-  loadProvenanceBaseline,
   matchesProvenance,
   normaliseText,
   scanSource,
+  provenanceRatchet,
   scanTestFiles,
 } = await import("../scripts/ci/test-title-provenance-scan.ts");
 
@@ -115,37 +113,13 @@ describe("test-title-provenance: key and diff semantics", () => {
     const b = scanSource("test/x.test.mts", "const pad = 1;\n\n" + callSrc("it", t)).map(hitKey);
     assert.deepEqual(a, b);
   });
-
-  test("a hit absent from the baseline is new; a fixed hit is stale and never fails", () => {
-    assert.deepEqual(diffKeys(["a", "b"], ["a"]).newKeys, ["b"]);
-    assert.deepEqual(diffKeys(["a"], ["a", "b"]).newKeys, []);
-    assert.deepEqual(diffKeys(["a"], ["a", "b"]).staleKeys, ["b"]);
-  });
-
-  test("a swap (one fixed, one added) is still a new key", () => {
-    assert.deepEqual(diffKeys(["new"], ["old"]).newKeys, ["new"]);
-  });
-
-  test("duplicate identical hits are a multiset: a second copy is new", () => {
-    assert.deepEqual(diffKeys(["a", "a"], ["a"]).newKeys, ["a"]);
-  });
-
-  test("failure message names the rule and both exits", () => {
-    const msg = formatFailure({ newKeys: ["title\tf\tt"], staleKeys: [] });
-    assert.match(msg, /STD-TEST-OWN-FEATURE/);
-    assert.match(msg, /rename/);
-    assert.match(msg, /by hand/);
-    assert.match(msg, /--write-baseline/);
-  });
 });
 
 describe("test-title-provenance: live tree vs committed baseline", () => {
   test("no new QA-history title/comment hits (fails closed on read or fixture error)", async () => {
-    const scan = await scanTestFiles();
-    if (scan.ok === false) assert.fail(`scan failed (fail closed): ${scan.error}`);
-    const baseline = await loadProvenanceBaseline();
-    const diff = diffKeys(scan.keys, baseline.hits);
-    assert.equal(diff.newKeys.length, 0, formatFailure(diff));
+    const v = await provenanceRatchet.verdict();
+    assert.equal(v.ok, true, v.advice);
+    assert.equal(v.added.length, 0, v.advice);
   });
 
   test("an unreadable file is a scan error, not a skip", async () => {

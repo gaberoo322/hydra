@@ -101,6 +101,7 @@
     "test/qa-prior-round.test.mts",
     "test/qa-verdict-trailer.test.mts",
     "test/query-seam-check.test.mts",
+    "test/ratchet.test.mts",
     "test/reap-stale-tmp.test.mts",
     "test/recommendation-materiality.test.mts",
     "test/recommendation-prompt.test.mts",
