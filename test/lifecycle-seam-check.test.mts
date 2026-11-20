@@ -499,6 +499,77 @@ describe("lifecycle-seam-check: PR-context carve-out (#5428)", () => {
   });
 });
 
+describe("lifecycle-seam-check: Target-repo carve-out (#5673)", () => {
+  const md = (text: string) => scanFileSites("docs/operator-playbooks/hydra-x.md", text);
+  const ts = (text: string) => scanFileSites("src/x.ts", text);
+  const py = (text: string) => scanFileSites("scripts/x.py", text);
+
+  test("python argv with a Target --repo identifier is not a site", () => {
+    assert.deepEqual(
+      py('_gh_run(\n    "issue", "edit", n, "--repo", TARGET_REPO,\n    "--add-label", "ready-for-agent",\n)'),
+      [],
+    );
+  });
+
+  test("TS multi-line argv with targetRepo is not a site", () => {
+    assert.deepEqual(
+      ts('x("gh", [\n  "issue",\n  "create",\n  "--repo",\n  targetRepo,\n  "--label",\n  "ready-for-agent",\n]);'),
+      [],
+    );
+  });
+
+  test("shell --repo with a quoted Target identifier is not a site", () => {
+    assert.deepEqual(md('gh issue edit 5 --repo "$TARGET_GH_REPO" --add-label ready-for-agent'), []);
+    assert.deepEqual(md("gh issue edit 5 --add-label ready-for-agent --repo ${TARGET_REPO}"), []);
+  });
+
+  test("an orchestrator --repo keeps the flag counted", () => {
+    assert.deepEqual(md("gh issue edit 5 --repo $REPO --add-label ready-for-agent"), [1]);
+    assert.deepEqual(md("gh issue edit 5 --repo gaberoo322/hydra --add-label ready-for-agent"), [1]);
+    assert.deepEqual(md("gh issue edit 5 --repo REPO --add-label ready-for-agent"), [1]);
+    assert.deepEqual(md("gh issue edit 5 --add-label ready-for-agent"), [1]);
+  });
+
+  test("a Target --repo on a nested command does not exempt the outer write", () => {
+    assert.deepEqual(
+      md("gh issue edit $(gh issue view 5 --repo $TARGET_REPO --json number -q .number) --add-label ready-for-agent"),
+      [1],
+    );
+  });
+
+  test("a Target --repo on a previous chained command does not exempt a later write", () => {
+    assert.deepEqual(md("gh issue view 5 --repo $TARGET_REPO && gh issue edit 5 --add-label ready-for-agent"), [1]);
+  });
+
+  test("documented evasion: a variable aliased to the orchestrator repo is exempt by name", () => {
+    assert.deepEqual(ts('const targetRepo = "gaberoo322/hydra";\nrun("gh issue edit 5 --repo " + targetRepo);'), []);
+    assert.deepEqual(md("gh issue edit 5 --repo targetRepo --add-label ready-for-agent"), []);
+  });
+});
+
+describe("lifecycle-seam-check: module-const label operands (#5673)", () => {
+  const ts = (text: string) => scanFileSites("src/x.ts", text);
+
+  test("a bare argv const resolving to a non-state literal is not a site", () => {
+    assert.deepEqual(
+      ts('const FLAG = "meta-friction";\nrun("gh", ["issue", "create", "--label", FLAG]);'),
+      [],
+    );
+  });
+
+  test("a bare argv const resolving to a state literal is a site", () => {
+    assert.deepEqual(
+      ts('const FLIP = "ready-for-human";\nrun("gh", ["issue", "create", "--label", FLIP]);'),
+      [2],
+    );
+  });
+
+  test("a function-local or unresolvable identifier stays fail-closed", () => {
+    assert.deepEqual(ts('function f(l: string) {\n  const x = "meta-friction";\n  run("gh", ["issue", "create", "--label", x]);\n}'), [3]);
+    assert.deepEqual(ts('import { FLAG } from "./y.ts";\nrun("gh", ["issue", "create", "--label", FLAG]);'), [2]);
+  });
+});
+
 describe("lifecycle-seam-check: fails closed", () => {
   test("an unreadable scan root throws instead of being skipped", async () => {
     // package.json is a file, so <root>/docs/... is ENOTDIR, not a missing dir.

@@ -37,6 +37,10 @@
  *  - two-hop aliases and `export { F as x }` re-exports from another module;
  *  - flags assembled from a separately-bound string (`const FLAG = "--add-label"`);
  *  - `.github/workflows/**` (ADR-0047 D1);
+ *  - Target board writes are outside the seam (ADR-0047 scope): a label flag in a `gh issue <subcmd>`
+ *    command whose own `--repo`/`-R` operand is one of a closed Target identifier list (`TARGET_REPO`,
+ *    `$TARGET_GH_REPO`, `targetRepo`, ...) is not a site. Identifier-based, so `targetRepo = 'gaberoo322/hydra'`
+ *    aliasing is a documented evasion; `gh api repos/$TARGET_REPO/issues/N/labels` writes are not covered;
  *  - PR labels are flags, not state (ADR-0047 D2, #5428): a label flag inside a
  *    `gh pr <subcmd>` command (shell or argv form) and a `gh api` write on an
  *    `issues/<PR identifier>/labels` path (one of 8 exact identifiers, e.g. `$PR`, `${PR_NUMBER}`, `{pr_id}`) are not sites. The latter is identifier-based, so the
@@ -221,17 +225,12 @@ function inCreateContext(text: string, idx: number, matched = ""): boolean {
   return CREATE_CMD_RE.test(win);
 }
 
-/** `issues/$PR/labels`, `issues/${PR_NUMBER}/labels`, `issues/{pr_number}/labels`: PR-identifier label path (#5428). */
-const PR_LABEL_PATH_RE = /issues\/(?:\$\{?|\{)(?:PR|PR_NUMBER|PR_NUM|PR_ID|pr|pr_number|pr_num|pr_id)\}?\/labels/;
-
 /**
- * Is the flag at `idx` inside a `gh pr <subcmd>` command (shell or argv form)? PR labels are flags
- * (ADR-0047 D2). Same command bound as `-l`: the nearest `gh pr|issue` start before the flag must be
- * `pr`, with no unquoted `;` / `&&` / `||` / `|` / unbracketed newline between (#5428).
+ * Start offsets of the nearest `gh pr` / `gh issue` command before the end of `win` (shell or argv
+ * form), or -1. Shared by the PR-context and Target-repo carve-outs so the command-start rule has
+ * one definition.
  */
-function inPrContext(text: string, idx: number): boolean {
-  // Unbounded walk-back (operator ruling, PR #5431 rounds 2-3): no fixed lookback constant to outgrow.
-  const win = text.slice(0, idx);
+function lastGhCommandStarts(win: string): { pr: number; issue: number } {
   let pr = -1;
   let issue = -1;
   for (const m of win.matchAll(/\bgh["',\s[]+(?:(?:-R|--repo)["',\s=]+[\w./-]+["',\s[]+)*(pr|issue)\b/g)) {
@@ -244,6 +243,21 @@ function inPrContext(text: string, idx: number): boolean {
     if (m[2] === "pr") pr = Math.max(pr, at);
     else issue = Math.max(issue, at);
   }
+  return { pr, issue };
+}
+
+/** `issues/$PR/labels`, `issues/${PR_NUMBER}/labels`, `issues/{pr_number}/labels`: PR-identifier label path (#5428). */
+const PR_LABEL_PATH_RE = /issues\/(?:\$\{?|\{)(?:PR|PR_NUMBER|PR_NUM|PR_ID|pr|pr_number|pr_num|pr_id)\}?\/labels/;
+
+/**
+ * Is the flag at `idx` inside a `gh pr <subcmd>` command (shell or argv form)? PR labels are flags
+ * (ADR-0047 D2). Same command bound as `-l`: the nearest `gh pr|issue` start before the flag must be
+ * `pr`, with no unquoted `;` / `&&` / `||` / `|` / unbracketed newline between (#5428).
+ */
+function inPrContext(text: string, idx: number): boolean {
+  // Unbounded walk-back (operator ruling, PR #5431 rounds 2-3): no fixed lookback constant to outgrow.
+  const win = text.slice(0, idx);
+  const { pr, issue } = lastGhCommandStarts(win);
   if (pr < 0 || issue > pr) return false;
   // `gh issue edit $(gh pr view ...) --add-label x`: the `gh pr` is nested in the issue command's args (INV-3).
   if (issue >= 0 && !hasUnquotedBoundary(win.slice(issue, pr), win[issue - 1] ?? "")) return false;
@@ -251,6 +265,83 @@ function inPrContext(text: string, idx: number): boolean {
   const depth = bracketDepth(win.slice(Math.max(0, pr - 80), pr));
   const lead = win[pr - 1] ?? "";
   return heredocReaches(tail, lead, depth, true) || (findHeredocMarker(tail, lead) < 0 && !hasUnquotedBoundary(tail, lead, depth));
+}
+
+/** Exact `--repo` / `-R` operands that name the Target board (ADR-0047 scopes the seam to the Orchestrator board). */
+const TARGET_REPO_OPERANDS: ReadonlySet<string> = new Set([
+  "TARGET_REPO", "$TARGET_REPO", "${TARGET_REPO}",
+  "TARGET_GH_REPO", "$TARGET_GH_REPO", "${TARGET_GH_REPO}",
+  "targetRepo", "{target_repo}",
+]);
+const REPO_FLAG_RE = /(?<![\w-])(?:--repo|-R)(?:["']?\s*,\s*|[ \t=]+)(?:"([^"]*)"|'([^']*)'|([^\s"',)\]]+))/g;
+
+/**
+ * Is the flag at `idx` inside a `gh issue <subcmd>` command (shell or argv form) whose own `--repo` /
+ * `-R` operand (same command, bracket depth 0) is a closed Target identifier? Target board writes are
+ * outside the seam's scope. Identifier-based, so `targetRepo = 'gaberoo322/hydra'` aliasing is a
+ * documented evasion, not a soundness claim.
+ */
+function inTargetRepoContext(text: string, idx: number): boolean {
+  const win = text.slice(0, idx);
+  const { pr, issue } = lastGhCommandStarts(win);
+  if (issue < 0 || pr > issue) return false;
+  const lead = text[issue - 1] ?? "";
+  // Is the command inside an open bracket (a call or argv list)? Walk back to the nearest unmatched opener.
+  let base = 0;
+  for (let i = issue - 1, open = 0; i >= Math.max(0, issue - 400); i--) {
+    const ch = win[i]!;
+    if (ch === ")" || ch === "]" || ch === "}") open++;
+    else if (ch === "(" || ch === "[" || ch === "{") {
+      if (open === 0) {
+        base = 1;
+        break;
+      }
+      open--;
+    }
+  }
+  const before = win.slice(issue).replace(/\\\r?\n/g, " ").replace(/\r/g, "");
+  if (hasUnquotedBoundary(before, lead, base)) return false;
+  // Walk forward to the end of this command: unquoted boundary, unbracketed newline, or its closing bracket.
+  const fwd = text.slice(issue).replace(/\\\r?\n/g, " ").replace(/\r/g, "");
+  let quote = lead === '"' || lead === "'" ? lead : "";
+  let depth = base;
+  let end = fwd.length;
+  const depthAt: number[] = new Array(fwd.length + 1);
+  for (let i = 0; i < fwd.length; i++) {
+    depthAt[i] = depth;
+    const ch = fwd[i]!;
+    if (quote) {
+      if (ch === "\\" && quote === '"') i++;
+      else if (ch === quote) quote = "";
+      continue;
+    }
+    if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === "[" || ch === "(" || ch === "{") depth++;
+    else if (ch === "]" || ch === ")" || ch === "}") {
+      depth--;
+      if (depth < base) {
+        end = i;
+        break;
+      }
+    } else if (ch === ";" || ch === "|" || (ch === "&" && fwd[i + 1] === "&") || (ch === "\n" && depth <= 0)) {
+      end = i;
+      break;
+    }
+  }
+  if (before.length > end) return false; // the flag sits past the end of this command
+  const cmd = fwd.slice(0, end);
+  for (const m of cmd.matchAll(REPO_FLAG_RE)) {
+    if (depthAt[m.index ?? 0] !== base) continue;
+    const operand = (m[1] ?? m[2] ?? m[3] ?? "").trim();
+    if (TARGET_REPO_OPERANDS.has(operand)) return true;
+  }
+  return false;
+}
+
+/** A bare list-form identifier operand that a module-scope const resolves to a NON-state literal (INV-3). */
+function resolvedNonState(operand: string, consts?: Map<string, string>): boolean {
+  const id = operand.replace(/,$/, "");
+  return !!consts && /^[A-Za-z_$][\w$]*$/.test(id) && consts.has(id) && !STATE_SET.has(consts.get(id)!);
 }
 
 /** Join backslash-continued physical lines; each logical line keeps its first physical line number. */
@@ -275,18 +366,20 @@ function logicalLines(text: string): Array<{ line: number; text: string; offset:
 }
 
 /** Line grammar for markdown / shell / python / mjs. Returns 1-based site line numbers. */
-export function scanTextSites(text: string): number[] {
+export function scanTextSites(text: string, consts?: Map<string, string>): number[] {
   const sites: number[] = [];
   for (const { line: lineNo, text: line, offset } of logicalLines(text)) {
     let hit = false;
     for (const m of line.matchAll(FLAG_RE)) {
       if (inPrContext(text, offset + (m.index ?? 0))) continue;
       if (isCreateOnlyFlag(m[0]) && !inCreateContext(text, offset + (m.index ?? 0), m[0])) continue;
+      if (inTargetRepoContext(text, offset + (m.index ?? 0))) continue;
       const argList = m[1] !== undefined; // `"--add-label", x` list form
       const quoted = m[2] ?? m[3];
       const operand = quoted ?? m[4] ?? "";
       const bareIdentifier = quoted === undefined && argList;
       if (bareIdentifier && operand) {
+        if (resolvedNonState(operand, consts)) continue;
         hit = true; // list form, non-literal operand (`labelFor(x)`, `labels[i]`): fail closed
         continue;
       }
@@ -325,10 +418,11 @@ export function scanTextSites(text: string): number[] {
     if (m[1] === undefined || !m[0].includes("\n")) continue; // single-line matches handled above
     if (inPrContext(text, m.index!)) continue;
     if (isCreateOnlyFlag(m[0]) && !inCreateContext(text, m.index!, m[0])) continue;
+    if (inTargetRepoContext(text, m.index!)) continue;
     const quoted = m[2] ?? m[3];
     const operand = quoted ?? m[4] ?? "";
     const isSite =
-      quoted === undefined ? operand !== "" : operand.split(",").some((p) => p && operandIsSite(p, false));
+      quoted === undefined ? operand !== "" && !resolvedNonState(operand, consts) : operand.split(",").some((p) => p && operandIsSite(p, false));
     const line = text.slice(0, m.index!).split("\n").length;
     if (isSite && !seen.has(line)) {
       seen.add(line);
@@ -568,7 +662,8 @@ export function scanFileSites(relPath: string, text: string): number[] {
     // The call grammar counts per site; text-grammar lines it already covers are not double-counted.
     const calls = scanTsSites(text);
     const seen = new Set(calls);
-    const extra = scanTextSites(stripComments(text)).filter((l) => !seen.has(l));
+    const stripped = stripComments(text);
+    const extra = scanTextSites(stripped, collectConsts(stripped)).filter((l) => !seen.has(l));
     return [...calls, ...extra].sort((a, b) => a - b);
   }
   return scanTextSites(text);

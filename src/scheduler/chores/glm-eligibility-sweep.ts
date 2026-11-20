@@ -424,10 +424,12 @@ export async function runGlmEligibilitySweep(
           continue;
         }
 
-        const label =
-          arm === "control" ? ORCH_BOARD_LABELS.glm_ab_control : ORCH_BOARD_LABELS.glm_eligible;
-
-        const res = await addLabel(row.number, label);
+        // One call per arm so each operand is a resolvable flag-label reference (both are GLM-lane
+        // flags, ADR-0047 D2); the lifecycle-seam lint reads the operand, not a local binding.
+        const res =
+          arm === "control"
+            ? await addLabel(row.number, ORCH_BOARD_LABELS.glm_ab_control)
+            : await addLabel(row.number, ORCH_BOARD_LABELS.glm_eligible);
         if (res.ok) {
           labelled++;
         } else if (isIssueLabelWriteFailure(res)) {
