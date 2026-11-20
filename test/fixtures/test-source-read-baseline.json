@@ -2,6 +2,7 @@
   "note": "Kind-tagged allowlist of test files that read a CODE path (STD-TEST-RUN-THE-CODE, #5262). Kinds: drift-guard | invariant-lint | dashboard-pin | behaviour | grandfathered. Seeded from the live tree (#5188 classification); anything structure-sensitive, mixed or uncertain is grandfathered. Grandfathered rows only shrink (reviewer rule - the test cannot see history). A new row is a deliberate one-line diff naming a sanctioned kind. pinSites (#5487) holds shrink-only per-file assertion-site counts (code = pins over code reads, STD-TEST-RUN-THE-CODE; prompt = indexOf/step pins over playbook reads, STD-TEST-PIN-PHRASE); observed > baseline fails, observed < baseline is stale: shrink with npx tsx scripts/ci/test-source-read-scan.ts --write-baseline. --init is the only growth path (landing PR; or the one named exception: a synthetic case that raises test/test-source-read-ratchet.test.mts own count).",
   "files": {
     "test/admission.test.mts": "grandfathered",
+    "test/advisory-workflows-fail-loud.test.mts": "drift-guard",
     "test/agent-dispatch-prompt-guard.test.mts": "invariant-lint",
     "test/aggregator-issues-waiting-projections.test.mts": "grandfathered",
     "test/aggregator-stuck-items.test.mts": "invariant-lint",

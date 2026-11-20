@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const root = join(import.meta.dirname, "..");
-const wf = (name: string): string => readFileSync(join(root, ".github", "workflows", `${name}.yml`), "utf8");
+const wf = (name: string): string => readFileSync(join(root, `.github/workflows/${name}.yml`), "utf8");
 
 const WORKFLOWS: Array<{ name: string; marker: string }> = [
   { name: "audit-nightly", marker: 'gh label create "$MARKER"' },
