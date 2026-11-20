@@ -1,0 +1,1 @@
+- ci: add a shrink-only zizmor finding ratchet and a comby rule against swallowed `|| true` exits in advisory-checks.yml (#5640)

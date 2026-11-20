@@ -1,0 +1,1 @@
+- ci: advisory workflows (audit-nightly, deps-check, osv-scan, stryker-check) go red when their tool did not run instead of swallowing the exit (#5701)

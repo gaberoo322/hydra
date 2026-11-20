@@ -275,7 +275,7 @@ describe("design-concept-reconcile-run — hydra-dev child flow documents the pr
     assert.match(md, /npx tsx scripts\/ci\/design-concept-reconcile-run\.ts \\\n\s+--body-file "\$PR_BODY_FILE" --anchor "\$ANCHOR_REF"/);
     // Gate 2 — both ratchet baselines.
     assert.match(md, /node scripts\/test\/suite-count-check\.mjs --update-baseline/);
-    assert.match(md, /npx tsx scripts\/ci\/test-subject-map\.ts --update-baseline/);
+    assert.match(md, /^\s*npx tsx scripts\/ci\/test-subject-map\.ts$/m);
     // Gate 3 — foreground suite + test typecheck.
     assert.match(md, /^npm test\b/m);
     assert.match(md, /^npm run typecheck:test\b/m);

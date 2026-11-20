@@ -60,7 +60,19 @@ describe("extractStrictBlockerRefs — strict blocker parse (issue #3059)", () =
   test("matches hyphenated and colon variants (`blocked-by:`, `depends-on`)", () => {
     assert.deepEqual(extractStrictBlockerRefs("blocked-by: #5"), [5]);
     assert.deepEqual(extractStrictBlockerRefs("depends-on #6"), [6]);
-    assert.deepEqual(extractStrictBlockerRefs("blocks #7"), [7]);
+    assert.deepEqual(extractStrictBlockerRefs("Blocked: #7"), [7]);
+    assert.deepEqual(extractStrictBlockerRefs("blocked #8"), [8]);
+  });
+
+  test("`blocks #N` is a forward link, never a blocker of THIS issue (#5685)", () => {
+    // "This issue blocks #N" means #N waits on this issue. Reading it as
+    // "blocked by #N" gated a prerequisite on the very issue it unblocks.
+    assert.deepEqual(extractStrictBlockerRefs("Blocks #7."), []);
+    assert.deepEqual(extractStrictBlockerRefs("blocks: #7"), []);
+    assert.deepEqual(extractStrictBlockerRefs("block #7"), []);
+    assert.deepEqual(extractStrictBlockerRefs("Unblocks #7 once merged."), []);
+    // A real blocker in the same body still gates.
+    assert.deepEqual(extractStrictBlockerRefs("Blocks #7.\nBlocked by #8."), [8]);
   });
 
   test("a BARE `#N` mention is NOT a strict blocker (false-positive guard)", () => {
@@ -265,6 +277,8 @@ describe("extractClearanceBlockerRefs (#4806)", () => {
 
   test("ignores code spans and empty bodies", () => {
     assert.deepEqual(extractClearanceBlockerRefs("Blocked by `#5` only"), []);
+    // A `Blocks #N` line is a forward link, so its refs never hold the issue (#5685).
+    assert.deepEqual(extractClearanceBlockerRefs("Blocks #5 and #6.\nBlocked by #7.", 1), [7]);
     assert.deepEqual(extractClearanceBlockerRefs(null), []);
   });
 });

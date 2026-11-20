@@ -12,6 +12,7 @@ import {
   evaluateGate,
   findTransition,
   gateQaVerdict,
+  qaBounce,
   recordsNeeded,
   type GateInput,
   type LifecycleMode,
@@ -391,5 +392,70 @@ describe("QA-FAIL round-3 fixes (#5317 PR #5377)", () => {
     const res = await advance({ issue: 10, to: "qa-passed", evidence: { pr: "7" }, actor: "hydra-qa" }, w.deps);
     assert.equal((res as { code?: string }).code, "state-entry-unknown");
     assert.deepEqual(w.edits, []);
+  });
+});
+
+describe("qaBounce: the seam picks a QA FAIL's exit from one live read (#5659)", () => {
+  /** Counts every qaLive fetch; `states` is served one per read, the last repeating. */
+  function counted(w: World, states: string[]): { reads: () => number } {
+    let n = 0;
+    w.deps.fetch.qaLive = async () => {
+      const state = states[Math.min(n, states.length - 1)] as string;
+      n += 1;
+      return { ok: true, value: { ...w.pr, state } };
+    };
+    return { reads: () => n };
+  }
+  const failed = () => live({ timedBodies: [timed(failBody(1))] });
+  const input = { issue: 10, pr: 7, actor: "hydra-qa" };
+
+  test("OPEN -> needs-dev-resume, CLOSED -> ready-for-agent, each with exactly one live read", async () => {
+    for (const [state, to] of [["OPEN", "needs-dev-resume"], ["CLOSED", "ready-for-agent"]] as const) {
+      const w = world("enforce", failed(), [failBody(1)]);
+      const c = counted(w, [state]);
+      assert.deepEqual(await qaBounce(input, w.deps), { ok: true, to });
+      assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: [to] }]);
+      assert.equal(c.reads(), 1, `${state}: one PR-state read chooses the exit`);
+    }
+  });
+
+  test("a MERGED PR is the pr-merged code and writes nothing", async () => {
+    const w = world("enforce", failed(), [failBody(1)]);
+    counted(w, ["MERGED"]);
+    assert.deepEqual(await qaBounce(input, w.deps), { ok: false, code: "pr-merged" });
+    assert.deepEqual(w.edits, []);
+  });
+
+  test("a PR that closes between the old two reads cannot mismatch: the one read decides", async () => {
+    const w = world("enforce", failed(), [failBody(1)]);
+    const c = counted(w, ["OPEN", "CLOSED"]);
+    assert.deepEqual(await qaBounce(input, w.deps), { ok: true, to: "needs-dev-resume" });
+    assert.equal(c.reads(), 1, "no second read exists to disagree");
+    assert.ok(w.journal.every((e) => !String(e.result).includes("qa-verdict-mismatch")));
+  });
+
+  test("the third reviewed FAIL parks with the arm counts the park comment renders", async () => {
+    const three = [failBody(1), failBody(2), failBody(3)];
+    const w = world("enforce", live({ timedBodies: [timed(failBody(3))] }), three);
+    const res = await qaBounce(input, w.deps);
+    assert.equal(res.ok, false);
+    const parked = res as { code: string; counts?: ReadonlyArray<{ arm: string; count: number }> };
+    assert.equal(parked.code, "parked:qa-fail-rounds");
+    assert.equal(parked.counts?.find((c) => c.arm === "qa-fail-rounds")?.count, 3, "the counts are the ones parkForCap renders");
+    assert.ok(w.comments.some((c) => c.body.includes("## Hydra cap park")));
+    assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["parked"] }]);
+  });
+
+  test("defer evidence is the trailer-less bounce; an unreadable PR state refuses fetch-failed and a crash never throws", async () => {
+    const w = world("enforce", live());
+    assert.deepEqual(await qaBounce({ ...input, defer: true }, w.deps), { ok: true, to: "needs-dev-resume" });
+    const wf = world("enforce", failed(), [failBody(1)]);
+    wf.deps.fetch.qaLive = async () => ({ ok: false });
+    assert.deepEqual(await qaBounce(input, wf.deps), { ok: false, code: "fetch-failed" });
+    wf.deps.fetch.qaLive = async () => {
+      throw new Error("boom");
+    };
+    assert.deepEqual(await qaBounce(input, wf.deps), { ok: false, code: "crashed" });
+    assert.deepEqual(wf.edits, []);
   });
 });

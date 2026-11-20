@@ -21,9 +21,10 @@ name: osv-scan
 # This is a NEW advisory scan — not a change to the merge gate — so it lives in a
 # Tier-3 sibling (operator memory feedback_ci_gate_separate_workflow_avoids_tier0).
 #
-# NOT A REQUIRED CHECK: never added to branch protection. The scan runs with
-# `|| true` so a found vulnerability surfaces via the uploaded artifact + a
-# warning annotation without wedging the merge queue — advisory, not blocking.
+# NOT A REQUIRED CHECK: never added to branch protection. A found vulnerability
+# (scanner exit 1 with a parseable results object) surfaces via the uploaded
+# artifact + a warning annotation without wedging the merge queue; a scan that
+# did not RUN (download/SHA/no-lockfile/scanner error) is a red step.
 #
 # TOOL LANE (ADR-0005): osv-scanner is a pinned pre-built binary downloaded on
 # demand — no npm distribution, no package.json entry, no install scripts, no
@@ -57,10 +58,19 @@ jobs:
       - name: Scan lockfiles for OSV vulnerabilities (advisory)
         run: |
           set -uo pipefail
-          # Advisory: always exit 0. osv-scanner exits non-zero when it finds a
-          # vulnerability; `|| true` keeps this from wedging the merge queue, and
-          # the JSON artifact carries the findings for agent/operator triage.
-          bash scripts/osv-scan.sh . > osv-results.json || true
+          # osv-scanner exits 1 when it finds a vulnerability, and the wrapper
+          # exits 1 on its own download/SHA/no-lockfile failure too, so rc 0/1
+          # count as a completed scan only when stdout is a results object.
+          rc=0
+          bash scripts/osv-scan.sh . > osv-results.json || rc=$?
+          if [ "$rc" -gt 1 ]; then
+            echo "::error title=osv-scan::osv-scan.sh failed to run (exit $rc)"
+            exit 1
+          fi
+          if ! jq -e 'type == "object" and has("results")' osv-results.json >/dev/null 2>&1; then
+            echo "::error title=osv-scan::no parseable OSV results (exit $rc)"
+            exit 1
+          fi
           echo "::group::osv-scan results"
           cat osv-results.json
           echo "::endgroup::"

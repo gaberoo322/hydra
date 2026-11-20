@@ -380,9 +380,14 @@ function makeFinishDeps(opts: FakeOpts = {}): { deps: FinishDeps; calls: string[
     repoRoot: REPO_ROOT,
     now: () => NOW_MS,
     log: (msg) => { logs.push(msg); },
-    editIssueLabels: async (issue, labels) => {
-      if (reject.has("editIssueLabels")) throw new Error("injected editIssueLabels rejection");
-      calls.push(`label:${issue}:r=${(labels.remove ?? []).join("+") ?? ""}:a=${(labels.add ?? []).join("+") ?? ""}`);
+    withholdIssue: async (issue) => {
+      if (reject.has("withholdIssue")) throw new Error("injected withholdIssue rejection");
+      calls.push(`label:${issue}:r=:a=${WITHHOLD}`);
+      return { ok: true };
+    },
+    markAuthored: async (number) => {
+      if (reject.has("markAuthored")) throw new Error("injected markAuthored rejection");
+      calls.push(`label:${number}:r=:a=${GLM_LABEL_AUTHORED}`);
       return { ok: true };
     },
     advanceState: async (issue, to, opts) => {
@@ -726,7 +731,7 @@ describe("runFinish — the post-author arms, in order (issue #4337 D13, issue #
     assert.doesNotMatch(journal, /ERROR gh pr create failed/);
     // Delta (b): the glm-authored re-apply rides gh ISSUE edit on the PR
     // number (gh pr edit is broken for labels here, ADR-0034 §7) — in the
-    // fake that is the SAME editIssueLabels seam, called with the PR number.
+    // fake that is the SAME markAuthored seam, called with the PR number.
     assert.ok(h.calls.includes(`label:999:r=:a=${GLM_LABEL_AUTHORED}`), `expected the adopted-PR relabel:\n${h.calls.join("\n")}`);
     assert.ok(h.calls.includes(`advance:77:in-progress->needs-qa:pr=999`), "adoption must still advance the issue to needs-qa");
     assert.equal(h.files.get(CAP_FILE), "1\n", "an adopted PR counts against the daily cap like a fresh one");
@@ -793,6 +798,27 @@ describe("runFinish — the post-author arms, in order (issue #4337 D13, issue #
     assert.equal(r.action, "release-not-authored");
     assert.match(h.logs.join("\n"), /WARN worktree remove \(\/repo\/wts\/agent-glm-77-1\) threw \(non-fatal\)/);
     assert.ok(h.calls.includes(`advance:77:in-progress->ready-for-agent`), "the release must still run");
+  });
+
+  test("effect isolation: a REJECTING withholdIssue WARNs and the release still happens (#5673 INV-6)", async () => {
+    const h = makeFinishDeps({ commitCount: 1, preflightRejects: true, rejectEffects: ["withholdIssue"] });
+    const r = await runFinish(h.deps, ranInput());
+    assert.equal(r.action, "withhold-preflight-blocked");
+    assert.match(h.logs.join("\n"), /WARN add glm-withhold to issue #77 threw \(non-fatal\)/);
+    assert.ok(h.calls.includes(`advance:77:in-progress->ready-for-agent`), "the release must still run");
+  });
+
+  test("effect isolation: a REJECTING markAuthored on the adopt path WARNs and the adoption still advances (#5673 INV-6)", async () => {
+    const h = makeFinishDeps({
+      commitCount: 1,
+      createPr: { ok: false, stderr: "already exists" },
+      openPrs: [{ number: 999, url: "https://github.com/gaberoo322/hydra/pull/999", headRefName: BRANCH }],
+      rejectEffects: ["markAuthored"],
+    });
+    const r = await runFinish(h.deps, ranInput());
+    assert.equal(r.action, "open-pr");
+    assert.match(h.logs.join("\n"), /threw \(non-fatal\)/);
+    assert.ok(h.calls.includes(`advance:77:in-progress->needs-qa:pr=999`), "adoption must still advance");
   });
 
   test("effect isolation: a throwing evidence dep on the ran path degrades, never crashes (finish-fault backstop)", async () => {
@@ -1021,8 +1047,12 @@ describe("runFinish — provider attribution + per-provider 429 (INV-7/8/10)", (
       repoRoot: "/repo",
       now: () => NOW_MS,
       log: () => {},
-      editIssueLabels: async (issue, labels) => {
-        calls.push(`label:${issue}:a=${(labels.add ?? []).join("+")}`);
+      withholdIssue: async (issue) => {
+        calls.push(`label:${issue}:a=${WITHHOLD}`);
+        return { ok: true };
+      },
+      markAuthored: async (number) => {
+        calls.push(`label:${number}:a=${GLM_LABEL_AUTHORED}`);
         return { ok: true };
       },
       advanceState: async (issue, to, opts) => {

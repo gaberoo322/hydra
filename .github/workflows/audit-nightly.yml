@@ -49,7 +49,7 @@ jobs:
           # inapplicable, no-forward-fix advisory should not file a daily issue.
           AUDIT_ALLOWLIST: GHSA-qwww-vcr4-c8h2
         run: |
-          set -uo pipefail
+          set -euo pipefail
           orch=$(npx tsx scripts/ci/npm-audit-scan.ts --dir . --label orchestrator --format json)
           dash=$(npx tsx scripts/ci/npm-audit-scan.ts --dir dashboard --label dashboard --allowlist "$AUDIT_ALLOWLIST" --format json)
           echo "orchestrator: $orch"
@@ -95,12 +95,17 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
-          set -uo pipefail
+          set -euo pipefail
           MARKER="npm-audit-nightly"
           # Idempotent marker label so we upsert a single open issue, never a
           # daily pile of duplicates.
+          rc=0
           gh label create "$MARKER" --repo "$REPO" --force --color B60205 \
-            --description "Nightly npm-audit found a high/critical advisory needing a dep-bump" || true
+            --description "Nightly npm-audit found a high/critical advisory needing a dep-bump" || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::error title=audit-nightly::gh label create failed (exit $rc)"
+            exit 1
+          fi
           existing=$(gh issue list --repo "$REPO" --state open --label "$MARKER" \
             --json number --jq '.[0].number // empty')
           if [ -n "$existing" ]; then

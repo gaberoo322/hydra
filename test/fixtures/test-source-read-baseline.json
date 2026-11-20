@@ -1,496 +1,268 @@
 {
-  "note": "Kind-tagged allowlist of test files that read a CODE path (STD-TEST-RUN-THE-CODE, #5262). Kinds: drift-guard | invariant-lint | dashboard-pin | behaviour | grandfathered. Seeded from the live tree (#5188 classification); anything structure-sensitive, mixed or uncertain is grandfathered. Grandfathered rows only shrink (reviewer rule - the test cannot see history). A new row is a deliberate one-line diff naming a sanctioned kind. pinSites (#5487) holds shrink-only per-file assertion-site counts (code = pins over code reads, STD-TEST-RUN-THE-CODE; prompt = indexOf/step pins over playbook reads, STD-TEST-PIN-PHRASE); observed > baseline fails, observed < baseline is stale: shrink with npx tsx scripts/ci/test-source-read-scan.ts --write-baseline. --init is the only growth path (landing PR; or the one named exception: a synthetic case that raises test/test-source-read-ratchet.test.mts own count).",
-  "files": {
-    "test/admission.test.mts": "grandfathered",
-    "test/agent-dispatch-prompt-guard.test.mts": "invariant-lint",
-    "test/aggregator-issues-waiting-projections.test.mts": "grandfathered",
-    "test/aggregator-stuck-items.test.mts": "invariant-lint",
-    "test/api-500-catch-ratchet.test.mts": "invariant-lint",
-    "test/api-tier-router.test.mts": "grandfathered",
-    "test/api-versions.test.mts": "grandfathered",
-    "test/attention-calibration.test.mts": "grandfathered",
-    "test/attention-target-bucket.test.mts": "grandfathered",
-    "test/backfill-dedup-baseline.test.mts": "behaviour",
-    "test/attention.test.mts": "grandfathered",
-    "test/autopilot-args.test.mts": "behaviour",
-    "test/autopilot-cooldown-redis-mirror.test.mts": "behaviour",
-    "test/autopilot-cycle-record-branch-cycleid.test.mts": "behaviour",
-    "test/autopilot-cycle-record-task-title.test.mts": "behaviour",
-    "test/autopilot-decide-events-shape.test.mts": "behaviour",
-    "test/autopilot-decide.test.mts": "behaviour",
-    "test/autopilot-dedup-reap.test.mts": "behaviour",
-    "test/autopilot-deposit-key-resolution.test.mts": "behaviour",
-    "test/autopilot-dev-orch-gate.test.mts": "behaviour",
-    "test/autopilot-dev-orch-needs-qa-promotion.test.mts": "behaviour",
-    "test/autopilot-dev-resume-stall.test.mts": "behaviour",
-    "test/autopilot-dev-target-resume-stall.test.mts": "behaviour",
-    "test/autopilot-dispatch-cost-join-reap.test.mts": "behaviour",
-    "test/autopilot-escalation-deposit-roundtrip.test.mts": "behaviour",
-    "test/autopilot-heartbeat.test.mts": "behaviour",
-    "test/autopilot-hooks.test.mts": "behaviour",
-    "test/autopilot-invariants.test.mts": "invariant-lint",
-    "test/autopilot-quota-budget-3867.test.mts": "behaviour",
-    "test/autopilot-reap-empty-cycle.test.mts": "behaviour",
-    "test/autopilot-reap-segment-softcap.test.mts": "behaviour",
-    "test/autopilot-reap-state.test.mts": "behaviour",
-    "test/autopilot-reap-task-id-mismatch.test.mts": "behaviour",
-    "test/autopilot-recover-stale.test.mts": "behaviour",
-    "test/autopilot-reflection-anchor-deposit.test.mts": "behaviour",
-    "test/autopilot-reflection-deposit-presence.test.mts": "behaviour",
-    "test/autopilot-reflection-fire.test.mts": "behaviour",
-    "test/autopilot-reflection-reap-completion.test.mts": "behaviour",
-    "test/autopilot-render-dispatch.test.mts": "behaviour",
-    "test/autopilot-research-force-cap.test.mts": "behaviour",
-    "test/autopilot-schema-version.test.mts": "behaviour",
-    "test/autopilot-scripts.test.mts": "behaviour",
-    "test/autopilot-sweep-target-signal.test.mts": "behaviour",
-    "test/autopilot-token-record-reap-completion.test.mts": "behaviour",
-    "test/autopilot-token-recover-reap-completion.test.mts": "behaviour",
-    "test/autopilot-parent-exception.test.mts": "behaviour",
-    "test/autopilot-turn-runner.test.mts": "behaviour",
-    "test/autopilot-unattended.test.mts": "behaviour",
-    "test/autopilot-wait-or-reap-handler.test.mts": "behaviour",
-    "test/autopilot-watchdog.test.mts": "behaviour",
-    "test/baseline-raise-check.test.mts": "drift-guard",
-    "test/branch-prune-script.test.mts": "behaviour",
-    "test/build-spritesheet.test.mts": "behaviour",
-    "test/builder-page.test.mts": "grandfathered",
-    "test/ci-scope-check.test.mts": "grandfathered",
-    "test/class-state.test.mts": "grandfathered",
-    "test/coding-standards-integrity.test.mts": "drift-guard",
-    "test/claude-cli-exec.test.mts": "grandfathered",
-    "test/claude-cli-seam-check.test.mts": "invariant-lint",
-    "test/cost-layers.test.mts": "grandfathered",
-    "test/dashboard-routes.test.mts": "dashboard-pin",
-    "test/dashboard-server-confirmed-write.test.mts": "grandfathered",
-    "test/dashboard-today-polling.test.mts": "dashboard-pin",
-    "test/dashboard-ticking-clock.test.mts": "dashboard-pin",
-    "test/decide-golden.test.mts": "behaviour",
-    "test/decide-guards.test.mts": "invariant-lint",
-    "test/decide-signal-classes.test.mts": "behaviour",
-    "test/derive-version-bump.test.mts": "behaviour",
-    "test/design-concept-reconcile-check.test.mts": "grandfathered",
-    "test/dispatch-cycle-record-anchor-type.test.mts": "behaviour",
-    "test/dispatch-cycle-record-api-base.test.mts": "behaviour",
-    "test/dispatch-holdback-pending.test.mts": "behaviour",
-    "test/display-format.test.mts": "dashboard-pin",
-    "test/docs-adrs.test.mts": "grandfathered",
-    "test/docs-areas.test.mts": "grandfathered",
-    "test/docs-classes-skills.test.mts": "grandfathered",
-    "test/docs-page.test.mts": "grandfathered",
-    "test/docs-prose-drift.test.mts": "drift-guard",
-    "test/event-bus-vocabulary.test.mts": "grandfathered",
-    "test/exec-with-timeout.test.mts": "grandfathered",
-    "test/generated-inventories-drift.test.mts": "drift-guard",
-    "test/git-remote-fence.test.mts": "behaviour",
-    "test/github-issues.test.mts": "grandfathered",
-    "test/github-pr-refs.test.mts": "grandfathered",
-    "test/github-prs.test.mts": "grandfathered",
-    "test/github-remote-url.test.mts": "behaviour",
-    "test/glm-beachhead-report.test.mts": "behaviour",
-    "test/glm-drainer-loop.test.mts": "grandfathered",
-    "test/glm-drainer-runner.test.mts": "grandfathered",
-    "test/glm-eligibility.test.mts": "grandfathered",
-    "test/glm-gate.test.mts": "grandfathered",
-    "test/grounding.test.mts": "grandfathered",
-    "test/health-page.test.mts": "grandfathered",
-    "test/hydra-branch-prune-dead-branch.test.mts": "grandfathered",
-    "test/hydra-branch-prune-master-tracking.test.mts": "grandfathered",
-    "test/hydra-branch-prune-merged-remote.test.mts": "grandfathered",
-    "test/hydra-cli-backlog-move.test.mts": "grandfathered",
-    "test/hydra-cli-raw-body.test.mts": "grandfathered",
-    "test/hydra-dev-reflection-deposit.test.mts": "behaviour",
-    "test/hydra-hitl-grill-option-table.test.mts": "grandfathered",
-    "test/hydra-qa-needs-qa-clear.test.mts": "grandfathered",
-    "test/hydra-qa-prompt-verdict.test.mts": "behaviour",
-    "test/hydra-retro-emit.test.mts": "grandfathered",
-    "test/hydra-target-build-anchor-preflight.test.mts": "behaviour",
-    "test/hydra-target-build-worktree-guard.test.mts": "invariant-lint",
-    "test/hydra-target-cleanup-emit.test.mts": "behaviour",
-    "test/hydra-target-playbooks-pr-only.test.mts": "drift-guard",
-    "test/hydra-target-wire-or-retire-emit.test.mts": "grandfathered",
-    "test/launch-flow-key-contract.test.mts": "grandfathered",
-    "test/learning-friction-capture.test.mts": "grandfathered",
-    "test/lifecycle-dispatch-adoption.test.mts": "drift-guard",
-    "test/lifecycle-dispatch-claim.test.mts": "invariant-lint",
-    "test/lifecycle-journal.test.mts": "invariant-lint",
-    "test/lifecycle-reconcile.test.mts": "behaviour",
-    "test/lifecycle-state-label-guard.test.mts": "behaviour",
-    "test/lifecycle-vocabulary-drift.test.mts": "drift-guard",
-    "test/metrics-trend.test.mts": "grandfathered",
-    "test/mutation-gate-inputs.test.mts": "grandfathered",
-    "test/mutation-runner-classification.test.mts": "grandfathered",
-    "test/mutation.test.mts": "grandfathered",
-    "test/now-recommendations.test.mts": "grandfathered",
-    "test/on-subagent-tool-call.test.mts": "behaviour",
-    "test/operator-actions-affordance.test.mts": "grandfathered",
-    "test/operator-actions-parity.test.mts": "drift-guard",
-    "test/operator-actions-registry.test.mts": "grandfathered",
-    "test/operator-channel.test.mts": "grandfathered",
-    "test/ops-collect.test.mts": "behaviour",
-    "test/operator-notify-cli.test.mts": "behaviour",
-    "test/otel-ingest.test.mts": "grandfathered",
-    "test/pace-gate-allow.test.mts": "behaviour",
-    "test/qa-catch-rate.test.mts": "grandfathered",
-    "test/qa-merge-guard-callsites.test.mts": "invariant-lint",
-    "test/qa-merge-guard.test.mts": "invariant-lint",
-    "test/qa-reviewer-commit-a.test.mts": "invariant-lint",
-    "test/qa-reviewer-commit-b.test.mts": "invariant-lint",
-    "test/qa-plumbing-scripts.test.mts": "behaviour",
-    "test/qa-verdict-cli.test.mts": "behaviour",
-    "test/qa-verdict-trailer.test.mts": "grandfathered",
-    "test/reap-stale-test-procs.test.mts": "behaviour",
-    "test/recover-stale.test.mts": "behaviour",
-    "test/redis-db-helper.test.mts": "behaviour",
-    "test/review-pickup.test.mts": "grandfathered",
-    "test/risk-critical.test.mts": "grandfathered",
-    "test/run-ledger.test.mts": "behaviour",
-    "test/runs-page.test.mts": "grandfathered",
-    "test/scheduler-stop-semantics.test.mts": "grandfathered",
-    "test/seam-check-lib.test.mts": "invariant-lint",
-    "test/silent-catch-lint.test.mts": "invariant-lint",
-    "test/subagent-dispatch-registration.test.mts": "behaviour",
-    "test/suite-count-check.test.mts": "behaviour",
-    "test/sync-skills.test.mts": "behaviour",
-    "test/sync-target-gate.test.mts": "behaviour",
-    "test/systemd-notify-failure-unit.test.mts": "grandfathered",
-    "test/target-board-labels.test.mts": "grandfathered",
-    "test/target-capabilities.test.mts": "drift-guard",
-    "test/target-playbook-capability-branches.test.mts": "drift-guard",
-    "test/target-coupling-check.test.mts": "grandfathered",
-    "test/target-design-concept.test.mts": "grandfathered",
-    "test/target-qa-verdict.test.mts": "grandfathered",
-    "test/target-reframe.test.mts": "behaviour",
-    "test/test-pools.test.mts": "drift-guard",
-    "test/taxonomy-classes.test.mts": "behaviour",
-    "test/telegram-seam-check.test.mts": "invariant-lint",
-    "test/test-file-sprawl-guard.test.mts": "invariant-lint",
-    "test/test-source-read-ratchet.test.mts": "invariant-lint",
-    "test/turn-snapshot-json.test.mts": "behaviour",
-    "test/turn-snapshot-picks.test.mts": "grandfathered",
-    "test/turn-snapshot-target-board.test.mts": "behaviour",
-    "test/typecheck-test-drift.test.mts": "drift-guard",
-    "test/wait-for-health.test.mts": "grandfathered",
-    "test/watchdog-claude-hooks.test.mts": "behaviour",
-    "test/watchdog-deploy-drift.test.mts": "drift-guard",
-    "test/watchdog-launch-flow-force-exit.test.mts": "drift-guard",
-    "test/watchdog-node-modules-integrity.test.mts": "grandfathered",
-    "test/watchdog-operator-channel.test.mts": "grandfathered",
-    "test/watchdog-origin-identity.test.mts": "behaviour",
-    "test/watchdog-redis-backup-freshness.test.mts": "behaviour",
-    "test/watchdog-spawn-timeout-ratchet.test.mts": "invariant-lint",
-    "test/wire-or-retire-carveout-drift.test.mts": "drift-guard",
-    "test/work-page.test.mts": "grandfathered",
-    "test/zizmor-scan.test.mts": "behaviour"
-  },
-  "pinSites": {
-    "test/admission.test.mts": {
-      "code": 1,
-      "prompt": 0
-    },
-    "test/aggregator-issues-waiting-projections.test.mts": {
-      "code": 1,
-      "prompt": 0
-    },
-    "test/aggregator-stuck-items.test.mts": {
-      "code": 2,
-      "prompt": 0
-    },
-    "test/api-500-catch-ratchet.test.mts": {
-      "code": 1,
-      "prompt": 0
-    },
-    "test/attention-calibration.test.mts": {
-      "code": 1,
-      "prompt": 0
-    },
-    "test/autopilot-deposit-key-resolution.test.mts": {
-      "code": 2,
-      "prompt": 0
-    },
-    "test/autopilot-dev-orch-gate.test.mts": {
-      "code": 1,
-      "prompt": 0
-    },
-    "test/autopilot-dev-target-forbidden-ending-preamble.test.mts": {
-      "code": 0,
-      "prompt": 1
-    },
-    "test/autopilot-forbidden-ending-preamble.test.mts": {
-      "code": 0,
-      "prompt": 2
-    },
-    "test/autopilot-heartbeat.test.mts": {
-      "code": 8,
-      "prompt": 0
-    },
-    "test/autopilot-invariants.test.mts": {
-      "code": 3,
-      "prompt": 0
-    },
-    "test/autopilot-qa-orch-forbidden-ending-preamble.test.mts": {
-      "code": 0,
-      "prompt": 1
-    },
-    "test/autopilot-render-dispatch.test.mts": {
-      "code": 1,
-      "prompt": 6
-    },
-    "test/autopilot-scripts.test.mts": {
-      "code": 14,
-      "prompt": 0
-    },
-    "test/autopilot-turn-runner.test.mts": {
-      "code": 6,
-      "prompt": 3
-    },
-    "test/autopilot-watchdog.test.mts": {
-      "code": 5,
-      "prompt": 0
-    },
-    "test/class-state.test.mts": {
-      "code": 1,
-      "prompt": 0
-    },
-    "test/dashboard-today-polling.test.mts": {
-      "code": 6,
-      "prompt": 0
-    },
-    "test/decide-guards.test.mts": {
-      "code": 0,
-      "prompt": 2
-    },
-    "test/derive-version-bump.test.mts": {
-      "code": 1,
-      "prompt": 0
-    },
-    "test/design-concept-reconcile-check.test.mts": {
-      "code": 5,
-      "prompt": 0
-    },
-    "test/docs-areas.test.mts": {
-      "code": 3,
-      "prompt": 0
-    },
-    "test/docs-prose-drift.test.mts": {
-      "code": 4,
-      "prompt": 0
-    },
-    "test/git-remote-fence.test.mts": {
-      "code": 1,
-      "prompt": 0
-    },
-    "test/github-issues.test.mts": {
-      "code": 1,
-      "prompt": 0
-    },
-    "test/github-pr-refs.test.mts": {
-      "code": 3,
-      "prompt": 0
-    },
-    "test/github-remote-url.test.mts": {
-      "code": 4,
-      "prompt": 0
-    },
-    "test/glm-beachhead-report.test.mts": {
-      "code": 1,
-      "prompt": 0
-    },
-    "test/glm-drainer-loop.test.mts": {
-      "code": 12,
-      "prompt": 0
-    },
-    "test/health-page.test.mts": {
-      "code": 24,
-      "prompt": 0
-    },
-    "test/hydra-branch-prune-dead-branch.test.mts": {
-      "code": 1,
-      "prompt": 0
-    },
-    "test/hydra-branch-prune-master-tracking.test.mts": {
-      "code": 3,
-      "prompt": 0
-    },
-    "test/hydra-branch-prune-merged-remote.test.mts": {
-      "code": 1,
-      "prompt": 0
-    },
-    "test/hydra-dev-reflection-deposit.test.mts": {
-      "code": 17,
-      "prompt": 0
-    },
-    "test/hydra-hitl-grill-option-table.test.mts": {
-      "code": 0,
-      "prompt": 2
-    },
-    "test/hydra-qa-needs-qa-clear.test.mts": {
-      "code": 5,
-      "prompt": 2
-    },
-    "test/hydra-qa-prompt-verdict.test.mts": {
-      "code": 40,
-      "prompt": 0
-    },
-    "test/hydra-retro-emit.test.mts": {
-      "code": 2,
-      "prompt": 0
-    },
-    "test/hydra-review-option-table.test.mts": {
-      "code": 0,
-      "prompt": 2
-    },
-    "test/hydra-review-stalled-pr-bucket.test.mts": {
-      "code": 0,
-      "prompt": 5
-    },
-    "test/hydra-target-build-anchor-preflight.test.mts": {
-      "code": 0,
-      "prompt": 7
-    },
-    "test/hydra-target-build-fence-skip-steps.test.mts": {
-      "code": 0,
-      "prompt": 9
-    },
-    "test/hydra-target-cleanup-emit.test.mts": {
-      "code": 3,
-      "prompt": 0
-    },
-    "test/hydra-target-wire-or-retire-emit.test.mts": {
-      "code": 4,
-      "prompt": 0
-    },
-    "test/launch-flow-key-contract.test.mts": {
-      "code": 4,
-      "prompt": 0
-    },
-    "test/lifecycle-dispatch-claim.test.mts": {
-      "code": 4,
-      "prompt": 0
-    },
-    "test/lifecycle-reconcile.test.mts": {
-      "code": 5,
-      "prompt": 0
-    },
-    "test/lifecycle-state-label-guard.test.mts": {
-      "code": 3,
-      "prompt": 0
-    },
-    "test/operator-actions-parity.test.mts": {
-      "code": 3,
-      "prompt": 0
-    },
-    "test/operator-actions-registry.test.mts": {
-      "code": 13,
-      "prompt": 0
-    },
-    "test/operator-channel.test.mts": {
-      "code": 2,
-      "prompt": 0
-    },
-    "test/operator-notify-cli.test.mts": {
-      "code": 7,
-      "prompt": 0
-    },
-    "test/qa-catch-rate.test.mts": {
-      "code": 1,
-      "prompt": 0
-    },
-    "test/qa-merge-guard.test.mts": {
-      "code": 2,
-      "prompt": 0
-    },
-    "test/qa-plumbing-scripts.test.mts": {
-      "code": 0,
-      "prompt": 2
-    },
-    "test/qa-reviewer-commit-a.test.mts": {
-      "code": 2,
-      "prompt": 5
-    },
-    "test/qa-reviewer-commit-b.test.mts": {
-      "code": 2,
-      "prompt": 2
-    },
-    "test/redis-db-helper.test.mts": {
-      "code": 8,
-      "prompt": 0
-    },
-    "test/review-pickup.test.mts": {
-      "code": 1,
-      "prompt": 0
-    },
-    "test/run-ledger.test.mts": {
-      "code": 3,
-      "prompt": 0
-    },
-    "test/scheduler-stop-semantics.test.mts": {
-      "code": 2,
-      "prompt": 0
-    },
-    "test/subagent-dispatch-registration.test.mts": {
-      "code": 4,
-      "prompt": 0
-    },
-    "test/suite-count-check.test.mts": {
-      "code": 14,
-      "prompt": 0
-    },
-    "test/sync-skills.test.mts": {
-      "code": 4,
-      "prompt": 20
-    },
-    "test/systemd-notify-failure-unit.test.mts": {
-      "code": 1,
-      "prompt": 0
-    },
-    "test/target-design-concept.test.mts": {
-      "code": 0,
-      "prompt": 3
-    },
-    "test/target-playbook-capability-branches.test.mts": {
-      "code": 2,
-      "prompt": 0
-    },
-    "test/target-qa-verdict.test.mts": {
-      "code": 0,
-      "prompt": 2
-    },
-    "test/target-wire-or-retire-lane-invariant.test.mts": {
-      "code": 0,
-      "prompt": 10
-    },
-    "test/taxonomy-classes.test.mts": {
-      "code": 7,
-      "prompt": 0
-    },
-    "test/turn-snapshot-picks.test.mts": {
-      "code": 2,
-      "prompt": 0
-    },
-    "test/watchdog-claude-hooks.test.mts": {
-      "code": 5,
-      "prompt": 0
-    },
-    "test/watchdog-deploy-drift.test.mts": {
-      "code": 1,
-      "prompt": 0
-    },
-    "test/watchdog-operator-channel.test.mts": {
-      "code": 5,
-      "prompt": 0
-    },
-    "test/watchdog-origin-identity.test.mts": {
-      "code": 1,
-      "prompt": 0
-    },
-    "test/watchdog-redis-backup-freshness.test.mts": {
-      "code": 13,
-      "prompt": 0
-    },
-    "test/work-page.test.mts": {
-      "code": 130,
-      "prompt": 0
-    }
-  }
+  "pins\ttest/admission.test.mts\tcode": 1,
+  "pins\ttest/aggregator-issues-waiting-projections.test.mts\tcode": 1,
+  "pins\ttest/aggregator-stuck-items.test.mts\tcode": 2,
+  "pins\ttest/api-500-catch-ratchet.test.mts\tcode": 1,
+  "pins\ttest/attention-calibration.test.mts\tcode": 1,
+  "pins\ttest/autopilot-deposit-key-resolution.test.mts\tcode": 2,
+  "pins\ttest/autopilot-dev-orch-gate.test.mts\tcode": 1,
+  "pins\ttest/autopilot-dev-target-forbidden-ending-preamble.test.mts\tprompt": 1,
+  "pins\ttest/autopilot-forbidden-ending-preamble.test.mts\tprompt": 2,
+  "pins\ttest/autopilot-heartbeat.test.mts\tcode": 8,
+  "pins\ttest/autopilot-invariants.test.mts\tcode": 3,
+  "pins\ttest/autopilot-qa-orch-forbidden-ending-preamble.test.mts\tprompt": 1,
+  "pins\ttest/autopilot-render-dispatch.test.mts\tcode": 1,
+  "pins\ttest/autopilot-render-dispatch.test.mts\tprompt": 6,
+  "pins\ttest/autopilot-scripts.test.mts\tcode": 14,
+  "pins\ttest/autopilot-turn-runner.test.mts\tcode": 6,
+  "pins\ttest/autopilot-turn-runner.test.mts\tprompt": 3,
+  "pins\ttest/autopilot-watchdog.test.mts\tcode": 5,
+  "pins\ttest/class-state.test.mts\tcode": 1,
+  "pins\ttest/dashboard-today-polling.test.mts\tcode": 6,
+  "pins\ttest/decide-guards.test.mts\tprompt": 2,
+  "pins\ttest/derive-version-bump.test.mts\tcode": 1,
+  "pins\ttest/design-concept-reconcile-check.test.mts\tcode": 5,
+  "pins\ttest/docs-areas.test.mts\tcode": 3,
+  "pins\ttest/docs-prose-drift.test.mts\tcode": 4,
+  "pins\ttest/git-remote-fence.test.mts\tcode": 1,
+  "pins\ttest/github-issues.test.mts\tcode": 1,
+  "pins\ttest/github-pr-refs.test.mts\tcode": 3,
+  "pins\ttest/github-remote-url.test.mts\tcode": 4,
+  "pins\ttest/glm-beachhead-report.test.mts\tcode": 1,
+  "pins\ttest/glm-drainer-loop.test.mts\tcode": 12,
+  "pins\ttest/health-page.test.mts\tcode": 24,
+  "pins\ttest/hydra-branch-prune-dead-branch.test.mts\tcode": 1,
+  "pins\ttest/hydra-branch-prune-master-tracking.test.mts\tcode": 3,
+  "pins\ttest/hydra-branch-prune-merged-remote.test.mts\tcode": 1,
+  "pins\ttest/hydra-dev-reflection-deposit.test.mts\tcode": 17,
+  "pins\ttest/hydra-hitl-grill-option-table.test.mts\tprompt": 2,
+  "pins\ttest/hydra-qa-needs-qa-clear.test.mts\tcode": 2,
+  "pins\ttest/hydra-qa-needs-qa-clear.test.mts\tprompt": 2,
+  "pins\ttest/hydra-qa-prompt-verdict.test.mts\tcode": 40,
+  "pins\ttest/hydra-retro-emit.test.mts\tcode": 2,
+  "pins\ttest/hydra-review-option-table.test.mts\tprompt": 2,
+  "pins\ttest/hydra-review-stalled-pr-bucket.test.mts\tprompt": 5,
+  "pins\ttest/hydra-target-build-anchor-preflight.test.mts\tprompt": 7,
+  "pins\ttest/hydra-target-build-fence-skip-steps.test.mts\tprompt": 9,
+  "pins\ttest/hydra-target-cleanup-emit.test.mts\tcode": 3,
+  "pins\ttest/hydra-target-wire-or-retire-emit.test.mts\tcode": 4,
+  "pins\ttest/launch-flow-key-contract.test.mts\tcode": 4,
+  "pins\ttest/lifecycle-dispatch-claim.test.mts\tcode": 4,
+  "pins\ttest/lifecycle-reconcile.test.mts\tcode": 5,
+  "pins\ttest/lifecycle-state-label-guard.test.mts\tcode": 3,
+  "pins\ttest/operator-actions-parity.test.mts\tcode": 3,
+  "pins\ttest/operator-actions-registry.test.mts\tcode": 13,
+  "pins\ttest/operator-channel.test.mts\tcode": 2,
+  "pins\ttest/operator-notify-cli.test.mts\tcode": 7,
+  "pins\ttest/qa-catch-rate.test.mts\tcode": 1,
+  "pins\ttest/qa-merge-guard.test.mts\tcode": 2,
+  "pins\ttest/qa-plumbing-scripts.test.mts\tprompt": 2,
+  "pins\ttest/qa-reviewer-commit-a.test.mts\tcode": 2,
+  "pins\ttest/qa-reviewer-commit-a.test.mts\tprompt": 5,
+  "pins\ttest/qa-reviewer-commit-b.test.mts\tcode": 2,
+  "pins\ttest/qa-reviewer-commit-b.test.mts\tprompt": 2,
+  "pins\ttest/redis-db-helper.test.mts\tcode": 8,
+  "pins\ttest/review-pickup.test.mts\tcode": 1,
+  "pins\ttest/run-ledger.test.mts\tcode": 3,
+  "pins\ttest/scheduler-stop-semantics.test.mts\tcode": 2,
+  "pins\ttest/subagent-dispatch-registration.test.mts\tcode": 4,
+  "pins\ttest/suite-count-check.test.mts\tcode": 14,
+  "pins\ttest/sync-skills.test.mts\tcode": 4,
+  "pins\ttest/sync-skills.test.mts\tprompt": 20,
+  "pins\ttest/systemd-notify-failure-unit.test.mts\tcode": 1,
+  "pins\ttest/target-design-concept.test.mts\tprompt": 3,
+  "pins\ttest/target-playbook-capability-branches.test.mts\tcode": 2,
+  "pins\ttest/target-qa-verdict.test.mts\tprompt": 2,
+  "pins\ttest/target-wire-or-retire-lane-invariant.test.mts\tprompt": 10,
+  "pins\ttest/taxonomy-classes.test.mts\tcode": 7,
+  "pins\ttest/turn-snapshot-picks.test.mts\tcode": 2,
+  "pins\ttest/watchdog-claude-hooks.test.mts\tcode": 5,
+  "pins\ttest/watchdog-deploy-drift.test.mts\tcode": 1,
+  "pins\ttest/watchdog-operator-channel.test.mts\tcode": 5,
+  "pins\ttest/watchdog-origin-identity.test.mts\tcode": 1,
+  "pins\ttest/watchdog-redis-backup-freshness.test.mts\tcode": 13,
+  "pins\ttest/work-page.test.mts\tcode": 130,
+  "reader\ttest/admission.test.mts\tgrandfathered": 1,
+  "reader\ttest/advisory-workflows-fail-loud.test.mts\tdrift-guard": 1,
+  "reader\ttest/agent-dispatch-prompt-guard.test.mts\tinvariant-lint": 1,
+  "reader\ttest/aggregator-issues-waiting-projections.test.mts\tgrandfathered": 1,
+  "reader\ttest/aggregator-stuck-items.test.mts\tinvariant-lint": 1,
+  "reader\ttest/api-500-catch-ratchet.test.mts\tinvariant-lint": 1,
+  "reader\ttest/api-tier-router.test.mts\tgrandfathered": 1,
+  "reader\ttest/api-versions.test.mts\tgrandfathered": 1,
+  "reader\ttest/attention-calibration.test.mts\tgrandfathered": 1,
+  "reader\ttest/attention-target-bucket.test.mts\tgrandfathered": 1,
+  "reader\ttest/attention.test.mts\tgrandfathered": 1,
+  "reader\ttest/autopilot-args.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-cooldown-redis-mirror.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-cycle-record-branch-cycleid.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-cycle-record-task-title.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-decide-events-shape.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-decide.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-dedup-reap.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-deposit-key-resolution.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-dev-orch-gate.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-dev-orch-needs-qa-promotion.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-dev-resume-stall.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-dev-target-resume-stall.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-dispatch-cost-join-reap.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-escalation-deposit-roundtrip.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-heartbeat.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-hooks.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-invariants.test.mts\tinvariant-lint": 1,
+  "reader\ttest/autopilot-parent-exception.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-quota-budget-3867.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-reap-empty-cycle.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-reap-segment-softcap.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-reap-state.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-reap-task-id-mismatch.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-recover-stale.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-reflection-anchor-deposit.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-reflection-deposit-presence.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-reflection-fire.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-reflection-reap-completion.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-render-dispatch.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-research-force-cap.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-schema-version.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-scripts.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-sweep-target-signal.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-token-record-reap-completion.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-token-recover-reap-completion.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-turn-runner.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-unattended.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-wait-or-reap-handler.test.mts\tbehaviour": 1,
+  "reader\ttest/autopilot-watchdog.test.mts\tbehaviour": 1,
+  "reader\ttest/backfill-dedup-baseline.test.mts\tbehaviour": 1,
+  "reader\ttest/baseline-raise-check.test.mts\tdrift-guard": 1,
+  "reader\ttest/branch-prune-script.test.mts\tbehaviour": 1,
+  "reader\ttest/build-spritesheet.test.mts\tbehaviour": 1,
+  "reader\ttest/builder-page.test.mts\tgrandfathered": 1,
+  "reader\ttest/ci-scope-check.test.mts\tgrandfathered": 1,
+  "reader\ttest/class-state.test.mts\tgrandfathered": 1,
+  "reader\ttest/claude-cli-exec.test.mts\tgrandfathered": 1,
+  "reader\ttest/claude-cli-seam-check.test.mts\tinvariant-lint": 1,
+  "reader\ttest/coding-standards-integrity.test.mts\tdrift-guard": 1,
+  "reader\ttest/cost-layers.test.mts\tgrandfathered": 1,
+  "reader\ttest/dashboard-routes.test.mts\tdashboard-pin": 1,
+  "reader\ttest/dashboard-server-confirmed-write.test.mts\tgrandfathered": 1,
+  "reader\ttest/dashboard-ticking-clock.test.mts\tdashboard-pin": 1,
+  "reader\ttest/dashboard-today-polling.test.mts\tdashboard-pin": 1,
+  "reader\ttest/decide-golden.test.mts\tbehaviour": 1,
+  "reader\ttest/decide-guards.test.mts\tinvariant-lint": 1,
+  "reader\ttest/decide-signal-classes.test.mts\tbehaviour": 1,
+  "reader\ttest/derive-version-bump.test.mts\tbehaviour": 1,
+  "reader\ttest/design-concept-reconcile-check.test.mts\tgrandfathered": 1,
+  "reader\ttest/dispatch-cycle-record-anchor-type.test.mts\tbehaviour": 1,
+  "reader\ttest/dispatch-cycle-record-api-base.test.mts\tbehaviour": 1,
+  "reader\ttest/dispatch-holdback-pending.test.mts\tbehaviour": 1,
+  "reader\ttest/display-format.test.mts\tdashboard-pin": 1,
+  "reader\ttest/docs-adrs.test.mts\tgrandfathered": 1,
+  "reader\ttest/docs-areas.test.mts\tgrandfathered": 1,
+  "reader\ttest/docs-classes-skills.test.mts\tgrandfathered": 1,
+  "reader\ttest/docs-page.test.mts\tgrandfathered": 1,
+  "reader\ttest/docs-prose-drift.test.mts\tdrift-guard": 1,
+  "reader\ttest/event-bus-vocabulary.test.mts\tgrandfathered": 1,
+  "reader\ttest/exec-with-timeout.test.mts\tgrandfathered": 1,
+  "reader\ttest/generated-inventories-drift.test.mts\tdrift-guard": 1,
+  "reader\ttest/git-remote-fence.test.mts\tbehaviour": 1,
+  "reader\ttest/github-issues.test.mts\tgrandfathered": 1,
+  "reader\ttest/github-pr-refs.test.mts\tgrandfathered": 1,
+  "reader\ttest/github-prs.test.mts\tgrandfathered": 1,
+  "reader\ttest/github-remote-url.test.mts\tbehaviour": 1,
+  "reader\ttest/glm-beachhead-report.test.mts\tbehaviour": 1,
+  "reader\ttest/glm-drainer-loop.test.mts\tgrandfathered": 1,
+  "reader\ttest/glm-drainer-runner.test.mts\tgrandfathered": 1,
+  "reader\ttest/glm-eligibility.test.mts\tgrandfathered": 1,
+  "reader\ttest/glm-gate.test.mts\tgrandfathered": 1,
+  "reader\ttest/grounding.test.mts\tgrandfathered": 1,
+  "reader\ttest/health-page.test.mts\tgrandfathered": 1,
+  "reader\ttest/hydra-branch-prune-dead-branch.test.mts\tgrandfathered": 1,
+  "reader\ttest/hydra-branch-prune-master-tracking.test.mts\tgrandfathered": 1,
+  "reader\ttest/hydra-branch-prune-merged-remote.test.mts\tgrandfathered": 1,
+  "reader\ttest/hydra-cli-backlog-move.test.mts\tgrandfathered": 1,
+  "reader\ttest/hydra-cli-raw-body.test.mts\tgrandfathered": 1,
+  "reader\ttest/hydra-dev-reflection-deposit.test.mts\tbehaviour": 1,
+  "reader\ttest/hydra-hitl-grill-option-table.test.mts\tgrandfathered": 1,
+  "reader\ttest/hydra-qa-needs-qa-clear.test.mts\tgrandfathered": 1,
+  "reader\ttest/hydra-qa-prompt-verdict.test.mts\tbehaviour": 1,
+  "reader\ttest/hydra-retro-emit.test.mts\tgrandfathered": 1,
+  "reader\ttest/hydra-target-build-anchor-preflight.test.mts\tbehaviour": 1,
+  "reader\ttest/hydra-target-build-worktree-guard.test.mts\tinvariant-lint": 1,
+  "reader\ttest/hydra-target-cleanup-emit.test.mts\tbehaviour": 1,
+  "reader\ttest/hydra-target-playbooks-pr-only.test.mts\tdrift-guard": 1,
+  "reader\ttest/hydra-target-wire-or-retire-emit.test.mts\tgrandfathered": 1,
+  "reader\ttest/launch-flow-key-contract.test.mts\tgrandfathered": 1,
+  "reader\ttest/learning-friction-capture.test.mts\tgrandfathered": 1,
+  "reader\ttest/lifecycle-dispatch-adoption.test.mts\tdrift-guard": 1,
+  "reader\ttest/lifecycle-dispatch-claim.test.mts\tinvariant-lint": 1,
+  "reader\ttest/lifecycle-journal.test.mts\tinvariant-lint": 1,
+  "reader\ttest/lifecycle-reconcile.test.mts\tbehaviour": 1,
+  "reader\ttest/lifecycle-state-label-guard.test.mts\tbehaviour": 1,
+  "reader\ttest/lifecycle-vocabulary-drift.test.mts\tdrift-guard": 1,
+  "reader\ttest/metrics-trend.test.mts\tgrandfathered": 1,
+  "reader\ttest/mutation-gate-inputs.test.mts\tgrandfathered": 1,
+  "reader\ttest/mutation-runner-classification.test.mts\tgrandfathered": 1,
+  "reader\ttest/mutation.test.mts\tgrandfathered": 1,
+  "reader\ttest/now-recommendations.test.mts\tgrandfathered": 1,
+  "reader\ttest/on-subagent-tool-call.test.mts\tbehaviour": 1,
+  "reader\ttest/operator-actions-affordance.test.mts\tgrandfathered": 1,
+  "reader\ttest/operator-actions-parity.test.mts\tdrift-guard": 1,
+  "reader\ttest/operator-actions-registry.test.mts\tgrandfathered": 1,
+  "reader\ttest/operator-channel.test.mts\tgrandfathered": 1,
+  "reader\ttest/operator-notify-cli.test.mts\tbehaviour": 1,
+  "reader\ttest/ops-collect.test.mts\tbehaviour": 1,
+  "reader\ttest/otel-ingest.test.mts\tgrandfathered": 1,
+  "reader\ttest/pace-gate-allow.test.mts\tbehaviour": 1,
+  "reader\ttest/pr-body-edit.test.mts\tbehaviour": 1,
+  "reader\ttest/qa-catch-rate.test.mts\tgrandfathered": 1,
+  "reader\ttest/qa-merge-guard-callsites.test.mts\tinvariant-lint": 1,
+  "reader\ttest/qa-merge-guard.test.mts\tinvariant-lint": 1,
+  "reader\ttest/qa-plumbing-scripts.test.mts\tbehaviour": 1,
+  "reader\ttest/qa-reviewer-commit-a.test.mts\tinvariant-lint": 1,
+  "reader\ttest/qa-reviewer-commit-b.test.mts\tinvariant-lint": 1,
+  "reader\ttest/qa-verdict-cli.test.mts\tbehaviour": 1,
+  "reader\ttest/qa-verdict-trailer.test.mts\tgrandfathered": 1,
+  "reader\ttest/ratchet.test.mts\tbehaviour": 1,
+  "reader\ttest/reap-stale-test-procs.test.mts\tbehaviour": 1,
+  "reader\ttest/recover-stale.test.mts\tbehaviour": 1,
+  "reader\ttest/redis-db-helper.test.mts\tbehaviour": 1,
+  "reader\ttest/review-pickup.test.mts\tgrandfathered": 1,
+  "reader\ttest/risk-critical.test.mts\tgrandfathered": 1,
+  "reader\ttest/run-ledger.test.mts\tbehaviour": 1,
+  "reader\ttest/runs-page.test.mts\tgrandfathered": 1,
+  "reader\ttest/scheduler-stop-semantics.test.mts\tgrandfathered": 1,
+  "reader\ttest/seam-check-lib.test.mts\tinvariant-lint": 1,
+  "reader\ttest/silent-catch-lint.test.mts\tinvariant-lint": 1,
+  "reader\ttest/subagent-dispatch-registration.test.mts\tbehaviour": 1,
+  "reader\ttest/suite-count-check.test.mts\tbehaviour": 1,
+  "reader\ttest/sync-skills.test.mts\tbehaviour": 1,
+  "reader\ttest/sync-target-gate.test.mts\tbehaviour": 1,
+  "reader\ttest/systemd-notify-failure-unit.test.mts\tgrandfathered": 1,
+  "reader\ttest/target-board-labels.test.mts\tgrandfathered": 1,
+  "reader\ttest/target-capabilities.test.mts\tdrift-guard": 1,
+  "reader\ttest/target-coupling-check.test.mts\tgrandfathered": 1,
+  "reader\ttest/target-design-concept.test.mts\tgrandfathered": 1,
+  "reader\ttest/target-playbook-capability-branches.test.mts\tdrift-guard": 1,
+  "reader\ttest/target-qa-verdict.test.mts\tgrandfathered": 1,
+  "reader\ttest/target-reframe.test.mts\tbehaviour": 1,
+  "reader\ttest/taxonomy-classes.test.mts\tbehaviour": 1,
+  "reader\ttest/telegram-seam-check.test.mts\tinvariant-lint": 1,
+  "reader\ttest/test-pools.test.mts\tdrift-guard": 1,
+  "reader\ttest/test-source-read-ratchet.test.mts\tinvariant-lint": 1,
+  "reader\ttest/turn-snapshot-json.test.mts\tbehaviour": 1,
+  "reader\ttest/turn-snapshot-picks.test.mts\tgrandfathered": 1,
+  "reader\ttest/turn-snapshot-target-board.test.mts\tbehaviour": 1,
+  "reader\ttest/typecheck-test-drift.test.mts\tdrift-guard": 1,
+  "reader\ttest/wait-for-health.test.mts\tgrandfathered": 1,
+  "reader\ttest/watchdog-claude-hooks.test.mts\tbehaviour": 1,
+  "reader\ttest/watchdog-deploy-drift.test.mts\tdrift-guard": 1,
+  "reader\ttest/watchdog-launch-flow-force-exit.test.mts\tdrift-guard": 1,
+  "reader\ttest/watchdog-node-modules-integrity.test.mts\tgrandfathered": 1,
+  "reader\ttest/watchdog-operator-channel.test.mts\tgrandfathered": 1,
+  "reader\ttest/watchdog-origin-identity.test.mts\tbehaviour": 1,
+  "reader\ttest/watchdog-redis-backup-freshness.test.mts\tbehaviour": 1,
+  "reader\ttest/watchdog-spawn-timeout-ratchet.test.mts\tinvariant-lint": 1,
+  "reader\ttest/wire-or-retire-carveout-drift.test.mts\tdrift-guard": 1,
+  "reader\ttest/work-page.test.mts\tgrandfathered": 1,
+  "reader\ttest/zizmor-scan.test.mts\tbehaviour": 1
 }

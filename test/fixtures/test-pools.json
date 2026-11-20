@@ -1,6 +1,7 @@
 {
   "parallel": [
     "test/adr-roster.test.mts",
+    "test/advisory-workflows-fail-loud.test.mts",
     "test/aggregator-autopilot-idle.test.mts",
     "test/aggregator-autopilot-tick.test.mts",
     "test/aggregator-settle.test.mts",
@@ -101,6 +102,7 @@
     "test/qa-prior-round.test.mts",
     "test/qa-verdict-trailer.test.mts",
     "test/query-seam-check.test.mts",
+    "test/ratchet.test.mts",
     "test/reap-stale-tmp.test.mts",
     "test/recommendation-materiality.test.mts",
     "test/recommendation-prompt.test.mts",
@@ -110,7 +112,6 @@
     "test/risk-critical.test.mts",
     "test/schema-seam-check.test.mts",
     "test/schemas-common.test.mts",
-    "test/seam-check-lib.test.mts",
     "test/sentry-webhook-schema.test.mts",
     "test/silent-catch-lint.test.mts",
     "test/skill-prune-select.test.mts",
@@ -139,6 +140,7 @@
     "test/versions-format.test.mts",
     "test/wire-or-retire-carveout-drift.test.mts",
     "test/wiring-liveness-outcomes.test.mts",
+    "test/zizmor-ratchet.test.mts",
     "test/zizmor-scan.test.mts"
   ],
   "serialPinned": {

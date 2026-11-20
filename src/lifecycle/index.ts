@@ -50,9 +50,11 @@ export {
 export {
   type TimedBody,
 } from "./caps.ts";
+export { qaBounce, type QaBounceInput, type QaBounceResult } from "./qa-bounce.ts";
 export {
   classifyQaVerdictTarget,
   gateQaVerdict,
+  qaBounceTargetOf,
   type QaLivePr,
 } from "./gates.ts";
 export {

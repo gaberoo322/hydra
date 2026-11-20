@@ -148,6 +148,9 @@ esac
     lifecycleStub,
     `#!/usr/bin/env bash
 echo "$*" >> "${lifecycleCallsLog}"
+if [ "\${1:-}" = "claim-show" ] && [ -n "\${STUB_CLAIM_SHOW_JSON:-}" ]; then
+  printf '%s\\n' "\$STUB_CLAIM_SHOW_JSON"
+fi
 exit "\${STUB_LIFECYCLE_EXIT:-0}"
 `,
   );
@@ -827,6 +830,97 @@ describe("reap.py completion → no-PR stall hands the cap to the seam (issue #5
         !ghCalls(tmp).some((c) => c.startsWith("issue edit")),
         `a refusal must never fall back to gh issue edit: ${JSON.stringify(ghCalls(tmp))}`,
       );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("reap.py completion → forward-fix whose PR lost its closing ref (issue #5638)", () => {
+  function writeForwardFixSlot(path: string, taskId: string, dispatchId: string): void {
+    writeState(path, {
+      slots: {
+        dev_orch: {
+          skill: "hydra-dev",
+          started_epoch: Math.floor(Date.now() / 1000) - 600,
+          task_id: taskId,
+          anchor: "issue-5615",
+          branch: "worktree-agent-ff-5615",
+          dispatch_id: dispatchId,
+        },
+      },
+    });
+  }
+  const claim = (over: Record<string, unknown> = {}) =>
+    JSON.stringify({ claim: { dispatchId: "disp-ff", class: "dev_orch", run: "r", purpose: "forward-fix", pr: 5635, ...over } });
+
+  test("a forward-fix claim on a no-PR completion releases `released`, comments once with the cue, and queues no resume", () => {
+    const tmp = makeTmp();
+    try {
+      writeForwardFixSlot(tmp.state, "t-ff", "disp-ff");
+      const r = runCompletion(["dev_orch", "t-ff", "50000", "hydra-dev"], tmp, {
+        STUB_PR_LIST_JSON: "[]",
+        STUB_ISSUE_VIEW_JSON: '{"state":"OPEN"}',
+        STUB_CLAIM_SHOW_JSON: claim(),
+      });
+      assert.equal(r.status, 0, `stderr=${r.stderr}`);
+      const lc = lifecycleCalls(tmp);
+      assert.ok(lc.some((c) => c.startsWith("claim-show 5615")), `reads the claim: ${JSON.stringify(lc)}`);
+      assert.ok(
+        lc.some((c) => c.startsWith("release") && c.includes("--dispatch disp-ff") && c.includes("--outcome released")),
+        `outcome must be released, not no-pr: ${JSON.stringify(lc)}`,
+      );
+      assert.ok(!lc.some((c) => c.includes("--outcome no-pr")), "never writes the no-pr outcome");
+      assert.ok(!lc.some((c) => c.startsWith("advance")), `no needs-dev-resume advance: ${JSON.stringify(lc)}`);
+      assert.match(runLog(tmp), /dev_stall_pr_body_lost_closing_ref anchor=issue-5615 pr=5635 task_id=t-ff/);
+      const comments = ghCalls(tmp).filter((c) => c.startsWith("issue comment 5615"));
+      assert.equal(comments.length, 1, `exactly one comment: ${JSON.stringify(ghCalls(tmp))}`);
+      assert.match(comments[0], /pr-body-lost-closing-ref/);
+      assert.match(comments[0], /scripts\/pr-body-edit\.ts 5635 --body-file <restored-body> --anchor 5615/);
+      const st = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      assert.ok(!(st.dev_resume_pending ?? []).length, "no dev_resume_pending record");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  for (const [name, stubClaim] of [
+    ["a fresh-purpose claim", claim({ purpose: "fresh", pr: undefined })],
+    ["a forward-fix claim owned by another dispatch", claim({ dispatchId: "someone-else" })],
+    ["an unreadable claim", "not json"],
+  ] as const) {
+    test(`sibling: ${name} keeps the no-PR stall path (needs-dev-resume advance, no-pr outcome, resume queued)`, () => {
+      const tmp = makeTmp();
+      try {
+        writeForwardFixSlot(tmp.state, "t-sib", "disp-ff");
+        const r = runCompletion(["dev_orch", "t-sib", "50000", "hydra-dev"], tmp, {
+          STUB_PR_LIST_JSON: "[]",
+          STUB_ISSUE_VIEW_JSON: '{"state":"OPEN"}',
+          STUB_CLAIM_SHOW_JSON: stubClaim,
+        });
+        assert.equal(r.status, 0, `stderr=${r.stderr}`);
+        const lc = lifecycleCalls(tmp);
+        assert.ok(lc.some((c) => c.includes("--outcome no-pr")), `no-pr outcome kept: ${JSON.stringify(lc)}`);
+        assert.ok(lc.some((c) => c.startsWith("advance 5615 needs-dev-resume")), `advance kept: ${JSON.stringify(lc)}`);
+        assert.ok(!/dev_stall_pr_body_lost_closing_ref/.test(runLog(tmp)));
+        const st = JSON.parse(readFileSync(tmp.state, "utf-8"));
+        assert.equal(st.dev_resume_pending?.length, 1);
+      } finally {
+        rmSync(tmp.dir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test("the claim is never read when a PR references the anchor", () => {
+    const tmp = makeTmp();
+    try {
+      writeForwardFixSlot(tmp.state, "t-pr", "disp-ff");
+      const r = runCompletion(["dev_orch", "t-pr", "50000", "hydra-dev"], tmp, {
+        STUB_PR_LIST_JSON: JSON.stringify([{ number: 5635, headRefName: "worktree-agent-ff-5615", body: "Closes #5615", isDraft: false }]),
+        STUB_CLAIM_SHOW_JSON: claim(),
+      });
+      assert.equal(r.status, 0, `stderr=${r.stderr}`);
+      assert.ok(!lifecycleCalls(tmp).some((c) => c.startsWith("claim-show")), "no claim-show on the PR-exists path");
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }

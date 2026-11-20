@@ -22,77 +22,39 @@
  * test/watchdog-spawn-timeout-ratchet.test.mts.
  *
  * HOW TO SATISFY IT. Add your cases to the test file that already covers the
- * subject. If a new file is genuinely right, regenerate the baseline in the
- * same PR:
- *
- *     npx tsx scripts/ci/test-subject-map.ts --update-baseline
- *
- * That bump is visible in the diff and reviewable. It is deliberately the
- * escape hatch INSTEAD of a marker in the PR body: a PR-body hatch would mean
- * reading GITHUB_EVENT_PATH from inside the suite, which is exactly the
- * coupling #4132 removed after it caused 12 of 19 red `test` jobs and could
- * not self-clear on a re-run.
+ * subject. The escape hatch is STD-BASELINE-EDIT-ROWS. If a new file is genuinely right, run
+ * `npx tsx scripts/ci/test-subject-map.ts`, set exactly the printed row in
+ * test/fixtures/test-subject-baseline.json (or use `--write-baseline
+ * --allow-grow` when it moves no other row) and add a PR-body
+ * `Baseline-raise: test/fixtures/test-subject-baseline.json <subject> — <reason>`
+ * line (STD-BASELINE-EDIT-ROWS). The suite reads no PR body: the advisory
+ * baseline-raise-check workflow checks that line, so the #4132 coupling stays
+ * removed. This file only calls the ratchet's verdict(); the comparison lives
+ * in scripts/ci/ratchet.ts.
  */
 
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
-  buildSubjectCounts,
-  findOvergrowth,
   resolvePrimarySubjects,
   countBySubject,
   srcImportsOf,
   scriptTargetsOf,
   stripComments,
   readTestFacts,
-  TEST_DIR,
-  BASELINE_PATH,
+  testSubjectRatchet,
   type FileFacts,
 } from "../scripts/ci/test-subject-map.ts";
 
+const TEST_DIR = import.meta.dirname;
+
 describe("test-file sprawl ratchet — live tree (#4134)", () => {
-  test("the baseline exists and is regenerable", () => {
-    assert.ok(existsSync(BASELINE_PATH), `missing ${BASELINE_PATH}`);
-    const baseline = JSON.parse(readFileSync(BASELINE_PATH, "utf8"));
-    assert.ok(Object.keys(baseline).length > 100, "baseline looks truncated");
-  });
-
-  test("no subject owns more test files than its baseline allows", () => {
-    const baseline = JSON.parse(readFileSync(BASELINE_PATH, "utf8"));
-    const observed = buildSubjectCounts(TEST_DIR);
-    const grown = findOvergrowth(observed, baseline);
-    assert.deepEqual(
-      grown,
-      [],
-      grown.length === 0
-        ? ""
-        : `Test-file sprawl: ${grown.length} subject(s) gained test files.\n` +
-            grown
-              .map(
-                (g) =>
-                  `  ${g.subject}: ${g.observed} files (baseline ${g.baseline})`,
-              )
-              .join("\n") +
-            `\n\nAdd your cases to the file that already covers the subject. If a new\n` +
-            `file is genuinely right, regenerate the baseline in this PR:\n` +
-            `  npx tsx scripts/ci/test-subject-map.ts --update-baseline`,
-    );
-  });
-
-  test("the ratchet is a going-forward guard — it does not fire on today's tree", () => {
-    // Guards the guard: the existing clusters are grandfathered on purpose. A
-    // ratchet that starts red is an ambient poison pill, not a gate.
-    const baseline = JSON.parse(readFileSync(BASELINE_PATH, "utf8"));
-    const observed = buildSubjectCounts(TEST_DIR);
-    for (const [subject, count] of Object.entries(observed)) {
-      if (count > 1) {
-        assert.ok(
-          Object.prototype.hasOwnProperty.call(baseline, subject),
-          `subject ${subject} owns ${count} files but is absent from the baseline`,
-        );
-      }
-    }
+  test("the live tree has zero added and zero stale rows against the baseline", async () => {
+    const v = await testSubjectRatchet.verdict();
+    assert.ok(v.ok, v.advice);
   });
 });
 
@@ -247,46 +209,51 @@ describe("test-file sprawl ratchet — subjects come from CODE, not prose (#4136
 });
 
 describe("test-file sprawl ratchet — growth detection (#4134)", () => {
-  test("a NEW file for an already-covered subject fails", () => {
-    const grown = findOvergrowth(
-      { "scripts/autopilot/decide.py": 21 },
-      { "scripts/autopilot/decide.py": 20 },
-    );
-    assert.equal(grown.length, 1);
-    assert.deepEqual(grown[0], {
-      subject: "scripts/autopilot/decide.py",
-      baseline: 20,
-      observed: 21,
-    });
+  const SUBJECT = "src/brand-new.ts";
+  function tree(testFiles: number, baseline: Record<string, number>): string {
+    const root = mkdtempSync(join(tmpdir(), "sprawl-"));
+    mkdirSync(join(root, "test", "fixtures"), { recursive: true });
+    for (let i = 0; i < testFiles; i++) {
+      writeFileSync(join(root, "test", `m${i}.test.mts`), `import { a } from "../${SUBJECT}";\n`);
+    }
+    writeFileSync(join(root, "test", "fixtures", "test-subject-baseline.json"), `${JSON.stringify(baseline)}\n`);
+    return root;
+  }
+  async function verdictFor(testFiles: number, baseline: Record<string, number>) {
+    const root = tree(testFiles, baseline);
+    try {
+      return await testSubjectRatchet.verdict(root);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  test("a first test file for a genuinely NEW subject passes", async () => {
+    assert.equal((await verdictFor(1, {})).ok, true);
   });
 
-  test("a first test file for a genuinely NEW subject passes", () => {
-    assert.deepEqual(findOvergrowth({ "src/brand-new.ts": 1 }, {}), []);
+  test("a SECOND file for an unbaselined subject is sprawl, and the advice names the growth command", async () => {
+    const v = await verdictFor(2, {});
+    assert.equal(v.ok, false);
+    assert.deepEqual(v.added, [SUBJECT]);
+    assert.match(v.advice, /--write-baseline --allow-grow/);
+    assert.match(v.advice, /Baseline-raise: test\/fixtures\/test-subject-baseline\.json/);
   });
 
-  test("a SECOND file for an unbaselined subject is already sprawl", () => {
-    const grown = findOvergrowth({ "src/brand-new.ts": 2 }, {});
-    assert.equal(grown.length, 1);
-    assert.equal(grown[0].baseline, 1);
+  test("holding steady passes", async () => {
+    assert.equal((await verdictFor(3, { [SUBJECT]: 3 })).ok, true);
   });
 
-  test("consolidating a cluster passes — the ratchet only resists growth", () => {
-    // #4136 merges 14 decide-* files into one. That must not fail the guard.
-    assert.deepEqual(
-      findOvergrowth({ "scripts/autopilot/decide.py": 7 }, { "scripts/autopilot/decide.py": 20 }),
-      [],
-    );
+  test("consolidating 3->2 leaves a stale row that fails until tightened", async () => {
+    const v = await verdictFor(2, { [SUBJECT]: 3 });
+    assert.equal(v.ok, false);
+    assert.deepEqual(v.stale, [SUBJECT]);
   });
 
-  test("holding steady passes", () => {
-    assert.deepEqual(findOvergrowth({ "src/a.ts": 3 }, { "src/a.ts": 3 }), []);
-  });
-
-  test("the report is ordered worst-first so the message leads with the real offender", () => {
-    const grown = findOvergrowth(
-      { "src/a.ts": 2, "src/b.ts": 9 },
-      { "src/a.ts": 1, "src/b.ts": 1 },
-    );
-    assert.equal(grown[0].subject, "src/b.ts");
+  test("consolidating 2->1 drops the key, which is stale too", async () => {
+    const v = await verdictFor(1, { [SUBJECT]: 2 });
+    assert.equal(v.ok, false);
+    assert.deepEqual(v.stale, [SUBJECT]);
   });
 });
+

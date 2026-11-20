@@ -108,6 +108,8 @@ const CUE_ALIAS_TABLE: Readonly<Record<string, string>> = {
   "edit-resolved-to-main-checkout-needs-worktree-path": "worktree-write-fence-desync",
   "enterworktree-pinned-agent-write-fence-mismatch": "worktree-write-fence-desync",
   "enterworktree-anchor-desync-blocks-write-tool": "worktree-write-fence-desync",
+  // Forward-fix PR-body wipe (issue #5638): the retro's cue and reap's canonical one.
+  "forward-fix-body-file-edit-wipes-pr-body-outside-repo": "pr-body-lost-closing-ref",
 };
 
 /**

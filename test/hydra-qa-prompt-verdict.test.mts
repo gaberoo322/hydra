@@ -412,7 +412,7 @@ describe("hydra-qa step 10 label effects stay plain text pins (issue #4735, INV-
     assert.doesNotMatch(routeSrc, /"--(?:add|remove)-label"/, "no gh issue edit label flags");
     assert.ok(!routeSrc.includes("-X\", \"DELETE") && !/"DELETE"/.test(routeSrc), "no label DELETE call");
     assert.ok(!/\/labels`/.test(routeSrc), "no label POST/DELETE endpoint");
-    assert.ok(routeSrc.includes("ports.advance(args)"), "state moves ride ports.advance -> scripts/lifecycle.ts advance");
+    assert.ok(routeSrc.includes("ports.advance({") && routeSrc.includes("ports.qaBounce("), "state moves ride the in-process seam: ports.advance / ports.qaBounce");
     assert.doesNotMatch(QA_PLAYBOOK, /--(?:add|remove)-label\s+["'$]?(?:needs-qa|needs-dev-resume|ready-for-agent|ready-for-human|in-progress|qa-passed|parked)/);
   });
 
@@ -464,7 +464,7 @@ describe("hydra-qa playbook wires convergent review (issue #4735)", () => {
     const t13 = routeSrc.slice(routeSrc.indexOf("// T1/T2/T3 (and unknown-tier) FAIL"));
     // The verdict comment (this round's trailer) precedes the first seam call.
     const comment = t13.indexOf("await prComment(bodies.fail(");
-    const firstAdvance = t13.indexOf("await advance(label");
+    const firstAdvance = t13.indexOf('await bounce("fail-bounce-advance")');
     assert.ok(comment > 0 && comment < firstAdvance, "the PR verdict comment is posted before the seam counts the round");
     assert.ok(t13.includes('"parked:qa-fail-rounds"'), "enforce: a parked:qa-fail-rounds refusal is the escalation, not an error");
     assert.ok(!t13.includes("wouldPark"), "no shadow-park branch: qa-fail-rounds is a live arm, the seam parks in shadow too (#5421)");

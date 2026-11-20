@@ -128,6 +128,7 @@ export const MECHANICAL_COMPANIONS: readonly string[] = [
   "scripts/ci/target-coupling-baseline.json",
   "scripts/ci/telegram-seam-baseline.json",
   "scripts/ci/test-typecheck-baseline.json",
+  "scripts/ci/zizmor-baseline.json",
   "test/fixtures/adr-area-baseline.json",
   "test/fixtures/coding-standards-baseline.json",
   "test/fixtures/docs-drift-baseline.json",

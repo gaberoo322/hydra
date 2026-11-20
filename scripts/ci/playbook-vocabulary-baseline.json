@@ -34,7 +34,7 @@
     },
     "docs/operator-playbooks/_fragments/hydra-dev-child-flow.md": {
       "issue-cite": 8,
-      "shell-lines": 100,
+      "shell-lines": 99,
       "symbol-cite": 3,
       "invariant-cite": 4
     },
@@ -166,7 +166,7 @@
       "status": 5,
       "issue-cite": 21,
       "back-compat": 1,
-      "shell-lines": 103,
+      "shell-lines": 95,
       "symbol-cite": 4
     },
     "docs/operator-playbooks/hydra-skill-prune.md": {

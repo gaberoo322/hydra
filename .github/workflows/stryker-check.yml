@@ -23,10 +23,10 @@ name: stryker-check
 # This is a NEW advisory scan — not a change to the merge gate — so it lives in
 # a Tier-3 sibling (operator memory feedback_ci_gate_separate_workflow_avoids_tier0).
 #
-# NOT A REQUIRED CHECK: never added to branch protection. The run step always
-# exits 0 (`|| true`, plus stryker-scan.ts itself never exits non-zero) so a red
-# Stryker run or a low mutation score surfaces via the uploaded artifact + step
-# summary WITHOUT wedging the merge queue — advisory, not blocking. Promotion to
+# NOT A REQUIRED CHECK: never added to branch protection. stryker-scan.ts exits 0
+# on every path, so a red Stryker run or a low mutation score surfaces via the
+# uploaded artifact + step summary WITHOUT wedging the merge queue; a non-zero
+# exit (npm/tsx resolution, OOM, signal) means the scan did not run and is red — advisory, not blocking. Promotion to
 # a required gate is a separate, operator-gated follow-up (issue out-of-scope).
 #
 # TOOL LANE (ADR-0005): @stryker-mutator/core is invoked through a pinned `npx`
@@ -88,13 +88,21 @@ jobs:
           # Pass the diff-changed file list through the same CHANGED_FILES env
           # contract the required mutation gate uses (scripts/ci/mutation-check.ts).
           export CHANGED_FILES="$(cat changed-files.txt)"
-          # Advisory: ALWAYS exit 0. stryker-scan.ts already never exits
-          # non-zero; `|| true` is defense-in-depth so a Stryker crash or a low
-          # mutation score can never wedge the merge queue. The comparison JSON
-          # is the artifact that carries the signal.
-          npm run stryker:scan || true
+          # stryker-scan.ts exits 0 on every path and always emits a comparison
+          # row, so a non-zero exit or a missing comparison means it did not run.
+          # A low mutation score stays advisory (artifact only).
+          rc=0
+          npm run stryker:scan || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::error title=stryker-check::stryker:scan did not run (exit $rc)"
+            exit 1
+          fi
+          if [ ! -s stryker-comparison.json ]; then
+            echo "::error title=stryker-check::stryker-comparison.json missing or empty (exit $rc)"
+            exit 1
+          fi
           echo "::group::stryker-check comparison"
-          cat stryker-comparison.json 2>/dev/null || echo "(no comparison emitted)"
+          cat stryker-comparison.json
           echo "::endgroup::"
 
       - name: Upload Stryker comparison + raw report

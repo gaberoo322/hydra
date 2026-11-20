@@ -9,7 +9,8 @@
  * in test/wiring-liveness-outcomes.test.mts; this file covers the alarm layer.
  */
 
-import { test, describe } from "node:test";
+import { test, describe, mock } from "node:test";
+import { logger } from "../src/logger.ts";
 import assert from "node:assert/strict";
 
 import {
@@ -37,13 +38,20 @@ function darkVerdict(name: string): Extract<OutcomeVerdict, { status: "dark" }> 
  * deterministic. `darkSince` mimics SET NX (first write wins); `filed` is the
  * dedup marker set. `fileCalls` records every gh create.
  */
-function fakes(opts: { fileFails?: boolean } = {}) {
+function fakes(
+  opts: { fileFails?: boolean; advanceResult?: { ok: true } | { ok: false; code: string }; issueUrl?: string } = {},
+) {
   const darkSince = new Map<string, number>();
   const filed = new Set<string>();
   const cleared: string[] = [];
   const fileCalls: string[][] = [];
+  const advanced: Array<[number, string]> = [];
   const deps: DarkAlarmDeps = {
     now: () => NOW_MS,
+    advanceState: async (issue, to) => {
+      advanced.push([issue, to]);
+      return opts.advanceResult ?? { ok: true };
+    },
     clearStreak: async (n) => {
       cleared.push(n);
       darkSince.delete(n);
@@ -61,10 +69,10 @@ function fakes(opts: { fileFails?: boolean } = {}) {
     fileIssue: async (args) => {
       fileCalls.push(args);
       if (opts.fileFails) return { ok: false, code: "gh-timeout", stderr: "boom" };
-      return { ok: true, data: { stdout: "https://github.com/gaberoo322/hydra/issues/9001\n", stderr: "" } };
+      return { ok: true, data: { stdout: opts.issueUrl ?? "https://github.com/gaberoo322/hydra/issues/9001\n", stderr: "" } };
     },
   };
-  return { deps, darkSince, filed, cleared, fileCalls };
+  return { deps, darkSince, filed, cleared, fileCalls, advanced };
 }
 
 describe("runDarkOutcomeAlarm (#2805)", () => {
@@ -81,7 +89,7 @@ describe("runDarkOutcomeAlarm (#2805)", () => {
   });
 
   test("dark for >= 7 days files exactly one needs-triage issue with producer identity", async () => {
-    const { deps, darkSince, fileCalls, filed } = fakes();
+    const { deps, darkSince, fileCalls, filed, advanced } = fakes();
     // Pre-seed the streak anchor to 8 days ago.
     darkSince.set("brier", NOW_MS - (DEFAULT_DARK_ALARM_MS + 24 * 60 * 60 * 1000));
     const res = await runDarkOutcomeAlarm([darkVerdict("brier")], [], deps);
@@ -93,10 +101,77 @@ describe("runDarkOutcomeAlarm (#2805)", () => {
     const body = args[args.indexOf("--body") + 1];
     assert.match(body, /metrics\/brier\.txt/);
     assert.match(body, /producer must write brier/);
-    assert.ok(args.includes("needs-triage"), "labels the issue needs-triage");
+    assert.ok(!args.includes("--label"), "the create carries no label: the first state is a seam write");
+    assert.ok(!args.includes("needs-triage"), "no state label on the create argv");
+    assert.deepEqual(advanced, [[9001, "needs-triage"]], "first state written once through the seam");
     const o = res.outcomes[0];
     assert.equal(o.action, "filed");
     assert.equal((o as any).issueNumber, 9001, "parses the issue number from gh stdout");
+  });
+
+  test("a refused first-state advance (racing reconcile) still reports filed with the issue number", async () => {
+    const { deps, darkSince, filed, advanced } = fakes({
+      advanceResult: { ok: false, code: "illegal-transition" },
+    });
+    darkSince.set("brier", NOW_MS - (DEFAULT_DARK_ALARM_MS + 1000));
+    const res = await runDarkOutcomeAlarm([darkVerdict("brier")], [], deps);
+    assert.equal(advanced.length, 1, "the advance was attempted once and never retried as a label write");
+    assert.ok(filed.has("brier"), "the dedup marker is still set");
+    assert.equal(res.outcomes[0]!.action, "filed");
+    assert.equal((res.outcomes[0] as any).issueNumber, 9001);
+  });
+
+  test("an illegal-transition refusal is logged at warn with { issueNumber, code } (INV-4)", async () => {
+    const warnSpy = mock.method(logger, "warn", () => {});
+    try {
+      const { deps, darkSince } = fakes({ advanceResult: { ok: false, code: "illegal-transition" } });
+      darkSince.set("brier", NOW_MS - (DEFAULT_DARK_ALARM_MS + 1000));
+      await runDarkOutcomeAlarm([darkVerdict("brier")], [], deps);
+      const hit = warnSpy.mock.calls.find((c) => (c.arguments[0] as any)?.code === "illegal-transition");
+      assert.ok(hit, "warn logged with code");
+      assert.equal((hit!.arguments[0] as any).issueNumber, 9001);
+    } finally {
+      warnSpy.mock.restore();
+    }
+  });
+
+  test("a non-illegal-transition refusal is retried once, then the pass still reports filed (#5673)", async () => {
+    const { deps, darkSince, filed, advanced } = fakes({ advanceResult: { ok: false, code: "gh-timeout" } });
+    darkSince.set("brier", NOW_MS - (DEFAULT_DARK_ALARM_MS + 1000));
+    const res = await runDarkOutcomeAlarm([darkVerdict("brier")], [], deps);
+    assert.equal(advanced.length, 2, "one retry, no more");
+    assert.ok(filed.has("brier"), "marker stays set: a re-file would duplicate the created issue");
+    assert.equal(res.outcomes[0]!.action, "filed");
+  });
+
+  test("a transient advance failure that succeeds on retry stops after the second attempt (#5673)", async () => {
+    const { deps, darkSince, advanced } = fakes();
+    let n = 0;
+    deps.advanceState = async (issue, to) => {
+      advanced.push([issue, to]);
+      return ++n === 1 ? { ok: false, code: "gh-timeout" } : { ok: true };
+    };
+    darkSince.set("brier", NOW_MS - (DEFAULT_DARK_ALARM_MS + 1000));
+    await runDarkOutcomeAlarm([darkVerdict("brier")], [], deps);
+    assert.equal(advanced.length, 2);
+  });
+
+  test("a thrown first-state advance is logged, never aborts the pass", async () => {
+    const { deps, darkSince } = fakes();
+    deps.advanceState = async () => {
+      throw new Error("seam down");
+    };
+    darkSince.set("brier", NOW_MS - (DEFAULT_DARK_ALARM_MS + 1000));
+    const res = await runDarkOutcomeAlarm([darkVerdict("brier")], [], deps);
+    assert.equal(res.outcomes[0]!.action, "filed");
+  });
+
+  test("an unparseable issue number (0) skips the first-state advance", async () => {
+    const { deps, darkSince, advanced } = fakes({ issueUrl: "no url here\n" });
+    darkSince.set("brier", NOW_MS - (DEFAULT_DARK_ALARM_MS + 1000));
+    const res = await runDarkOutcomeAlarm([darkVerdict("brier")], [], deps);
+    assert.equal(advanced.length, 0);
+    assert.equal(res.outcomes[0]!.action, "filed");
   });
 
   test("idempotent across ticks — an already-filed streak does not re-file (Invariant 4)", async () => {

@@ -85,6 +85,7 @@ def _handle_dev_orch_stall(
     worktree_branch: str | None,
     pr_list_json: str | None,
     dispatch_id: str | None = None,
+    forward_fix_pr: int | None = None,
 ) -> None:
     """Detect + relabel a dev_orch completion that opened no PR (issue #3866).
 
@@ -166,6 +167,29 @@ def _handle_dev_orch_stall(
         )
         print(f"[autopilot] {line}")
         _append_log(line)
+        return
+
+    if forward_fix_pr is not None:
+        # Issue #5638: the dispatch was a forward-fix on PR #M that exists but no
+        # longer references the anchor (its body lost the `Closes #N` line). That
+        # is not a no-PR stall: re-queueing a forward-fix re-runs the same edit.
+        # No advance, no resume record; one comment names the restore command and
+        # the #5400 no-closing-issue surface-pr lane reaches the operator.
+        line = (
+            f"dev_stall_pr_body_lost_closing_ref anchor={anchor_ref} "
+            f"pr={forward_fix_pr} task_id={task_id}"
+        )
+        print(f"[autopilot] {line}")
+        _append_log(line)
+        _gh_run(
+            "issue", "comment", issue_num, "--repo", REPO, "--body",
+            "> *Automated reap — forward-fix PR lost its closing ref (cue: `pr-body-lost-closing-ref`, issue #5638).* "
+            f"PR #{forward_fix_pr} was the forward-fix target but no open PR references this issue any more, "
+            f"so its body likely lost `Closes #{issue_num}`. No resume was queued (a re-dispatch would repeat the edit). "
+            "Restore the body, then the PR lanes pick it up again: "
+            f"`npx tsx scripts/pr-body-edit.ts {forward_fix_pr} --body-file <restored-body> --anchor {issue_num}`",
+            context=f"#{issue_num} forward-fix lost-closing-ref comment",
+        )
         return
 
     # Issue #5318: the move goes through the lifecycle seam with a compare-and-set

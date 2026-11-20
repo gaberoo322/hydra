@@ -1,0 +1,33 @@
+# comby rule — no swallowed exit in workflow run steps (issue #5640).
+#
+# `<cmd> || true` turns a real tool/infrastructure failure (a SHA mismatch, a
+# failed download, a failed `gh pr view`) into a silent success, so the next step
+# sees an empty file and reports a generic "no JSON" path. Reviewers re-found this
+# by hand on every advisory-checks.yml PR (#5410, #5482, #5612). Capture the exit
+# code instead (`rc=0; <cmd> || rc=$?`) and route a failure to `::error` + `exit 1`.
+#
+# ESCAPE: a line carrying a `# intentional: <reason>` trailer is skipped — the
+# shell twin of STD-CATCH-FAIL-LOUD's `/* intentional: reason */`.
+#
+# Also skipped: comment lines, and data-pipeline lines that begin (or follow a
+# `|`, `(`, `<`, `$(`) a grep / jq / awk / sed / head filter, where a non-zero
+# exit means "no match", not a failure. KNOWN RESIDUAL false positive: a compound
+# `$(printf ... | grep ... | head ... || true)` pipeline still matches; annotate it
+# with the `# intentional:` trailer.
+#
+# GOTCHA: a plain hole followed by the literal (`:[cmd~[^\n]*] || true`) does NOT
+# backtrack under comby, so the hole owns `|| true` inside its own regex. TOML
+# literal strings ('...') keep the backslashes intact for comby.
+#
+# No per-rule file filter exists in comby TOML: the advisory-checks.yml comby loop
+# applies every rule to all of .github/workflows. Matches in sibling workflows are
+# expected first-run annotations (warning, exit 0 — the loop's contract).
+
+[or-true-tool-invocation]
+match = ':[line~[^\n]*\|\| true[^\n]*]'
+rule = '''where match :[line] {
+  | ":[_]# intentional::[_]" -> false
+  | ":[_~^\s*#]" -> false
+  | ":[_~(^|[|(<]|\$\()\s*(grep|jq|awk|sed|head)\s]" -> false
+  | ":[_]" -> true
+}'''

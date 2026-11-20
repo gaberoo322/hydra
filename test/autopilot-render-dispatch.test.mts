@@ -617,10 +617,22 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
       "gh pr checks 4776 --json",
       "3. **Push to the SAME branch:** `git push origin HEAD:worktree-agent-glm-4728`",
       "4. **Design-concept-reconcile failure specifically:**",
-      "gh pr edit 4776 --body-file <file>",
+      "scripts/pr-body-edit.ts 4776 --body-file <file>",
       "5. **Verify in the foreground**",
     ]) assert.ok(out.prompt.includes(needle), `missing: ${needle}`);
+    // The guarded helper is the ONLY PR-body edit path: raw `gh pr edit --body-file`
+    // can write an empty body from outside the repo and drop the Closes ref (#5638).
+    assert.doesNotMatch(out.prompt, /gh pr edit \d+ --body-file/);
     assert.doesNotMatch(out.prompt, /Open the PR from the worktree branch/, "no fresh-PR instruction on a forward-fix");
+  });
+
+  test("the playbook forward-fix section routes PR-body edits through the guarded helper only (#5638 INV-1)", () => {
+    const secStart = PLAYBOOK.indexOf("**Red-PR forward-fix dispatch contract");
+    const secEnd = PLAYBOOK.indexOf("The cap (red-CI arm only):");
+    assert.ok(secStart >= 0 && secEnd > secStart, "playbook contract section markers present");
+    const section = PLAYBOOK.slice(secStart, secEnd).replace(/\s+/g, " ");
+    assert.ok(section.includes("scripts/pr-body-edit.ts <pr> --body-file <file>"));
+    assert.doesNotMatch(section, /gh pr edit[^`]*--body-file/);
   });
 
   test("a QA-FAIL forward-fix reads hydra-qa's findings comment and green CI does not complete it (#4849)", () => {
@@ -675,7 +687,7 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
     const flat = (text: string) => text.replace(/\s+/g, " ");
     const fix = flat(render("dev_orch", devAction({ kind: "ForwardFixRed", anchor: "issue-5325", branch: "b", pr: 5355 })).prompt);
     assert.ok(fix.includes("deviate from the design-concept artifact (narrower or broader than an invariant line)"));
-    assert.ok(fix.includes("record the deviation plus evidence in the PR body's reconciliation section via `gh pr edit 5355 --body-file <file>` BEFORE the push"));
+    assert.ok(fix.includes("record the deviation plus evidence in the PR body's reconciliation section via `npx tsx scripts/pr-body-edit.ts 5355 --body-file <file>` BEFORE the push"));
     for (const intent of [{ kind: "Fresh" }, { kind: "ResumeBranch", anchor: "issue-1", branch: "b" }]) {
       const other = flat(render("dev_orch", devAction(intent as never)).prompt);
       assert.ok(!other.includes("deviate from the design-concept artifact"), `${intent.kind} must not carry the deviation sentence`);
