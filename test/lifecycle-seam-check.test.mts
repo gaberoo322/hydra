@@ -66,6 +66,17 @@ describe("lifecycle-seam-check: ratchet verdicts on a throwaway tree", () => {
     });
   });
 
+  test("failure advice carries the lifecycle advance fix command; a passing run does not", async () => {
+    await withTree({}, async (root) => {
+      const v = await lifecycleSeamRatchet.verdict(root);
+      assert.match(v.advice, /npx tsx scripts\/lifecycle\.ts advance <issue> <to>/);
+    });
+    await withTree({ [FILE]: 2 }, async (root) => {
+      const v = await lifecycleSeamRatchet.verdict(root);
+      assert.doesNotMatch(v.advice, /lifecycle\.ts advance/);
+    });
+  });
+
   test("a new site in an already-baselined file still fails (per-file count)", async () => {
     await withTree({ [FILE]: 1 }, async (root) => {
       const v = await lifecycleSeamRatchet.verdict(root);

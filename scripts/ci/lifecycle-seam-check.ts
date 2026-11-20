@@ -739,6 +739,10 @@ export const lifecycleSeamRatchet = defineRatchet({
   polarity: "ceiling",
   stale: "fail",
   enforcement: "required",
+  help: [
+    "Each counted site is a direct lifecycle state-label write. Route the transition through the lifecycle seam:",
+    "  npx tsx scripts/lifecycle.ts advance <issue> <to> [--evidence k=v] [--reason R --rationale T]",
+  ],
   async measure(root) {
     const rows: Record<string, number> = {};
     for (const [file, { count }] of Object.entries(await scanLifecycleSeam(root))) rows[file] = count;

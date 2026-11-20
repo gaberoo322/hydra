@@ -16,7 +16,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { before, describe, test } from "node:test";
+import { describe, test } from "node:test";
 import {
   BASELINE_FILE,
   RETIRED_TERMS_FILE,
