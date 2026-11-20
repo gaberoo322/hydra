@@ -45,7 +45,7 @@
     "docs/operator-playbooks/_fragments/hydra-qa-reference.md": {
       "status": 1,
       "shell-lines": 223,
-      "symbol-cite": 16,
+      "symbol-cite": 15,
       "invariant-cite": 3
     },
     "docs/operator-playbooks/_fragments/hydra-target-build-anchor-preflight.md": {
