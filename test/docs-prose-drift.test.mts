@@ -19,13 +19,10 @@ import { fileURLToPath } from "node:url";
 import { before, describe, test } from "node:test";
 import {
   BASELINE_FILE,
-  FIX_COMMAND,
-  NEW_FIX_COMMAND,
   RETIRED_TERMS_FILE,
   kindOfRow,
   blankProse,
   classifyToken,
-  compareBaseline,
   danglingTermClaims,
   definedTermsIn,
   termResolves,
@@ -37,10 +34,8 @@ import {
   paragraphSpans,
   pathClaimResolves,
   placeholderSkipped,
-  readBaseline,
-  runProseDriftCli,
+  proseDriftRatchet,
   redisKeyClaimResolves,
-  renderReport,
   routeClaimResolves,
   retiredTermAdmitted,
   scanProseDrift,
@@ -66,28 +61,13 @@ async function withFixture(files: Record<string, string>, fn: (root: string) => 
 }
 
 describe("docs-prose-drift", () => {
-  let scanRows: string[];
-  let byRow: Map<string, Offender>;
+  // -- the baseline guard (the required drift arm) ---------------------------
 
-  before(() => {
-    // One scan of the real tree feeds both aggregate guards — it reads every
-    // scoped doc plus the env-var source blob and is far too slow to repeat.
-    const offenders = scanProseDrift(REPO_ROOT);
-    ({ rows: scanRows, byRow } = offenderRowsAndIndex(offenders));
-  });
-
-  // -- the two baseline guards (the required drift arms) ---------------------
-
-  test("no NEW prose offenders since the baseline — identifier existence, retired terms, counts, links all backed", () => {
-    const baseline = JSON.parse(readFileSync(join(REPO_ROOT, BASELINE_FILE), "utf8")) as string[];
-    const { added } = compareBaseline(scanRows, baseline);
-    deepStrictEqual(added, [], renderReport("new", added, byRow));
-  });
-
-  test("no STALE baseline rows — the baseline shrinks only via regeneration", () => {
-    const baseline = JSON.parse(readFileSync(join(REPO_ROOT, BASELINE_FILE), "utf8")) as string[];
-    const { removed } = compareBaseline(scanRows, baseline);
-    deepStrictEqual(removed, [], renderReport("stale", removed, byRow));
+  test("no NEW prose offenders and no STALE baseline rows — identifier existence, retired terms, counts, links all backed", async () => {
+    const v = await proseDriftRatchet.verdict();
+    strictEqual(v.ok, true, v.advice);
+    deepStrictEqual(v.added, []);
+    deepStrictEqual(v.stale, []);
   });
 
   test("the baseline fixture is sorted and deduped (one row per file:kind:token)", () => {
@@ -206,31 +186,10 @@ describe("docs-prose-drift", () => {
     strictEqual(countClaimsIn("nine roman emperors").length, 0, "unlisted noun");
   });
 
-  test("compareBaseline is two-directional: current minus baseline and baseline minus current", () => {
-    deepStrictEqual(compareBaseline(["a", "b", "c"], ["b", "c", "d"]), { added: ["a"], removed: ["d"] });
-    deepStrictEqual(compareBaseline(["x"], ["x"]), { added: [], removed: [] });
-  });
-
-  test("renderReport rows read file:line — kind — token — fix and end with the regeneration command", () => {
-    const byRow = new Map<string, Offender>([
-      ["docs/x.md:path:src/gone.ts", { file: "docs/x.md", line: 9, kind: "path", token: "src/gone.ts", fix: "fix the path" }],
-    ]);
-    const report = renderReport("new", ["docs/x.md:path:src/gone.ts"], byRow);
-    ok(report.includes("docs/x.md:9 — path — src/gone.ts — fix the path"), report);
-    // The NEW arm cannot be fixed by a bare --update-baseline (it refuses to
-    // grow): it points at the prose, or a deliberate --allow-grow.
-    ok(report.endsWith(NEW_FIX_COMMAND), report);
-    ok(NEW_FIX_COMMAND.includes("--allow-grow"), NEW_FIX_COMMAND);
-    // A row with no live offender takes the fix hint of its OWN kind.
-    const orphan = renderReport("new", ["docs/y.md:route:/api/gone"], new Map());
-    ok(orphan.includes("docs/y.md:route:/api/gone — not in docs/generated/routes.json"), orphan);
-    ok(!orphan.includes("count disagrees"), orphan);
+  test("kindOfRow recovers the kind segment of a baseline row", () => {
     strictEqual(kindOfRow("docs/y.md:route:/api/gone"), "route");
     strictEqual(kindOfRow("docs/y.md:retired-term:codex"), "retired-term");
     strictEqual(kindOfRow("no-kind-here"), null);
-    const stale = renderReport("stale", ["docs/x.md:path:src/gone.ts"], byRow);
-    ok(stale.includes("docs/x.md:path:src/gone.ts — stale baseline row — regenerate"), stale);
-    ok(stale.endsWith(FIX_COMMAND), stale);
   });
 
   test("blankProse keeps offsets: fenced code, frontmatter and HTML comments never yield claims, line numbers stay true", () => {
@@ -503,22 +462,18 @@ describe("prose-drift: verification never throws on unreadable inputs", () => {
     });
   });
 
-  // CLI: an aborted scan never rewrites the baseline.
-  const SEED = ["docs/a.md:path:src/gone.ts", "docs/b.md:route:/api/gone"];
-
-  for (const argv of [["--update-baseline", "--allow-grow"], ["--update-baseline"], []]) {
-    test(`argv=${JSON.stringify(argv)}: unreadable inputs exit 1 and leave the baseline byte-identical`, async () => {
-      const seeded = `${JSON.stringify(SEED, null, 2)}\n`;
-      // No git repo and no generated inventories → the scan aborts.
-      await withFixture({ [BASELINE_FILE]: seeded }, (root) => {
-        strictEqual(runProseDriftCli(root, argv), 1);
-        strictEqual(readFileSync(join(root, BASELINE_FILE), "utf8"), seeded);
-      });
+  test("unreadable inputs fail closed: verdict is crashed, never a row the baseline could absorb", async () => {
+    // No git repo and no generated inventories → the scan aborts.
+    await withFixture({ [BASELINE_FILE]: `${JSON.stringify(["docs/a.md:path:src/gone.ts"], null, 2)}\n` }, async (root) => {
+      const v = await proseDriftRatchet.verdict(root);
+      strictEqual(v.ok, false);
+      strictEqual(v.crashed, true);
+      ok(v.advice.includes("prose-drift scan aborted"), v.advice);
+      deepStrictEqual(v.added, []);
     });
-  }
+  });
 
-  // CLI --update-baseline on a scannable throwaway tree: the refuse-to-grow
-  // branch and the successful write (sorted + deduped rows).
+  // verdict() on a scannable throwaway tree: new, stale and exact-match rows.
   const LIVE_ROWS = ["docs/live.md:path:src/also-gone.ts", "docs/live.md:path:src/gone.ts"];
   const scannableTree = (baseline: string): Record<string, string> => {
     const empty = JSON.stringify({ rows: [] });
@@ -535,51 +490,48 @@ describe("prose-drift: verification never throws on unreadable inputs", () => {
       [BASELINE_FILE]: baseline,
     };
   };
-  /** The CLI's default scan lists tracked files via `git ls-files`. */
+  /** The default scan lists tracked files via `git ls-files`. */
   const gitTrack = (root: string): void => {
     execFileSync("git", ["init", "-q"], { cwd: root });
     execFileSync("git", ["add", "-A"], { cwd: root });
   };
 
-  test("--update-baseline without --allow-grow refuses to grow: exit 1, baseline byte-identical", async () => {
-    const seeded = `${JSON.stringify([LIVE_ROWS[1]], null, 2)}\n`;
-    await withFixture(scannableTree(seeded), (root) => {
+  test("verdict names a NEW offender row (deduped file:kind:token) and fails", async () => {
+    await withFixture(scannableTree(`${JSON.stringify([LIVE_ROWS[1]])}\n`), async (root) => {
       gitTrack(root);
-      strictEqual(runProseDriftCli(root, ["--update-baseline"]), 1);
-      strictEqual(readFileSync(join(root, BASELINE_FILE), "utf8"), seeded);
+      const v = await proseDriftRatchet.verdict(root);
+      strictEqual(v.ok, false);
+      deepStrictEqual(v.added, [LIVE_ROWS[0]]);
+      deepStrictEqual(v.stale, []);
     });
   });
 
-  test("--update-baseline that only shrinks writes the live rows sorted and deduped", async () => {
-    // Unsorted, duplicated, plus a stale row the scan no longer produces.
-    const seeded = `${JSON.stringify(["docs/live.md:path:src/fixed.ts", LIVE_ROWS[1], LIVE_ROWS[0], LIVE_ROWS[1]], null, 2)}\n`;
-    await withFixture(scannableTree(seeded), (root) => {
+  test("verdict names a STALE baseline row and fails (stale: fail)", async () => {
+    const seeded = `${JSON.stringify(["docs/live.md:path:src/fixed.ts", ...LIVE_ROWS])}\n`;
+    await withFixture(scannableTree(seeded), async (root) => {
       gitTrack(root);
-      strictEqual(runProseDriftCli(root, ["--update-baseline"]), 0);
-      strictEqual(readFileSync(join(root, BASELINE_FILE), "utf8"), `${JSON.stringify(LIVE_ROWS, null, 2)}\n`);
-      strictEqual(runProseDriftCli(root, []), 0, "the written baseline must satisfy the check arm");
+      const v = await proseDriftRatchet.verdict(root);
+      strictEqual(v.ok, false);
+      deepStrictEqual(v.added, []);
+      deepStrictEqual(v.stale, ["docs/live.md:path:src/fixed.ts"]);
     });
   });
 
-  test("--update-baseline --allow-grow grows the baseline, sorted and deduped", async () => {
-    await withFixture(scannableTree("[]\n"), (root) => {
+  test("an exact-match baseline passes", async () => {
+    await withFixture(scannableTree(`${JSON.stringify(LIVE_ROWS)}\n`), async (root) => {
       gitTrack(root);
-      strictEqual(runProseDriftCli(root, ["--update-baseline", "--allow-grow"]), 0);
-      const written = JSON.parse(readFileSync(join(root, BASELINE_FILE), "utf8")) as string[];
-      deepStrictEqual(written, LIVE_ROWS);
-      deepStrictEqual(written, [...new Set(written)].sort());
+      const v = await proseDriftRatchet.verdict(root);
+      strictEqual(v.ok, true, v.advice);
+      strictEqual(v.measured, LIVE_ROWS.length);
     });
   });
 
-  test("readBaseline rejects valid JSON that is not an array of strings (null, not a throw)", async () => {
-    await withFixture({ [BASELINE_FILE]: JSON.stringify({ rows: [] }) }, (root) => {
-      strictEqual(readBaseline(root), null);
-    });
-    await withFixture({ [BASELINE_FILE]: JSON.stringify([1, 2]) }, (root) => {
-      strictEqual(readBaseline(root), null);
-    });
-    await withFixture({ [BASELINE_FILE]: JSON.stringify(["a:path:b"]) }, (root) => {
-      deepStrictEqual(readBaseline(root), ["a:path:b"]);
+  test("a baseline that is not an array of strings fails closed as crashed", async () => {
+    await withFixture(scannableTree(JSON.stringify({ rows: [] })), async (root) => {
+      gitTrack(root);
+      const v = await proseDriftRatchet.verdict(root);
+      strictEqual(v.ok, false);
+      strictEqual(v.crashed, true);
     });
   });
 });
@@ -658,7 +610,7 @@ describe("prose-drift: dangling glossary terms (#5491)", () => {
     );
   });
 
-  test("renderReport prints a dangling-term row with its kind-specific fix and the docblock count prose stays true", () => {
+  test("the dangling-term offender carries its kind-specific fix and the docblock count prose stays true", () => {
     const o: Offender = {
       file: "CONTEXT.md",
       line: 7,
@@ -667,7 +619,8 @@ describe("prose-drift: dangling glossary terms (#5491)", () => {
       fix: "define the term in CONTEXT.md (separate ubiquitous-language PR) or de-bold the phrase if it is emphasis",
     };
     const { rows, byRow } = offenderRowsAndIndex([o]);
-    ok(renderReport("new", rows, byRow).includes(`CONTEXT.md:7 — dangling-term — Ghost Term — ${o.fix}`));
+    deepStrictEqual(rows, ["CONTEXT.md:dangling-term:Ghost Term"]);
+    strictEqual(byRow.get(rows[0])?.fix, o.fix);
     const src = readFileSync(join(REPO_ROOT, "scripts/docs/prose-drift.ts"), "utf8");
     ok(src.includes("The ten offender kinds") && src.includes("Five checks"), "docblock counts must match the ten kinds / five checks");
     ok(!src.includes("The nine offender kinds") && !src.includes("Four checks"), "stale count prose must be gone");

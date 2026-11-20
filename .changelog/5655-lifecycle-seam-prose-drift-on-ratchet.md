@@ -1,0 +1,1 @@
+- refactor: lifecycle-seam and prose-drift ratchets run on the Ratchet module and no longer write their own baselines (#5655)

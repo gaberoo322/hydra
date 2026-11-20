@@ -37,9 +37,10 @@
  * fails too, so the baseline can only shrink. Epic #4586's corpus-fix bullets
  * are what shrink it toward [].
  *
- * `npm run docs:drift` (this file's CLI) prints the same report the required
- * test asserts; `npm run docs:drift -- --update-baseline` rewrites the
- * fixture from a fresh scan.
+ * `npm run docs:drift` (this file's CLI, the Ratchet module's `main`) prints
+ * the same verdict the required test asserts; `npm run docs:drift --
+ * --write-baseline` tightens the fixture from a fresh scan and
+ * `--write-baseline --allow-grow` permits reviewed growth.
  *
  * Stdlib-only (ADR-0005): fs + git ls-files. No Redis, no network, no
  * running service, no markdown parser — fenced code, YAML frontmatter and
@@ -49,9 +50,10 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, extname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { readdirSync, readFileSync } from "node:fs";
+import { extname, join } from "node:path";
+import { GateInvariantError } from "../../src/errors.ts";
+import { defineRatchet, runIfCli } from "../ci/ratchet.ts";
 import { buildCounts } from "./inventories/counts.ts";
 import { byString, lineOf, resolveRelative, trackedFiles } from "./inventories/scan.ts";
 
@@ -119,14 +121,6 @@ export interface ProseScanOptions {
 
 export const BASELINE_FILE = "test/fixtures/docs-drift-baseline.json";
 export const RETIRED_TERMS_FILE = "test/fixtures/docs-retired-terms.json";
-/** STALE arm: the offender is gone, so regenerating the baseline shrinks it. */
-export const FIX_COMMAND = "Fix: npm run docs:drift -- --update-baseline";
-/**
- * NEW arm: --update-baseline refuses to ADD rows without --allow-grow, so the
- * fix is the prose itself; absorbing the row is a deliberate operator choice.
- */
-export const NEW_FIX_COMMAND =
-  "Fix: correct the prose, or (deliberately) npm run docs:drift -- --update-baseline --allow-grow";
 
 // ---------------------------------------------------------------------------
 // Prose blanking + paragraph segmentation
@@ -823,7 +817,7 @@ function scanProseDriftUnguarded(repoRoot: string, opts: ProseScanOptions): Offe
 }
 
 // ---------------------------------------------------------------------------
-// Baseline compare + report rendering (INV-9 / INV-10)
+// Baseline rows + the Ratchet policy (#5655)
 // ---------------------------------------------------------------------------
 
 /** Baseline key of an offender — file:kind:token. Lines are reporting-only. */
@@ -837,12 +831,6 @@ export function kindOfRow(row: string): OffenderKind | null {
     if (row.includes(`:${kind}:`)) return kind;
   }
   return null;
-}
-
-/** The fix hint for a row with no live offender, derived from the row's own kind. */
-function fixForRow(row: string): string {
-  const kind = kindOfRow(row);
-  return kind === null ? "unrecognised baseline row — regenerate the baseline" : FIXES[kind];
 }
 
 /**
@@ -859,120 +847,28 @@ export function offenderRowsAndIndex(offenders: Offender[]): { rows: string[]; b
   return { rows: [...byRow.keys()].sort(byString), byRow };
 }
 
-/** Two-direction compare: current − baseline are NEW offenders, baseline − current are STALE rows. */
-export function compareBaseline(currentRows: string[], baselineRows: string[]): { added: string[]; removed: string[] } {
-  const current = new Set(currentRows);
-  const baseline = new Set(baselineRows);
-  const added = currentRows.filter((r) => !baseline.has(r));
-  const removed = baselineRows.filter((r) => !current.has(r));
-  return {
-    added: [...new Set(added)].sort(byString),
-    removed: [...new Set(removed)].sort(byString),
-  };
-}
-
 /**
- * The aggregate-offender report one arm asserts (and the CLI prints): every
- * row as `file:line — kind — token — fix` (stale rows have no live offender,
- * so the row itself is the line), ending with the regeneration command.
+ * The prose-drift ratchet on the Ratchet module. An unreadable input fails
+ * closed: measure throws, so `verdict()` returns `{ok:false, crashed:true}` and
+ * `--write-baseline` never writes a sentinel row over the real baseline.
  */
-export function renderReport(arm: "new" | "stale", rows: string[], byRow: Map<string, Offender>): string {
-  const header =
-    arm === "new"
-      ? "docs prose drift: NEW offender(s) since the baseline — prose in a pinned doc makes a claim the tree does not back."
-      : "docs prose drift: STALE baseline row(s) — the offender was fixed or moved but test/fixtures/docs-drift-baseline.json was not regenerated.";
-  const lines = [header];
-  for (const row of rows) {
-    if (arm === "new") {
-      const o = byRow.get(row);
-      lines.push(
-        o
-          ? `${o.file}:${o.line} — ${o.kind} — ${o.token} — ${o.fix}`
-          : `${row} — ${fixForRow(row)}`,
+export const proseDriftRatchet = defineRatchet({
+  id: "prose-drift",
+  baseline: BASELINE_FILE,
+  shape: "set",
+  polarity: "ceiling",
+  stale: "fail",
+  enforcement: "required",
+  async measure(root) {
+    const offenders = scanProseDrift(root);
+    const unreadable = offenders.filter((o) => o.kind === "unreadable-input");
+    if (unreadable.length > 0) {
+      throw new GateInvariantError(
+        `prose-drift scan aborted: ${unreadable.map((o) => `${o.token} — ${o.fix}`).join("; ")}`,
       );
-    } else {
-      lines.push(`${row} — stale baseline row — regenerate`);
     }
-  }
-  lines.push(arm === "new" ? NEW_FIX_COMMAND : FIX_COMMAND);
-  return lines.join("\n");
-}
+    return offenderRowsAndIndex(offenders).rows;
+  },
+});
 
-// ---------------------------------------------------------------------------
-// CLI — npm run docs:drift [-- --update-baseline]
-// ---------------------------------------------------------------------------
-
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-
-/**
- * Read the committed baseline. Returns null (logged) when it is unreadable,
- * unparseable, or valid JSON that is not an array of strings — so a malformed
- * baseline fails the arm loudly instead of throwing inside compareBaseline.
- */
-export function readBaseline(repoRoot: string): string[] | null {
-  let parsed: unknown;
-  try {
-    parsed = readJson(repoRoot, BASELINE_FILE);
-  } catch (err) {
-    console.error(`[prose-drift] ${(err as Error).message}`);
-    return null;
-  }
-  if (!Array.isArray(parsed) || !parsed.every((r) => typeof r === "string")) {
-    console.error(`[prose-drift] ${BASELINE_FILE} is not a JSON array of strings — ${FIX_COMMAND}`);
-    return null;
-  }
-  return parsed;
-}
-
-/**
- * The CLI body, parameterised on repo root + argv so tests can drive it.
- * Returns the exit code: 0 clean / baseline written, 1 drift or unreadable input.
- */
-export function runProseDriftCli(repoRoot: string, argv: string[]): number {
-  const update = argv.includes("--update-baseline");
-  const offenders = scanProseDrift(repoRoot);
-  // An aborted scan yields only the unreadable-input sentinel. It must never
-  // reach the update branch (--allow-grow would overwrite the real baseline
-  // with the sentinel row) nor be reported as ordinary drift: fail loud here.
-  const unreadable = offenders.filter((o) => o.kind === "unreadable-input");
-  if (unreadable.length > 0) {
-    for (const o of unreadable) console.error(`[prose-drift] scan aborted, baseline untouched — ${o.token} — ${o.fix}`);
-    return 1;
-  }
-  const { rows, byRow } = offenderRowsAndIndex(offenders);
-  if (update) {
-    // The baseline can only shrink unless the operator says otherwise: refuse
-    // to absorb a NEW offender silently.
-    if (!argv.includes("--allow-grow")) {
-      const existing = readBaseline(repoRoot);
-      if (existing === null) return 1;
-      const { added: grown } = compareBaseline(rows, existing);
-      if (grown.length > 0) {
-        console.error(renderReport("new", grown, byRow));
-        console.error("[prose-drift] refusing --update-baseline: it would ADD the row(s) above. Fix the prose, or pass --allow-grow deliberately.");
-        return 1;
-      }
-    }
-    writeFileSync(join(repoRoot, BASELINE_FILE), `${JSON.stringify(rows, null, 2)}\n`);
-    console.log(`[prose-drift] baseline written: ${BASELINE_FILE} (${rows.length} rows)`);
-    return 0;
-  }
-  const baseline = readBaseline(repoRoot);
-  if (baseline === null) return 1;
-  const { added, removed } = compareBaseline(rows, baseline);
-  if (added.length > 0) {
-    console.error(renderReport("new", added, byRow));
-  }
-  if (removed.length > 0) {
-    console.error(renderReport("stale", removed, byRow));
-  }
-  if (added.length === 0 && removed.length === 0) {
-    console.log(`[prose-drift] OK — ${rows.length} baseline rows all backed by live offenders, no new drift`);
-    return 0;
-  }
-  return 1;
-}
-
-if (fileURLToPath(import.meta.url) === resolve(process.argv[1] ?? "")) {
-  process.exitCode = runProseDriftCli(REPO_ROOT, process.argv.slice(2));
-}
+runIfCli(import.meta.url, proseDriftRatchet);
