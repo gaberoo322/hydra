@@ -52,11 +52,6 @@ concurrency:
   group: advisory-checks-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
-  # gh pr view (live PR body for the baseline-raise step, #5553).
-  pull-requests: read
-
 env:
   # Pinned, version-tagged alpine image for comby (carries comby + its
   # libev/libpcre runtime). Bump to update.
@@ -65,8 +60,14 @@ env:
 jobs:
   advisory-checks:
     runs-on: self-hosted
+    # Job-level (single job, so the same token as before): a workflow-level
+    # block would widen every future job (#5640).
+    permissions:
+      contents: read
+      # gh pr view (live PR body for the baseline-raise step, #5553).
+      pull-requests: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           # fetch-depth 0: the test-can-fail step needs `git merge-base` and a
           # detached worktree at the merge-base (issue #5447).
@@ -133,7 +134,7 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          # Advisory: report matches as GitHub annotations, always exit 0.
+          # Advisory: report matches as GitHub annotations (matches never fail the step).
           # Apply every rule's match template from scripts/comby-rules/ over the
           # GitHub workflow YAML. -match-only suppresses rewrite (these are
           # match-only rules). comby has no dedicated YAML matcher (`comby -list`
@@ -141,14 +142,21 @@ jobs:
           # balanced :[hole] token structurally without tripping on the pattern
           # text inside a comment or string, which is the false-positive class a
           # line-regex grep can't avoid.
+          # A rule that could not RUN (docker/comby failure) is an infrastructure
+          # failure: ::error + a red step, never read as "no matches" (#5640).
           found=0
+          failed=0
           for rule in scripts/comby-rules/*.toml; do
             [ -e "$rule" ] || continue
             echo "::group::comby rule $rule"
+            rc=0
             out=$(docker run --rm -v "$PWD:/work:ro" -w /work "$COMBY_IMAGE" \
                     -config "/work/$rule" -matcher .generic -match-only \
-                    -directory .github/workflows -extensions .yml,.yaml 2>/dev/null || true)
-            if [ -n "$out" ]; then
+                    -directory .github/workflows -extensions .yml,.yaml 2>/dev/null) || rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "::error title=comby-check::rule $rule did not run (exit $rc)"
+              failed=1
+            elif [ -n "$out" ]; then
               found=1
               printf '%s\n' "$out"
               # Emit a GitHub-Actions warning annotation so the finding surfaces in the PR.
@@ -158,10 +166,10 @@ jobs:
             fi
             echo "::endgroup::"
           done
-          if [ "$found" = "0" ]; then
+          if [ "$found" = "0" ] && [ "$failed" = "0" ]; then
             echo "comby-check: no structural matches across scripts/comby-rules/ (clean)"
           fi
-          exit 0
+          exit "$failed"
 
       # ── control-plane-drift (issue #2611) ──────────────────────────────────
       # RETIRED with the Orchestrator Map (issue #4012, ADR-0034 §3): the
@@ -282,12 +290,19 @@ jobs:
 
       # ── wiring-check (issue #2289) ─────────────────────────────────────────
       # Caller-reachability advisory: flags declared `type: caller` symbols in
-      # config/direction/liveness.yaml with zero references. Exits 0 (|| true).
+      # config/direction/liveness.yaml with zero references. A finding (exit 1) is a
+      # ::warning; any other exit is an infrastructure failure and reddens the step.
       - name: caller-reachability scan (advisory; reads config/direction/liveness.yaml)
         if: always()
         run: |
+          rc=0
           node --no-warnings --experimental-strip-types \
-            scripts/ci/wiring-caller-check.ts || true
+            scripts/ci/wiring-caller-check.ts || rc=$?
+          case "$rc" in
+            0) ;;
+            1) echo "::warning title=wiring-caller-check::unreachable caller(s) found (advisory — see job log)" ;;
+            *) echo "::error title=wiring-caller-check::scan did not complete (exit $rc)"; exit 1 ;;
+          esac
 
       # ── skill-size-ratchet (issue #2946) ───────────────────────────────────
       # Shrink-only word-count gate over playbook-generated skill sources. Exits
@@ -300,11 +315,23 @@ jobs:
       # ── zizmor workflow static analysis (issue #5368) ──────────────────────
       # Advisory scan of .github/workflows via the pinned, SHA256-verified zizmor
       # binary (scripts/zizmor-scan.sh; offline, scan-only). Never a required
-      # check: the script's non-zero exit on findings is swallowed here.
+      # check. zizmor's exit codes 11-14 mean "audit completed, findings by highest
+      # severity" (a completed scan whose JSON is consumed); any other non-zero
+      # exit (audit error, bad argv, no inputs, or the wrapper's download / SHA /
+      # missing-workflows failure) is an infrastructure failure: ::error + red.
       - name: zizmor workflow scan (advisory; scripts/zizmor-scan.sh)
         if: always()
         run: |
-          bash scripts/zizmor-scan.sh > zizmor-results.json || true
+          rc=0
+          bash scripts/zizmor-scan.sh > zizmor-results.json || rc=$?
+          case "$rc" in
+            0|11|12|13|14) ;;
+            *)
+              rm -f zizmor-results.json
+              echo "::error title=zizmor::scan did not complete (exit $rc)"
+              exit 1
+              ;;
+          esac
           if [ -s zizmor-results.json ] && jq -e 'type == "array"' zizmor-results.json >/dev/null 2>&1; then
             total=$(jq '[.[] | select(.determinations.severity == "High")] | length' zizmor-results.json)
             echo "::warning title=zizmor::${total} High-severity workflow finding(s) (advisory baseline — see zizmor-results.json artifact)"
@@ -316,8 +343,17 @@ jobs:
               jq -r 'group_by([.ident, .determinations.severity])[] | "| \(.[0].ident) | \(.[0].determinations.severity) | \(length) |"' zizmor-results.json
             } >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "::warning title=zizmor::scan produced no JSON (advisory — see job log)"
+            echo "::error title=zizmor::scan exited $rc but produced no JSON array"
+            exit 1
           fi
+
+      # ── zizmor finding ratchet (issue #5640) ───────────────────────────────
+      # Shrink-only per-workflow x per-ident finding counts
+      # (scripts/ci/zizmor-baseline.json). Pure: it reads the scan step's JSON and
+      # never runs the scanner or the network. Advisory: not in ci.yml / npm test.
+      - name: zizmor finding ratchet (advisory; scripts/ci/zizmor-ratchet.ts)
+        if: always()
+        run: npx tsx scripts/ci/zizmor-ratchet.ts --input zizmor-results.json
 
       # ── test-can-fail proof on changed tests (issue #5447) ─────────────────
       # STD-TEST-CAN-FAIL: annotate test files this PR adds/extends whose every
@@ -348,14 +384,17 @@ jobs:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          PR_BODY="$(gh pr view "$PR_NUM" --json body --jq .body || true)"
+          if ! PR_BODY="$(gh pr view "$PR_NUM" --json body --jq .body)"; then
+            echo "::error title=baseline-raise::gh pr view failed — Baseline-raise lines cannot be checked"
+            exit 1
+          fi
           export PR_BODY
           node --experimental-strip-types scripts/ci/baseline-raise-check.ts \
             --base "$PR_BASE_SHA" --head "$PR_HEAD_SHA"
 
       - name: Upload zizmor results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: zizmor-results
           path: zizmor-results.json

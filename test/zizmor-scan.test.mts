@@ -191,11 +191,37 @@ describe("zizmor-scan.sh cached-binary path", () => {
 describe("advisory-checks.yml zizmor step", () => {
   const workflow = readFileSync(join(root, ".github/workflows/advisory-checks.yml"), "utf8");
 
-  test("is an if: always() advisory step that swallows the exit code", () => {
+  test("is an if: always() advisory step that classifies the scan exit code instead of swallowing it", () => {
     const i = workflow.indexOf("name: zizmor workflow scan");
     assert.ok(i > 0);
     assert.match(workflow.slice(i, i + 400), /if: always\(\)/);
-    assert.match(workflow, /scripts\/zizmor-scan\.sh > zizmor-results\.json \|\| true/);
+    const step = workflow.slice(i, workflow.indexOf("name: zizmor finding ratchet"));
+    assert.ok(!/\|\| *true/.test(step), "no swallowed exit on the scan step");
+    assert.match(step, /scripts\/zizmor-scan\.sh > zizmor-results\.json \|\| rc=\$\?/);
+    assert.match(step, /0\|11\|12\|13\|14\)/, "findings exit codes 11-14 are a completed scan");
+    assert.match(step, /::error title=zizmor::[^\n]*\$rc/);
+    assert.match(step, /exit 1/);
+  });
+
+  test("a zizmor finding ratchet step follows the scan step, advisory and always-run", () => {
+    const scan = workflow.indexOf("name: zizmor workflow scan");
+    const ratchet = workflow.indexOf("name: zizmor finding ratchet");
+    assert.ok(ratchet > scan, "ratchet step sits after the scan step");
+    assert.match(workflow.slice(ratchet, ratchet + 400), /if: always\(\)/);
+    assert.match(workflow, /npx tsx scripts\/ci\/zizmor-ratchet\.ts --input zizmor-results\.json/);
+  });
+
+  test("advisory-checks.yml has no swallowed `|| true` exit anywhere", () => {
+    assert.equal(workflow.split("\n").filter((l) => /\|\| *true/.test(l)).length, 0);
+  });
+
+  test("actions are pinned to full commit SHAs and permissions are job-level", () => {
+    const uses = workflow.split("\n").filter((l) => /^\s*-?\s*uses:/.test(l));
+    assert.ok(uses.length >= 2);
+    for (const l of uses) assert.match(l, /@[0-9a-f]{40}\s+# v\d/, l);
+    const jobsAt = workflow.indexOf("\njobs:");
+    assert.ok(!/^permissions:/m.test(workflow.slice(0, jobsAt)), "no workflow-level permissions block");
+    assert.match(workflow.slice(jobsAt), /^ {4}permissions:/m);
   });
 
   test("uploads the JSON artifact with if: always() and 14-day retention", () => {
