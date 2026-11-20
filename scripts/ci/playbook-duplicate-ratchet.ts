@@ -214,7 +214,7 @@ export const duplicateRatchet = defineRatchet({
   measure: async (root) => countSpans(scanRepo(root)),
   help: [
     `Move the passage into a _fragments/ file and @include it from every holder (${STANDARD_REL} STD-PLAYBOOK-ONE-HOME).`,
-    "A removed copy also lowers its partner playbook's row; tighten that row too, with a Baseline-raise line if it rises.",
+    "A removed copy also lowers its partner playbook's row; tighten that row too.",
     "To find the span, diff the named playbook against master; scanTexts(texts) lists every span with its line and partners.",
   ],
 });

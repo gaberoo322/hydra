@@ -423,6 +423,7 @@ export const referenceRatchet = defineRatchet({
     "Update the playbook to cite what exists now (or delete the cite).",
     `If the reference is an illustrative placeholder, mark the line with \`${EXAMPLE_MARKER}\` (see the header of scripts/ci/playbook-reference-check.ts).`,
     "By kind: path = no such file or directory; route = not in docs/generated/routes.json; npm = not in package.json scripts; adr = not in docs/generated/adrs.json; superseded-adr = cite the ADR that replaced it, or mark a deliberate historical cite as an example; symbol = the named file does not contain the identifier.",
+    "The row names the playbook, kind and reference, not the line: grep the playbook for the reference to find it.",
   ],
 });
 
