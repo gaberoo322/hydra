@@ -48,8 +48,8 @@ jobs:
             echo "::error title=deps-check::taze did not run (exit $rc)"
             exit 1
           fi
-          if ! jq -e 'type == "array"' deps-staleness.json >/dev/null 2>&1; then
-            echo "::error title=deps-check::deps-staleness.json is not a JSON array (exit $rc)"
+          if ! jq -e 'type == "object" and has("packages")' deps-staleness.json >/dev/null 2>&1; then
+            echo "::error title=deps-check::deps-staleness.json is not a taze report object (exit $rc)"
             exit 1
           fi
           echo "::group::deps-staleness report"
