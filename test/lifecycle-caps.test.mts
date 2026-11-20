@@ -17,6 +17,7 @@ import {
   evaluateCaps,
   latestResetMs,
   parseCapResetTs,
+  resetsCapsOnExit,
   resolveCapLimits,
   timelineArmCounts,
   type CapJournalEntry,
@@ -135,6 +136,15 @@ describe("timestamped qa-fail-rounds count (#5437)", () => {
     const marker: TimedBody = { body: `Hydra-Cap-Reset: by=op ts=${new Date(at(4)).toISOString()}`, tsMs: at(4) };
     assert.equal(countReviewedFailRoundsAfterReset([...rounds3, marker], 7, 0), 0);
     assert.equal(countReviewedFailRoundsAfterReset([...rounds3, marker, timed(4, 5)], 7, 0), 1);
+  });
+
+  test("a count taken after a ready-for-human exit marker starts at zero (#5661 INV-6)", () => {
+    for (const by of ["board:promote", "external"]) {
+      const marker: TimedBody = { body: `Hydra-Cap-Reset: by=${by} ts=${new Date(at(4)).toISOString()}`, tsMs: at(4) };
+      const issueResetMs = latestResetMs([marker.body]);
+      assert.equal(countReviewedFailRoundsAfterReset(rounds3, 7, issueResetMs), 0, by);
+      assert.equal(countReviewedFailRoundsAfterReset([...rounds3, timed(4, 5)], 7, issueResetMs), 1, by);
+    }
   });
 
   test("a reset older than the FAIL rounds does not hide them", () => {
@@ -710,5 +720,14 @@ describe("caps as data (#5421)", () => {
     const res = (await advance({ issue: 42, to: "needs-dev-resume", evidence: { pr: "5" } }, w.deps)) as any;
     assert.equal(res.ok, false);
     assert.equal(res.code, "parked:qa-fail-rounds");
+  });
+});
+
+describe("resetsCapsOnExit (#5661 INV-1)", () => {
+  test("true only for the two Cap Arm human-hold states", () => {
+    for (const s of ["parked", "ready-for-human"]) assert.equal(resetsCapsOnExit(s), true, s);
+    for (const s of ["hitl-grill", "blocked", "needs-triage", "ready-for-agent", "in-progress", "closed", ""]) {
+      assert.equal(resetsCapsOnExit(s), false, s);
+    }
   });
 });

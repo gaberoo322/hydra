@@ -1,0 +1,1 @@
+- ci: playbook vocabulary, duplicate and reference ratchets run on the Ratchet module; baselines move to the counted/set formats (#5653)

@@ -9,6 +9,7 @@ import { logger } from "../logger.ts";
 import type { IssueActionWriteResult } from "../github/issue-actions.ts";
 import type { JournalSource, LifecycleJournalEntry } from "../redis/lifecycle-journal.ts";
 import { isPullRequestUrl } from "./gates.ts";
+import { resetsCapsOnExit } from "./caps.ts";
 import { postCapReset } from "./park.ts";
 import { entry, journalEntry as journal, normaliseCloseReason, observedOf, type AdvanceResult } from "./seam.ts";
 import type { LifecycleMode, SeamDeps } from "./seam-deps.ts";
@@ -88,12 +89,12 @@ export async function operatorAdvance(input: OperatorAdvanceInput, deps: SeamDep
   const removed = stateLabels.filter((s) => s !== to);
   const alreadyThere = (stateLabels as string[]).includes(to);
   const closeReason = normaliseCloseReason(input.closeReason);
-  // Leaving Park (and not closing) restarts every Cap Arm: post the issue-side marker BEFORE the
-  // label write. While `parked` is still set no lane can claim the issue, so the marker is harmless
+  // Leaving Park or ready-for-human (and not closing) restarts every Cap Arm: post the issue-side marker BEFORE the
+  // label write. While the hold label is still set no lane can claim the issue, so the marker is harmless
   // early and there is no window where a claim counts the pre-reset FAIL rounds and re-parks (QA
   // r1 on #5457). The outcome is evidence only; a failed post never changes `ok`.
   let capReset: string | null = null;
-  if (removed.includes("parked") && to !== "closed") {
+  if (removed.some(resetsCapsOnExit) && to !== "closed") {
     const res = await postCapReset(
       issue,
       { by: input.actor, ts: new Date(deps.now()).toISOString() },
