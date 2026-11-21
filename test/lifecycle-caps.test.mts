@@ -13,6 +13,7 @@ import {
   buildSeedEvidence,
   capEnvName,
   classRole,
+  countDeepQaFailsAfterReset,
   countReviewedFailRoundsAfterReset,
   countReviewedFailRoundsSinceReset,
   evaluateCaps,
@@ -67,6 +68,7 @@ describe("cap table (INV-1)", () => {
         "stale-requeue:issue:2",
         "needs-dev-resume-claims:issue:4",
         "total-claims:issue:10",
+        "deep-qa-fails:pr:2",
       ],
     );
   });
@@ -80,6 +82,46 @@ describe("cap table (INV-1)", () => {
       assert.equal(r.limits["total-claims"], 10);
       assert.equal(r.warnings.length, 1);
     }
+  });
+
+  test("the exit column: every row parks except deep-qa-fails, which escalates", () => {
+    assert.deepEqual(
+      Object.fromEntries(CAP_TABLE.map((r) => [r.arm, r.exit])),
+      {
+        "qa-fail-rounds": "park",
+        "dev-nopr-resume": "park",
+        "qa-stall": "park",
+        "red-ci-forward-fix": "park",
+        "stale-requeue": "park",
+        "needs-dev-resume-claims": "park",
+        "total-claims": "park",
+        "deep-qa-fails": "escalate",
+      },
+    );
+  });
+
+  test("deep-qa-fails is NOT env-overridable (ADR-0015: a second failed deep-QA pass)", () => {
+    const r = resolveCapLimits({ HYDRA_LIFECYCLE_CAP_DEEP_QA_FAILS: "5" });
+    assert.equal(r.limits["deep-qa-fails"], 2);
+    assert.deepEqual(r.warnings, []);
+  });
+
+  test("deep-qa-fails counts markers after the latest reset only, and applies only to a qa-fail attempt", () => {
+    const M = "Verifier-Core deep-QA: FAIL";
+    const t = (n: number) => Date.parse("2026-11-04T09:00:00Z") + n * 1000;
+    const bodies: TimedBody[] = [
+      { body: M, tsMs: t(1) },
+      { body: `Hydra-Cap-Reset: by=op ts=${new Date(t(2)).toISOString()}`, tsMs: t(2) },
+      { body: M, tsMs: t(3) },
+      { body: `${M} (no time)`, tsMs: null },
+      { body: "unrelated", tsMs: t(4) },
+    ];
+    assert.equal(countDeepQaFailsAfterReset(bodies, 0), 2);
+    assert.equal(countDeepQaFailsAfterReset(bodies, t(3)), 1, "an issue-side reset newer than a marker hides it");
+    const ev = evalArms([], { kind: "qa-fail", pr: 7 }, { deepQaFails: 2 });
+    assert.equal(ev.over?.arm, "deep-qa-fails");
+    const claim = evalArms([], claimAttempt({ class: "qa_orch", pr: 7 }), { deepQaFails: 9 });
+    assert.equal(claim.over, null, "markers never park a dispatch claim");
   });
 
   test("qa-fail-rounds is NOT env-overridable", () => {
@@ -624,6 +666,7 @@ describe("caps as data (#5421)", () => {
       "stale-requeue": false,
       "needs-dev-resume-claims": false,
       "total-claims": false,
+      "deep-qa-fails": true,
     });
     for (const r of CAP_TABLE) assert.equal(typeof r.liveInShadow, "boolean", r.arm);
   });
