@@ -32,7 +32,6 @@ import {
   type QaSeverity,
   buildQaVerdictTrailer,
   classifyVerdict,
-  decideDeepQaAction,
   decideReviewerFanout,
   foldReviewFindings,
   isPromptOnlyChange,
@@ -413,7 +412,7 @@ describe("hydra-qa step 10 label effects stay plain text pins (issue #4735, INV-
   test("a refused seam call ends the route non-zero and says it never edits labels by hand (INV-9)", () => {
     const routeSrc = readFileSync(join(REPO_ROOT, "scripts", "qa/route.ts"), "utf8");
     assert.ok(routeSrc.includes("not editing labels by hand"));
-    assert.ok(routeSrc.includes("advanceOrThrow"));
+    assert.ok(routeSrc.includes("bounceOrThrow"));
   });
 
   test("a degraded disarm-failed is a HARD STOP in the playbook: manual --disable-auto, confirm autoMergeRequest == null, report loudly", () => {
@@ -452,11 +451,11 @@ describe("hydra-qa playbook wires convergent review (issue #4735)", () => {
     assert.match(QA_PLAYBOOK, /first state fixed\/not-fixed for each prior finding; for anything new, prefer medium\+ and say why it wasn't visible before/i, "the re-review brief stays in the reviewer prompts");
   });
 
-  test("T1–T3: round-action runs before any effect; the seam owns the cap and parks, never ready-for-human (issue #5317 INV-5/6)", () => {
+  test("FAIL (any tier): round-action runs before any effect; the seam owns the caps and the route never writes ready-for-human (issue #5317 INV-5/6)", () => {
     const routeSrc = readFileSync(join(REPO_ROOT, "scripts", "qa", "route.ts"), "utf8");
     assert.ok(routeSrc.includes('ports.phase("round-action"'), "the round summary is produced by the round-action call");
     assert.ok(routeSrc.indexOf('ports.phase("round-action"') < routeSrc.indexOf("// ---- Effects (step 10). ----"), "round-action reads the PR before any effect is posted");
-    const t13 = routeSrc.slice(routeSrc.indexOf("// T1/T2/T3 (and unknown-tier) FAIL"));
+    const t13 = routeSrc.slice(routeSrc.indexOf("// Every FAIL (any tier)"));
     // The verdict comment (this round's trailer) precedes the first seam call.
     const comment = t13.indexOf("await prComment(bodies.fail(");
     const firstAdvance = t13.indexOf('await bounce("fail-bounce-advance")');
@@ -466,13 +465,6 @@ describe("hydra-qa playbook wires convergent review (issue #4735)", () => {
     assert.ok(!t13.includes('advanceOrThrow("parked"'), "no explicit caller-side park");
     const code = t13.split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
     assert.ok(!code.includes("ready-for-human"), "a T1-T3 round cap never writes ready-for-human");
-  });
-
-  test("T4 keeps decideDeepQaAction and never runs the T1–T3 round cap", () => {
-    const routeSrc = readFileSync(join(REPO_ROOT, "scripts", "qa", "route.ts"), "utf8");
-    const t4 = routeSrc.slice(routeSrc.indexOf("// T4 FAIL: the Deep-QA Remediation Loop"), routeSrc.indexOf("// T1/T2/T3 (and unknown-tier) FAIL"));
-    assert.ok(t4.includes("roundOut.deepQa"), "T4 reads the deep-QA action from the round-action JSON");
-    assert.ok(!t4.includes("qa-round-cap"));
   });
 });
 

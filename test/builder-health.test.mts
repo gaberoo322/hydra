@@ -779,7 +779,7 @@ describe("lifecycle fields — parkRatePerArm", () => {
   test("zero-fills every cap arm; rate = parks / claims; wouldPark reported alongside", () => {
     const f = foldParkRate([ev("claim"), ev("claim"), ev("claim"), ev("claim"), ev("park", "qa-stall"), ev("would-park", "qa-stall"), ev("would-park", "total-claims")]);
     assert.equal(f.claimsOpened, 4);
-    assert.equal(Object.keys(f.arms).length, 7);
+    assert.equal(Object.keys(f.arms).length, 8);
     assert.deepEqual(f.arms["qa-stall"], { parks: 1, wouldPark: 1, rate: 0.25 });
     assert.deepEqual(f.arms["total-claims"], { parks: 0, wouldPark: 1, rate: 0 });
     assert.deepEqual(f.arms["stale-requeue"], { parks: 0, wouldPark: 0, rate: 0 });

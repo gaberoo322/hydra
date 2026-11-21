@@ -1,0 +1,1 @@
+- refactor: T4 deep-QA FAIL count becomes the deep-qa-fails Cap Arm; a second FAIL escalates to ready-for-human through the lifecycle seam (#5662)

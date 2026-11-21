@@ -128,12 +128,8 @@ export const bodies = {
     `> *Automated QA failed (open PR)*\n\n\`${verdict}\` on PR #${pr} — ${summary}. Full review on the PR.${redLine(red)}\n\nRelabelled \`needs-dev-resume\` (not \`ready-for-agent\`) — the PR is still open, so the autopilot's durable resume pin (issue #4518) owns the retry on this branch.\n\n${trailer}`,
   failNotOpen: (verdict: string, pr: number, summary: string, trailer: string): string =>
     `> *Automated QA failed*\n\n\`${verdict}\` on PR #${pr} — ${summary}. Full review on the PR.\n\nReturning to ready-for-agent for retry.\n\n${trailer}`,
-  t4Review: (report: string, verdict: string, reason: string, marker: string, failNo: number, checks: string, trailer: string): string =>
-    `> *Automated QA — T4 Verifier-Core deep review*\n\n${report}\n\n---\n\n**Verdict:** \`${verdict}\` — ${reason}\n\n${marker} (fail #${failNo} on this PR)\n\n${checks}\n\n${trailer}`,
-  t4Blocked: (verdict: string, pr: number, failNo: number, summary: string, trailer: string): string =>
-    `> *T4 Deep-QA blocked — operator decision needed*\n\nPR #${pr} failed the Verifier-Core deep-QA gate **twice consecutively** (fail #${failNo}). Per the Deep-QA Remediation Loop the PR is now **blocked** and routed to the operator instead of bouncing again.\n\n\`${verdict}\` — ${summary}. Full findings on PR #${pr} (both passes).\n\nThis issue is now on the \`/hydra-review\` pickup set. Resolve by either fixing the Verifier-Core concern and re-running QA, or closing the PR.\n\n${trailer}`,
-  t4Bounce: (verdict: string, pr: number, summary: string, label: string, trailer: string): string =>
-    `> *T4 Deep-QA failed (1st) — bouncing to dev*\n\n\`${verdict}\` on PR #${pr} — ${summary}. Full review on the PR.\n\nReturning to ${label} for remediation. A second consecutive deep-QA FAIL on this PR will block it and escalate to the operator.\n\n${trailer}`,
+  t4Review: (report: string, verdict: string, reason: string, marker: string, checks: string, trailer: string): string =>
+    `> *Automated QA — T4 Verifier-Core deep review*\n\n${report}\n\n---\n\n**Verdict:** \`${verdict}\` — ${reason}\n\n${marker}\n\n${checks}\n\n${trailer}`,
   deferPr: (reason: string): string =>
     `> *Automated QA — review deferred*\n\n${reason}\n\nNo verdict is being emitted — the PR cannot merge on this pass. The full review (including the Verifier-Core fan-out for a T4 PR) runs once the PR is rebased / CI is green. QA has exited; the autopilot re-queues it when the PR is ready.`,
   deferGlm: (reason: string, red: string): string =>
@@ -303,16 +299,6 @@ async function runRouteImpl(
     if (res.ok === false) console.error(`[hydra-qa] WARN: lifecycle advance ${to} on issue#${issue} refused (${res.code || "unknown"})`);
     return res;
   };
-  /** An advance whose refusal ends the route (exit 1): never a by-hand label edit (ADR-0047 D4). */
-  const advanceOrThrow = async (
-    to: string,
-    evidence: Record<string, string>,
-    kind: string,
-    extra: { reason?: string; rationale?: string } = {},
-  ): Promise<void> => {
-    const res = await advance(to, evidence, kind, extra);
-    if (res.ok === false) throw new Error(`lifecycle advance ${to} refused (${res.code || "unknown"}) - not editing labels by hand`);
-  };
   /**
    * A QA exit off `needs-qa` (FAIL, or the trailer-less `defer`): the seam picks the target from its one
    * live PR read, so this file never names a bounce lane. `pr-merged` is not an error (see `advance`).
@@ -397,7 +383,6 @@ async function runRouteImpl(
     worstFinding: "",
     trailer: "",
     round: null,
-    deepQa: null,
     effects,
     nextStep: "none",
     dryRun: opts.dryRun,
@@ -564,7 +549,6 @@ async function runRouteImpl(
           worstFinding,
           trailer: "",
           round: null,
-          deepQa: null,
           effects,
           nextStep: "reviewer-commit",
           reviewerCommit: plan,
@@ -633,10 +617,11 @@ async function runRouteImpl(
   const summary = `${blockers} blocker(s), worst: ${maxSeverity}${worstFinding ? ` — ${worstFinding}` : ""}`;
   let nextStep: RouteResult["nextStep"] = "none";
 
-  // A T4 FAIL with no deep-QA decision is a pre-verdict exit: validate it BEFORE effectsStarted
+  // A T4 FAIL with no deep-QA fail marker is a pre-verdict exit: validate it BEFORE effectsStarted
   // flips, so the visible QA-Verdict-Error comment still posts for it.
-  if (verdict !== "PASS" && verdict !== "PASS-pending-CI" && tier === 4 && !isRecord(roundOut.deepQa)) {
-    throw new Error("T4 FAIL without a deepQa decision (pre-verdict exit)");
+  const t4FailMarker = typeof roundOut.failMarker === "string" ? roundOut.failMarker : "";
+  if (verdict !== "PASS" && verdict !== "PASS-pending-CI" && tier === 4 && t4FailMarker === "") {
+    throw new Error("T4 FAIL without a deep-QA fail marker (pre-verdict exit)");
   }
 
   // ---- Effects (step 10). ----
@@ -663,30 +648,18 @@ async function runRouteImpl(
       await prComment(bodies.passPendingCi(report, checksBlock, trailer), "pending-ci-pr-comment");
       // PASS-pending-CI is a PASS for routing: qa-passed; reconcile reads CI live (a red CI bounces it back).
       await passAdvance("pending-ci-advance");
-    } else if (tier === 4) {
-      // T4 FAIL: the Deep-QA Remediation Loop. Disarm FIRST (#4737), then the marker comment.
-      const deep = roundOut.deepQa as Record<string, unknown>; // narrowed by the pre-check above
-      const action = String(deep.action ?? "");
-      const failNo = typeof deep.failNumber === "number" ? deep.failNumber : 1;
-      const marker = typeof roundOut.failMarker === "string" ? roundOut.failMarker : "";
-      await disarmChecked();
-      await prComment(bodies.t4Review(report, verdict, verdictReason, marker, failNo, checksBlock, trailer), "t4-review-comment");
-      if (action === "block-and-escalate") {
-        await advanceOrThrow("ready-for-human", {}, "t4-escalate-advance", {
-          reason: "t4-deep-qa-exhausted",
-          rationale: `T4 deep-QA failed twice consecutively on PR #${pr} (fail #${failNo})`,
-        });
-        await issueComment(bodies.t4Blocked(verdict, pr, failNo, summary, trailer), "t4-blocked-comment");
-      } else {
-        const label = await bounceOrThrow("t4-bounce-advance");
-        await issueComment(bodies.t4Bounce(verdict, pr, summary, label, trailer), "t4-bounce-comment");
-      }
     } else {
-      // T1/T2/T3 (and unknown-tier) FAIL: the universal remediation bounce. The verdict comment
-      // (carrying this round's trailer) goes FIRST; the seam owns the 3rd-reviewed-FAIL cap.
+      // Every FAIL (any tier): the universal remediation bounce. Disarm FIRST (#4737), then the verdict
+      // comment (carrying this round's trailer, and for T4 the deep-QA fail marker) goes FIRST; the seam
+      // owns both caps: the 3rd reviewed FAIL parks, the 2nd T4 deep-QA FAIL escalates (#5662).
       await disarmChecked();
-      await prComment(bodies.fail(report, verdict, verdictReason, checksBlock, trailer));
+      if (tier === 4) {
+        await prComment(bodies.t4Review(report, verdict, verdictReason, t4FailMarker, checksBlock, trailer), "t4-review-comment");
+      } else {
+        await prComment(bodies.fail(report, verdict, verdictReason, checksBlock, trailer));
+      }
       let escalate = false;
+      let escalated = false;
       let label: "needs-dev-resume" | "ready-for-agent" = "needs-dev-resume";
       const adv = await bounce("fail-bounce-advance");
       if (adv.ok === true) {
@@ -694,10 +667,17 @@ async function runRouteImpl(
       } else {
         // The seam parks the 3rd reviewed FAIL in enforce AND shadow (qa-fail-rounds is a live arm), posting
         // the unified park comment itself; any other refusal ends the route.
-        if (adv.code !== "parked:qa-fail-rounds") throw new Error(`lifecycle advance bounce refused (${adv.code || "unknown"}) - not editing labels by hand`);
-        escalate = true;
+        if (adv.code === "escalated:deep-qa-fails") escalated = true;
+        else if (adv.code !== "parked:qa-fail-rounds") throw new Error(`lifecycle advance bounce refused (${adv.code || "unknown"}) - not editing labels by hand`);
+        else escalate = true;
       }
-      if (adv.ok === false && escalate) {
+      if (escalated) {
+        // The seam wrote ready-for-human (t4-deep-qa-exhausted) and posted the unified cap comment itself.
+        // Fail loudly when that write did not land: an unwritten escalation must never read as success.
+        if (adv.ok === false && "written" in adv && adv.written === false) {
+          throw new Error("lifecycle escalation refused (escalated:deep-qa-fails not written) - not editing labels by hand");
+        }
+      } else if (adv.ok === false && escalate) {
         // Off-list escalation (ADR-0047 D6): the issue is PARKED, never ready-for-human.
         const esc = renderParkSummary(adv.code, "counts" in adv ? adv.counts : undefined);
         await issueComment(bodies.failEscalated(verdict, pr, summary, esc, trailer), "escalate-issue-comment");
@@ -764,7 +744,6 @@ async function runRouteImpl(
     worstFinding,
     trailer,
     round: typeof trailerOut.round === "number" ? trailerOut.round : null,
-    deepQa: roundOut.deepQa ?? null,
     effects,
     nextStep,
     ...(reviewerCommit !== undefined ? { reviewerCommit } : {}),

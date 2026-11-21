@@ -13,41 +13,28 @@ import { classifyQaFixPath } from "./fix-proof.ts";
 import { detectOneWayDoor, requiresOneWayDepth } from "./one-way-door.ts";
 import type { ReviewerCommitsValue } from "./rollout-switches.ts";
 import { FOLLOW_UPS_HEADING } from "./fold.ts";
+import { DEEP_QA_FAIL_MARKER } from "../lifecycle/caps.ts";
 import type { FinalVerdict } from "./verdict-trailer.ts";
 
 /**
- * T4 Deep-QA Remediation Loop (issue #740, ADR-0015).
+ * T4 Deep-QA Remediation Loop (issue #740, ADR-0015; #5662).
  *
  * T4 inherits the full T3 adversarial depth (the two-reviewer refutation
- * fan-out folded by `aggregateAdversarialReview` above) and ADDS the
- * **Verifier-Core checklist** plus the block-and-escalate teeth no other tier
- * has. This module is the pure decision rule for the *remediation* half: given
- * the current T4 review verdict and the PR's own comment history, decide
- * whether a FAIL bounces the PR back to a dev agent (1st fail) or blocks the PR
- * and escalates to the operator (2nd consecutive fail).
- *
- * Why the count lives on the PR, not in Redis / on an issue label: the FAIL
- * bounce path is stateless on the issue — step 10 strips `needs-qa` and adds
- * `ready-for-agent`, resetting any label-carried counter on every bounce. A new
- * persistent Redis key would be a state surface that can desync from PR
- * reality. The PR is the durable per-attempt ledger: every deep-QA FAIL leaves
- * a machine-greppable marker comment, so the next QA pass derives the fail
- * number live by counting prior markers. "Consecutive" and "total fails on this
- * PR" coincide because a PASS merges the PR and ends the loop — a PR never
- * accumulates a FAIL after a PASS. See the rejected-alternatives in the #740
- * design-concept artifact.
- *
- * This module stays pure — no fs/network — so it is unit-tested directly.
+ * fan-out folded by `aggregateAdversarialReview`) and ADDS the
+ * **Verifier-Core checklist**. Its FAIL routing is NOT decided here: every QA FAIL
+ * exits through `qaBounce`, and the lifecycle seam's `deep-qa-fails` Cap Arm
+ * (`src/lifecycle/caps.ts`) counts the `DEEP_QA_FAIL_MARKER` comments on the PR
+ * since the latest `Hydra-Cap-Reset:` and escalates the second to
+ * `ready-for-human` (`t4-deep-qa-exhausted`). This module only renders the two
+ * markers (FAIL here, SHA-bound PASS below).
  */
 
 /**
  * The machine-greppable marker every T4 deep-QA FAIL comment MUST contain on
- * its own line. The next deep-QA pass counts occurrences of this literal across
- * the PR's prior comments to derive the consecutive-fail number. Changing this
- * string is a breaking change to the per-PR ledger — the playbook's step-10 T4
- * branch posts it verbatim and the count below greps for it verbatim.
+ * its own line. The seam's `deep-qa-fails` arm counts occurrences of this
+ * literal across the PR's comments. Single source: `src/lifecycle/caps.ts`.
  */
-export const DEEP_QA_FAIL_MARKER = "Verifier-Core deep-QA: FAIL";
+export { DEEP_QA_FAIL_MARKER };
 
 /**
  * The base literal of the positive Deep-QA PASS marker (ADR-0020, issue #847).
@@ -90,7 +77,7 @@ export function renderDeepQaPassMarker(headSha: string): string {
  * head SHA must never satisfy the gate). Pure — no fs/network.
  *
  * Matching is `String.includes` of the rendered marker line, mirroring how
- * `decideDeepQaAction` counts `DEEP_QA_FAIL_MARKER` — the marker is one line
+ * the seam counts `DEEP_QA_FAIL_MARKER` — the marker is one line
  * inside a larger comment body, not the whole body.
  *
  * @param commentBodies the PR's comment bodies (order irrelevant).
@@ -104,84 +91,6 @@ export function hasFreshDeepQaPass(
   if (trimmed.length === 0) return false;
   const marker = renderDeepQaPassMarker(trimmed);
   return commentBodies.some((body) => body.includes(marker));
-}
-
-export type DeepQaAction = "proceed" | "bounce" | "block-and-escalate";
-
-export interface DeepQaDecision {
-  /**
-   * - `proceed` — current verdict is not a FAIL; the normal step-10 routing
-   *   (PASS / PASS-pending-CI) applies, no T4-specific remediation.
-   * - `bounce` — 1st deep-QA FAIL on this PR: comment findings + re-label
-   *   `ready-for-agent` (the universal #739 remediation loop).
-   * - `block-and-escalate` — 2nd+ consecutive deep-QA FAIL: block the PR and
-   *   add the source issue to the `/hydra-review` pickup set (`ready-for-human`
-   *   + structured reason). No new operator channel, no new verdict literal.
-   */
-  action: DeepQaAction;
-  /**
-   * The 1-based fail number this verdict represents on this PR. Undefined when
-   * `action === "proceed"` (the verdict wasn't a FAIL, so nothing was counted).
-   */
-  failNumber?: number;
-  /** Human-readable reason for the routing decision (for the QA report body). */
-  reason: string;
-}
-
-/**
- * Decide the T4 deep-QA remediation action from the current review verdict and
- * the PR's prior comment bodies.
- *
- * The fail number is derived **live** from how many prior comments already
- * carry `DEEP_QA_FAIL_MARKER` — the PR is the ledger, there is no separate
- * counter. `failNumber = priorMarkers + 1`. The first FAIL (`failNumber === 1`)
- * bounces; the second-or-later (`failNumber >= 2`) blocks-and-escalates.
- *
- * Tiering is the caller's job (the playbook reads `GET /api/tier` and only runs
- * this branch for T4). This helper does NOT change the four-verdict literal
- * `decide.py` consumes — block-and-escalate is expressed through the existing
- * `ready-for-human` pickup set, not a new `FinalVerdict`.
- *
- * @param currentVerdict the folded T4 review verdict for this pass
- *   (`"PASS" | "FAIL"`) — the per-reviewer/adversarial fold, before CI folding.
- * @param priorPrComments the bodies of comments already posted on the PR (the
- *   durable per-attempt ledger). Order does not matter; only the marker count.
- */
-export function decideDeepQaAction(
-  currentVerdict: ReviewVerdict,
-  priorPrComments: readonly string[],
-): DeepQaDecision {
-  if (currentVerdict !== "FAIL") {
-    return {
-      action: "proceed",
-      reason:
-        "T4 deep-QA: review did not FAIL — normal verdict routing applies, no remediation.",
-    };
-  }
-
-  const priorFailMarkers = priorPrComments.filter((c) =>
-    c.includes(DEEP_QA_FAIL_MARKER),
-  ).length;
-  const failNumber = priorFailMarkers + 1;
-
-  if (failNumber >= 2) {
-    return {
-      action: "block-and-escalate",
-      failNumber,
-      reason:
-        `T4 deep-QA: ${failNumber}th consecutive Verifier-Core FAIL on this PR — ` +
-        "block the PR and add the source issue to the /hydra-review pickup set " +
-        "(ready-for-human + structured reason). No further auto-bounce.",
-    };
-  }
-
-  return {
-    action: "bounce",
-    failNumber,
-    reason:
-      "T4 deep-QA: first Verifier-Core FAIL on this PR — comment findings and " +
-      "bounce to a dev agent (re-label ready-for-agent), the universal remediation loop.",
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -202,8 +111,8 @@ export const QA_ADMISSION_SKIP_MARKER = "Review skipped by the admission gate";
 
 // ---------------------------------------------------------------------------
 // Phase head (issue #5079, INV-3): the ONE composed entry the round-action
-// step binds to. Only T4 has a decision here: decideDeepQaAction (+ the
-// SHA-bound PASS marker). T1-T3 carry no deep-QA state. No new rule — every
+// step binds to. Only T4 has a decision here: the FAIL marker or the
+// SHA-bound PASS marker. T1-T3 carry no deep-QA state. No new rule — every
 // branch below is owned by the helpers it calls.
 // ---------------------------------------------------------------------------
 
@@ -211,38 +120,27 @@ export interface DecideRoundInput {
   tier: number | null;
   /** The final verdict literal (PASS / FAIL / PASS-pending-CI / FAIL-pending-CI). */
   verdict: FinalVerdict | string;
-  /** The folded review verdict, the input of the T4 deep-QA loop. */
+  /** The folded review verdict (a T4 PASS needs both the verdict and the review to be non-FAIL). */
   reviewVerdict: ReviewVerdict;
   headSha: string;
-  priorBodies: ReadonlyArray<string | null | undefined>;
 }
 
 export interface DecideRoundResult {
-  /** Set exactly when the tier is T4. */
-  deepQa: DeepQaDecision | null;
-  /** The T4 `Verifier-Core deep-QA: PASS @ <sha>` line; set only when `deepQa.action === "proceed"`. */
+  /** The T4 `Verifier-Core deep-QA: PASS @ <sha>` line; set only on a T4 round that did not FAIL. */
   passMarker: string | null;
-  /** `DEEP_QA_FAIL_MARKER` when the T4 action is bounce / block-and-escalate, else null (issue #5081). */
+  /** `DEEP_QA_FAIL_MARKER` on a T4 FAIL round, else null (issue #5081). */
   failMarker: string | null;
 }
 
 export function decideRound(input: DecideRoundInput): DecideRoundResult {
-  const deepQa =
-    input.tier === 4
-      ? decideDeepQaAction(
-          // A T4 FAIL driven by CI alone (review PASS, a required check red)
-          // is still a deep-QA FAIL: it must bounce and be counted, never
-          // "proceed" with a PASS marker (QA round-1 finding on #5306).
-          String(input.verdict).startsWith("FAIL") ? "FAIL" : input.reviewVerdict,
-          input.priorBodies.map((b) => String(b ?? "")),
-        )
-      : null;
-  // Only a T4 PASS carries the SHA-bound proof `hasFreshDeepQaPass` trusts;
-  // a bounce / block-and-escalate (FAIL) must never emit it.
-  const passMarker = deepQa?.action === "proceed" ? renderDeepQaPassMarker(input.headSha) : null;
-  const failMarker =
-    deepQa?.action === "bounce" || deepQa?.action === "block-and-escalate" ? DEEP_QA_FAIL_MARKER : null;
-  return { deepQa, passMarker, failMarker };
+  if (input.tier !== 4) return { passMarker: null, failMarker: null };
+  // A T4 FAIL driven by CI alone (review PASS, a required check red) is still a deep-QA FAIL:
+  // it carries the marker and never the PASS proof (QA round-1 finding on #5306).
+  const fail = String(input.verdict).startsWith("FAIL") || input.reviewVerdict === "FAIL";
+  // Only a T4 PASS carries the SHA-bound proof `hasFreshDeepQaPass` trusts.
+  return fail
+    ? { passMarker: null, failMarker: DEEP_QA_FAIL_MARKER }
+    : { passMarker: renderDeepQaPassMarker(input.headSha), failMarker: null };
 }
 
 // ---------------------------------------------------------------------------

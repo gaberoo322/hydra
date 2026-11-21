@@ -281,22 +281,9 @@ export async function runQaVerdictPhase(
     }
     case "round-action": {
       const i = input as QaVerdictCliInput<"round-action">;
-      const priorBodies = await priorBodiesOrNull(i.priorBodies, f, i.pr);
-      if (priorBodies === null) {
-        console.error(`[qa-verdict] round-action: prior bodies unreadable for PR #${i.pr}, degrading to no deep-QA decision`);
-        // T4: a degraded decision would be `decideDeepQaAction(verdict, [])` =
-        // fail #1, resetting the 2-strike block-and-escalate count. There is no
-        // safe degraded T4 answer, so it is a pre-verdict exit (nothing posted,
-        // needs-qa stays, the next dispatch retries). T1-T3 carry no deep-QA
-        // state: deepQa / failMarker / passMarker are null as in the normal path.
-        if (i.tier === 4) {
-          throw new Error(`round-action: prior bodies unreadable for T4 PR #${i.pr}; deep-QA fail count cannot be read`);
-        }
-        return { deepQa: null, passMarker: null, failMarker: null, degraded: ["prior-bodies"] };
-      }
       const headSha = await resolveFact(i.headSha, () => f.headSha(i.pr), "head-sha", "", degraded);
       const result = decideRound({
-        tier: i.tier, verdict: i.verdict, reviewVerdict: i.reviewVerdict, headSha, priorBodies,
+        tier: i.tier, verdict: i.verdict, reviewVerdict: i.reviewVerdict, headSha,
       });
       return { ...result, degraded };
     }

@@ -1,18 +1,20 @@
 /**
- * Cap park + cap reset (ADR-0047 Decision 6, issue #5314).
+ * Cap exit + cap reset (ADR-0047 Decision 6, issues #5314, #5662).
  *
- * `parkForCap` is ONE seam operation: close any held dispatch claim (owner
- * checked), ONE gh label edit `<state> -> parked` (re-read verified), journal
- * the transition, post ONE unified comment on the ISSUE. It never touches the
- * PR. It only writes through a legal `<state> -> parked` transition row; from a
- * state with none it writes no label and journals `refused:park-illegal-from`.
+ * `parkForCap` is the ONE cap-exit path: close any held dispatch claim (owner
+ * checked), ONE label edit `<state> -> <exit state>` (re-read verified),
+ * journal the transition, post ONE unified comment on the ISSUE. The exit state
+ * is the arm's `exit` column (caps.ts): `parked` for a `park` row,
+ * `ready-for-human` (ADR-0005 reason `t4-deep-qa-exhausted`) for an `escalate`
+ * row. It never touches the PR. It only writes through a legal transition row;
+ * from a state with none it writes no label and journals `refused:park-illegal-from`.
  *
  * Never throws (STD-VERIFY-NEVER-THROW); every effect is an injectable
  * `SeamDeps` member.
  */
 import { logger } from "../logger.ts";
 import type { LifecycleJournalEntry } from "../redis/lifecycle-journal.ts";
-import { CAP_RESET_PREFIX, renderCapCounts, type CapCount } from "./caps.ts";
+import { CAP_RESET_PREFIX, capExitOf, renderCapCounts, type CapCount } from "./caps.ts";
 import type { SeamDeps } from "./seam-deps.ts";
 import { findTransition, isLifecycleState } from "./transitions.ts";
 
@@ -29,12 +31,16 @@ export interface ParkInput {
 }
 
 export interface ParkResult {
-  /** Whether the `parked` label write landed. */
+  /** Whether the exit-state (`parked` / `ready-for-human`) label write landed. */
   written: boolean;
 }
 
+/** The ADR-0005 reason an escalate exit carries (journal evidence; the reason field stays `cap:<arm>`). */
+const ESCALATE_ADR5_REASON = "t4-deep-qa-exhausted";
+
 function parkEvidence(over: CapCount, pr: number | null): Record<string, string> {
   return {
+    ...(capExitOf(over.arm) === "escalate" ? { "adr5-reason": ESCALATE_ADR5_REASON } : {}),
     arm: over.arm,
     count: String(over.count),
     limit: String(over.limit),
@@ -47,21 +53,26 @@ function parkEvidence(over: CapCount, pr: number | null): Record<string, string>
 function renderParkComment(input: ParkInput, nowIso: string): string {
   const { over, counts, pr } = input;
   const rows = counts.map((c) => `| ${c.arm} | ${c.count} | ${c.limit} | ${c.unit} |`);
+  const escalate = capExitOf(over.arm) === "escalate";
   return [
-    "## Hydra cap park",
+    escalate ? "## Hydra cap escalation" : "## Hydra cap park",
     "",
-    `This issue was parked automatically: the \`${over.arm}\` cap was reached (${over.count} of ${over.limit} per ${over.unit}).`,
+    escalate
+      ? `This issue was escalated to the operator (\`ready-for-human\`, reason \`${ESCALATE_ADR5_REASON}\`): the \`${over.arm}\` cap was reached (${over.count} of ${over.limit} per ${over.unit}).`
+      : `This issue was parked automatically: the \`${over.arm}\` cap was reached (${over.count} of ${over.limit} per ${over.unit}).`,
     "",
     "| Arm | Count | Limit | Unit |",
     "|---|---|---|---|",
     ...rows,
     "",
-    "To un-park: investigate why the attempts keep failing, then un-park through the board route. " +
+    (escalate
+      ? "To resume: fix the concern or close the PR, then hand the issue back through the board route. "
+      : "To un-park: investigate why the attempts keep failing, then un-park through the board route. ") +
       "It posts the reset for you on this issue. Post it by hand ON THIS ISSUE ONLY (never on the PR):",
     "",
     "- board route result `capReset=posted`: do nothing.",
     "- board route result `capReset=failed:<code>`: post the line below.",
-    "- `parked` label removed by hand: wait for the reconciler, or post the line below.",
+    `- \`${escalate ? "ready-for-human" : "parked"}\` label removed by hand: wait for the reconciler, or post the line below.`,
     "",
     `\`${CAP_RESET_PREFIX} by=<you> ts=<ISO-8601>\``,
     "",
@@ -74,11 +85,12 @@ export async function parkForCap(input: ParkInput, deps: SeamDeps): Promise<Park
   const { issue, over } = input;
   const actor = input.actor ?? "cli";
   const rationale = renderCapCounts(input.counts);
+  const exitState = capExitOf(over.arm) === "escalate" ? "ready-for-human" : "parked";
   const base = (over2: Partial<LifecycleJournalEntry> & Pick<LifecycleJournalEntry, "kind" | "result" | "written">): LifecycleJournalEntry => ({
     v: 1,
     ts: deps.now(),
     from: input.from,
-    to: "parked",
+    to: exitState,
     source: "cli",
     actor,
     evidence: { ...parkEvidence(over, input.pr), ...(input.evidence ?? {}) },
@@ -116,8 +128,8 @@ export async function parkForCap(input: ParkInput, deps: SeamDeps): Promise<Park
       }
     }
 
-    // (b) legality: only a real `<state> -> parked` row may write.
-    const row = input.from !== null && isLifecycleState(input.from) ? findTransition(input.from, "parked") : undefined;
+    // (b) legality: only a real `<state> -> <exit state>` row may write.
+    const row = input.from !== null && isLifecycleState(input.from) ? findTransition(input.from, exitState) : undefined;
     if (!row) {
       await append(
         base({ kind: "refused", from: input.from, result: `refused:park-illegal-from:${input.from ?? "none"}`, written: false }),
@@ -125,20 +137,20 @@ export async function parkForCap(input: ParkInput, deps: SeamDeps): Promise<Park
       return { written: false };
     }
 
-    const write = await deps.edit(issue, { remove: [row.from], add: ["parked"] });
+    const write = await deps.edit(issue, { remove: [row.from], add: [exitState] });
     if (write.ok === false) {
       await append(base({ kind: "refused", result: `write-failed:${write.code}`, written: false }));
       return { written: false };
     }
     const after = await deps.view(issue);
-    const verified = after.ok && after.row.labels.includes("parked") && !after.row.labels.includes(row.from);
+    const verified = after.ok && after.row.labels.includes(exitState) && !after.row.labels.includes(row.from);
     if (!verified) {
       await append(base({ kind: "refused", result: "write-unverified", written: true }));
       return { written: true };
     }
 
     // (c) journal, (d) ONE unified comment on the ISSUE (never the PR).
-    await append(base({ kind: "transition", result: `parked:${over.arm}`, written: true }));
+    await append(base({ kind: "transition", result: `${exitState === "parked" ? "parked" : "escalated"}:${over.arm}`, written: true }));
     const posted = await deps.comment(issue, renderParkComment(input, new Date(deps.now()).toISOString()));
     if (posted.ok === false) logger.error({ issue, code: posted.code }, "[lifecycle] park comment failed");
     return { written: true };

@@ -5,10 +5,10 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import * as roundActionModule from "../src/qa/round-action.ts";
 import {
   DEEP_QA_FAIL_MARKER,
   DEEP_QA_PASS_MARKER,
-  decideDeepQaAction,
   decideRound,
   hasFreshDeepQaPass,
   renderDeepQaPassMarker,
@@ -16,102 +16,16 @@ import {
 
 const SHA_C = "cccccccccccc3333333333333333333333333333";
 
-describe("decideDeepQaAction — T4 deep-QA remediation loop (issue #740)", () => {
-  // T4 inherits the T3 adversarial fold above, then adds block-and-escalate
-  // teeth: 1st FAIL bounces (universal #739 loop), 2nd+ consecutive FAIL blocks
-  // the PR and routes to the /hydra-review pickup set. The consecutive-fail
-  // count is derived LIVE from machine-greppable FAIL markers already on the PR
-  // (the PR is the durable per-attempt ledger) — NOT a Redis key, NOT an issue
-  // label (labels reset on every bounce). These tests pin that contract.
-
-  test("PASS verdict → proceed (no remediation, normal routing)", () => {
-    const r = decideDeepQaAction("PASS", []);
-    assert.equal(r.action, "proceed");
-    assert.equal(r.failNumber, undefined);
-  });
-
-  test("PASS verdict ignores any prior FAIL markers (loop healed)", () => {
-    // A PASS after a prior fail proceeds — and since a PASS merges the PR and
-    // ends the loop, a PR never accumulates a FAIL after a PASS in practice.
-    const r = decideDeepQaAction("PASS", [
-      `something\n${DEEP_QA_FAIL_MARKER}\nmore`,
-    ]);
-    assert.equal(r.action, "proceed");
-  });
-
-  test("1st FAIL (no prior markers) → bounce, failNumber 1", () => {
-    const r = decideDeepQaAction("FAIL", [
-      "unrelated review comment",
-      "another comment with no marker",
-    ]);
-    assert.equal(r.action, "bounce");
-    assert.equal(r.failNumber, 1);
-    assert.match(r.reason, /bounce|ready-for-agent/i);
-  });
-
-  test("2nd consecutive FAIL (one prior marker) → block-and-escalate, failNumber 2", () => {
-    const r = decideDeepQaAction("FAIL", [
-      `> *Automated QA failed*\n\n${DEEP_QA_FAIL_MARKER} — Live-Gate Invariant violated`,
-    ]);
-    assert.equal(r.action, "block-and-escalate");
-    assert.equal(r.failNumber, 2);
-    assert.match(r.reason, /hydra-review|ready-for-human|pickup set/i);
-  });
-
-  test("3rd FAIL (two prior markers) → still block-and-escalate, failNumber 3", () => {
-    const r = decideDeepQaAction("FAIL", [
-      `c1 ${DEEP_QA_FAIL_MARKER}`,
-      `c2 ${DEEP_QA_FAIL_MARKER}`,
-    ]);
-    assert.equal(r.action, "block-and-escalate");
-    assert.equal(r.failNumber, 3);
-  });
-
-  test("marker count is substring-based, robust to surrounding text", () => {
-    // The playbook posts the marker on its own line inside a larger comment;
-    // the count is a substring match so the surrounding report doesn't matter.
-    const r = decideDeepQaAction("FAIL", [
-      `# QA Report\n\nLots of findings...\n\n**Verdict:** \`FAIL\`\n\n${DEEP_QA_FAIL_MARKER}\n\n(checks table)`,
-    ]);
-    assert.equal(r.action, "block-and-escalate");
-    assert.equal(r.failNumber, 2);
-  });
-
-  test("comments WITHOUT the exact marker do not count (no false escalation)", () => {
-    // A generic FAIL comment from the T1/T2/T3 path (which does NOT post the
-    // T4 marker) must not be miscounted as a deep-QA fail — otherwise a T4 PR
-    // that previously failed a shallow check would escalate on its first deep
-    // FAIL. Only the exact T4 marker counts.
-    const r = decideDeepQaAction("FAIL", [
-      "Verdict: `FAIL` — Code review FAIL",
-      "Adversarial QA (T3): reviewer A surfaced a real blocker",
-      "Verifier-Core deep-QA: PASS", // a PASS marker, not the FAIL marker
-    ]);
-    assert.equal(r.action, "bounce");
-    assert.equal(r.failNumber, 1);
-  });
-
-  test("DEEP_QA_FAIL_MARKER is the stable greppable literal the playbook posts", () => {
-    // If this literal ever drifts, the per-PR ledger count silently breaks
-    // (prior markers stop matching) and every fail looks like a 1st fail —
-    // the PR would bounce forever instead of escalating. Pin it.
+describe("T4 deep-QA FAIL marker (issue #740, #5662)", () => {
+  // The FAIL count and the 2nd-FAIL escalation live in the seam's `deep-qa-fails` Cap Arm
+  // (test/lifecycle-caps.test.mts); this module only owns the marker literal and where it is emitted.
+  test("DEEP_QA_FAIL_MARKER is the stable greppable literal the seam counts", () => {
+    // If this literal drifts, the seam's per-PR count silently stops matching and a T4 PR bounces forever.
     assert.equal(DEEP_QA_FAIL_MARKER, "Verifier-Core deep-QA: FAIL");
   });
 
-  test("decision is a pure synchronous return — never blocks", () => {
-    const r = decideDeepQaAction("FAIL", []);
-    assert.equal(typeof r, "object");
-    assert.equal((r as { then?: unknown }).then, undefined);
-  });
-
-  test("block-and-escalate does NOT introduce a new FinalVerdict literal", () => {
-    // INV: T4 deep-QA is additive verification depth, NOT a policy change.
-    // block-and-escalate is expressed via the ready-for-human pickup set, so
-    // the four-verdict contract decide.py consumes stays intact. The decision
-    // object carries an `action`, never a verdict literal.
-    const r = decideDeepQaAction("FAIL", [`x ${DEEP_QA_FAIL_MARKER}`]);
-    assert.ok(!("verdict" in r), "deep-QA decision must not carry a verdict literal");
-    assert.equal(r.action, "block-and-escalate");
+  test("round-action routes no T4 FAIL itself: the old decision function is gone", () => {
+    assert.equal("decideDeepQaAction" in roundActionModule, false);
   });
 });
 
@@ -178,37 +92,29 @@ describe("Deep-QA PASS marker — emission + freshness (issue #847, ADR-0020 Sli
 });
 
 describe("decideRound — the composed round-action head (issue #5079, INV-3)", () => {
-  test("T1-T3 carry no round decision: no deep-QA, no markers, whatever the verdict", () => {
+  test("T1-T3 carry no deep-QA markers, whatever the verdict", () => {
     for (const tier of [1, 2, 3, null]) {
       for (const verdict of ["FAIL", "PASS", "FAIL-pending-CI"]) {
-        const r = decideRound({ tier, verdict, reviewVerdict: "FAIL", headSha: SHA_C, priorBodies: [`c1 ${DEEP_QA_FAIL_MARKER}`] });
-        assert.deepEqual(r, { deepQa: null, passMarker: null, failMarker: null }, `${tier}/${verdict}`);
+        const r = decideRound({ tier, verdict, reviewVerdict: "FAIL", headSha: SHA_C });
+        assert.deepEqual(r, { passMarker: null, failMarker: null }, `${tier}/${verdict}`);
       }
     }
   });
 
-  test("T4 FAIL hands routing to the deep-QA loop and carries NO PASS marker", () => {
-    const r = decideRound({ tier: 4, verdict: "FAIL", reviewVerdict: "FAIL", headSha: SHA_C, priorBodies: [] });
-    assert.deepEqual(r.deepQa, decideDeepQaAction("FAIL", []));
+  test("T4 FAIL carries the fail marker and NO PASS marker", () => {
+    const r = decideRound({ tier: 4, verdict: "FAIL", reviewVerdict: "FAIL", headSha: SHA_C });
     assert.equal(r.passMarker, null);
     assert.equal(r.failMarker, DEEP_QA_FAIL_MARKER);
   });
 
-  test("T4 second FAIL (block-and-escalate) carries NO PASS marker", () => {
-    const r = decideRound({ tier: 4, verdict: "FAIL", reviewVerdict: "FAIL", headSha: SHA_C, priorBodies: [`c1 ${DEEP_QA_FAIL_MARKER}`] });
-    assert.equal(r.deepQa?.action, "block-and-escalate");
-    assert.equal(r.passMarker, null);
-  });
-
-  test("T4 FAIL driven by CI alone (review PASS) still bounces", () => {
-    const r = decideRound({ tier: 4, verdict: "FAIL", reviewVerdict: "PASS", headSha: SHA_C, priorBodies: [] });
-    assert.equal(r.deepQa?.action, "bounce");
+  test("T4 FAIL driven by CI alone (review PASS) still carries the fail marker, never the PASS marker", () => {
+    const r = decideRound({ tier: 4, verdict: "FAIL-pending-CI", reviewVerdict: "PASS", headSha: SHA_C });
+    assert.equal(r.failMarker, DEEP_QA_FAIL_MARKER);
     assert.equal(r.passMarker, null);
   });
 
   test("T4 PASS carries the SHA-bound PASS marker", () => {
-    const r = decideRound({ tier: 4, verdict: "PASS", reviewVerdict: "PASS", headSha: SHA_C, priorBodies: [] });
-    assert.equal(r.deepQa?.action, "proceed");
+    const r = decideRound({ tier: 4, verdict: "PASS", reviewVerdict: "PASS", headSha: SHA_C });
     assert.equal(r.passMarker, renderDeepQaPassMarker(SHA_C));
     assert.equal(r.failMarker, null);
   });
