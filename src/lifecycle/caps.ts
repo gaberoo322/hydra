@@ -7,8 +7,7 @@
  *
  * Pure: no fs / network / Redis / clock. Env and `now` are inputs; the module
  * never throws and returns warnings for the caller to log. It imports only
- * the QA prior-round/trailer modules and lifecycle data modules, and
- * `src/qa/round-action.ts` imports it (one direction).
+ * the QA prior-round/trailer modules and lifecycle data modules.
  *
  * One comparator for every arm: an attempt parks iff `count >= limit`, where
  * `count` is the number of PRIOR attempts already consumed on that arm since
@@ -66,7 +65,7 @@ export const CAP_DEFAULTS: Readonly<Record<CapArm, number>> = Object.fromEntries
   CAP_TABLE.map((r) => [r.arm, r.limit]),
 ) as Record<CapArm, number>;
 
-/** The arm whose limit is NOT env-overridable (seam, round-action and merge guard must agree). */
+/** The arm whose limit is NOT env-overridable (seam and merge guard must agree). */
 const NON_OVERRIDABLE: readonly CapArm[] = ["qa-fail-rounds"];
 
 const CAP_ENV_PREFIX = "HYDRA_LIFECYCLE_CAP_";
@@ -155,11 +154,6 @@ export function latestResetMs(bodies: ReadonlyArray<string | null | undefined>):
   return latest;
 }
 
-/** True when the body carries a VALID reset line (same validity as the issue side). */
-function hasResetLine(body: string | null | undefined): boolean {
-  return parseCapResetTs(body) !== null;
-}
-
 /** A PR comment or review body with its creation time (`null` = missing / unparseable). */
 export interface TimedBody {
   body: string;
@@ -184,29 +178,6 @@ export function countReviewedFailRoundsAfterReset(
   const live = bodies.filter((b) => b.tsMs === null || b.tsMs > resetMs).map((b) => b.body);
   return qaVerdictHistory(live, pr).filter(
     (t) => isFailVerdict(t.verdict) && priorFindingsSection(live, pr, t.round) !== "",
-  ).length;
-}
-
-/**
- * Reviewed FAIL rounds on `pr`, counting only `priorBodies` AFTER the last body
- * with a `Hydra-Cap-Reset:` line (positional: PR comments arrive chronological,
- * reviews after). A CI-only round (no findings table) reviewed nothing and never
- * counts. Kept for `decideQaRoundAction` ONLY, whose result `scripts/qa/route.ts`
- * reads but never uses: the seam's {@link countReviewedFailRoundsAfterReset}
- * count is authoritative and decides the park. Architecture review card 4
- * removes this positional form.
- */
-export function countReviewedFailRoundsSinceReset(
-  priorBodies: ReadonlyArray<string | null | undefined>,
-  pr: number,
-): number {
-  let start = 0;
-  priorBodies.forEach((b, i) => {
-    if (hasResetLine(b)) start = i + 1;
-  });
-  const bodies = priorBodies.slice(start);
-  return qaVerdictHistory(bodies, pr).filter(
-    (t) => isFailVerdict(t.verdict) && priorFindingsSection(bodies, pr, t.round) !== "",
   ).length;
 }
 

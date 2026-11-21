@@ -415,7 +415,7 @@
   "test/qa-reviewer-commit-a.test.mts": 10,
   "test/qa-reviewer-commit-b.test.mts": 8,
   "test/qa-rollout-switches.test.mts": 2,
-  "test/qa-round-action.test.mts": 5,
+  "test/qa-round-action.test.mts": 3,
   "test/qa-shadow-fold.test.mts": 4,
   "test/qa-verdict-cli.test.mts": 2,
   "test/qa-verdict-trailer.test.mts": 4,

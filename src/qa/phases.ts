@@ -14,7 +14,7 @@
  *     the phase falls to its conservative value (INV-5). The prior bodies in
  *     `trailer` and `round-action` ARE the round count and have no
  *     conservative value, so there an unreadable history degrades to a
- *     `QA-Verdict-Error` line / a non-escalating bounce (issue #5081 INV-4).
+ *     `QA-Verdict-Error` line / a no-decision round-action (issue #5081 INV-4).
  *
  * This module performs no I/O itself: only the port touches gh/git.
  */
@@ -32,7 +32,6 @@ import { foldReview } from "./fold.ts";
 import { priorRoundContext, qaVerdictHistory, type AncestryPort } from "./prior-round.ts";
 import type { ReviewerCommitsValue } from "./rollout-switches.ts";
 import {
-  QA_ESCALATION_LABELS,
   decideReviewerCommit,
   decideRound,
   parseFilesOutOfScope,
@@ -142,8 +141,8 @@ async function resolveFact<T>(
  * no conservative value to substitute: `[]` would read as round 1. An
  * unreadable history therefore returns null and the caller emits its DEGRADED
  * shape (issue #5081 INV-4): a `QA-Verdict-Error` line (no `round=`, so it is
- * never counted) / a non-escalating bounce. The round cap cannot reset: a
- * degraded decision never escalates, never block-and-escalates, never PASSes.
+ * never counted) / a no-decision round-action. A degraded decision never
+ * block-and-escalates and never PASSes (the T1-T3 round cap is the seam's).
  */
 async function priorBodiesOrNull(
   supplied: Array<string | null> | undefined,
@@ -284,7 +283,7 @@ export async function runQaVerdictPhase(
       const i = input as QaVerdictCliInput<"round-action">;
       const priorBodies = await priorBodiesOrNull(i.priorBodies, f, i.pr);
       if (priorBodies === null) {
-        console.error(`[qa-verdict] round-action: prior bodies unreadable for PR #${i.pr}, degrading to a bounce`);
+        console.error(`[qa-verdict] round-action: prior bodies unreadable for PR #${i.pr}, degrading to no deep-QA decision`);
         // T4: a degraded decision would be `decideDeepQaAction(verdict, [])` =
         // fail #1, resetting the 2-strike block-and-escalate count. There is no
         // safe degraded T4 answer, so it is a pre-verdict exit (nothing posted,
@@ -293,25 +292,11 @@ export async function runQaVerdictPhase(
         if (i.tier === 4) {
           throw new Error(`round-action: prior bodies unreadable for T4 PR #${i.pr}; deep-QA fail count cannot be read`);
         }
-        return {
-          round: {
-            action: "bounce",
-            round: null,
-            failRound: null,
-            reason: "prior bodies unreadable: round cannot be counted, so this round bounces and never escalates",
-          },
-          deepQa: null,
-          passMarker: null,
-          escalationSummary: null,
-          labels: QA_ESCALATION_LABELS,
-          failMarker: null,
-          degraded: ["prior-bodies"],
-        };
+        return { deepQa: null, passMarker: null, failMarker: null, degraded: ["prior-bodies"] };
       }
       const headSha = await resolveFact(i.headSha, () => f.headSha(i.pr), "head-sha", "", degraded);
       const result = decideRound({
-        tier: i.tier, verdict: i.verdict, reviewVerdict: i.reviewVerdict, pr: i.pr,
-        headSha, priorBodies, currentReviewed: i.currentReviewed, currentTrailer: i.currentTrailer,
+        tier: i.tier, verdict: i.verdict, reviewVerdict: i.reviewVerdict, headSha, priorBodies,
       });
       return { ...result, degraded };
     }
