@@ -1,6 +1,6 @@
 # Coding Standards
 
-The Standards reviewer's rule catalog (ADR-0046). Each rule has a stable ID and one `enforced-by:` line: a repo-relative check path, or `reviewer`. A path followed by `(advisory)` runs only in an advisory workflow and blocks nothing. Findings cite the rule ID. Default severity is low; a rule says when it is higher. Integrity (grammar, 2,000-word ceiling, dangling references) is enforced by `test/coding-standards-integrity.test.mts`.
+The Standards reviewer's rule catalog (ADR-0046). Each rule has a stable ID and one `enforced-by:` line: a repo-relative check path, or `reviewer`. A path marked `(advisory)` blocks nothing. Findings cite the rule ID. Severity defaults to low unless a rule says otherwise. Integrity (grammar, 2,000-word ceiling, dangling references) is enforced by `test/coding-standards-integrity.test.mts`.
 
 ## Code
 
@@ -42,7 +42,7 @@ enforced-by: reviewer
 
 ### STD-ERROR-TYPED-CODE
 
-Exceptional `throw` sites prefer a subclass from `src/errors.ts` (for example `InvalidArgumentError`) over a bare `Error`. Callers and tests discriminate on `err.code`, not `err.message`. Scope is `src/` and `scripts/`; subclass choice and `err.code` discrimination stay with the reviewer.
+Exceptional `throw` sites throw a `HydraError` subclass from `src/errors.ts`, never a bare `Error`; new error classes extend `HydraError`. `InvalidArgumentError` means bad caller input, not parse or I/O failure. Callers and tests discriminate on `err.code`, not `err.message`. Scope is `src/` and `scripts/`; subclass fit stays with the reviewer.
 
 enforced-by: src/ast-grep-rules/typed-error-throw.yml (advisory), reviewer
 
