@@ -55,6 +55,11 @@ fixture (grandfathered rows only shrink). The mutation gate counts unparseable m
 separate T4 decision). The 20 runnable structure-sensitive pins convert in ~4 cluster issues;
 `docs/generated/` inventories drop `"line"` fields.
 
+**Amendment — MUTATION_GATE_BLOCKING on at T3 floor 50 (2026-11-20, issue #5273).** Operator
+decision after 37 complete in-budget verdicts (min 50, median 78): `ci.yml` now passes
+`MUTATION_GATE_BLOCKING` (fallback `1`; repo variable `0` pauses it) and the T3/T4 floor is 50.
+Timed-out and no-signal verdicts stay non-blocking. Ratchet the floor up from the observed distribution.
+
 ### Decision 5 — Review depth is set by reversibility, not tier alone (#5190, #5191)
 
 - One-way = revert plus redeploy does not restore the world: persistent state, external side effects,

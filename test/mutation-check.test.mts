@@ -15,6 +15,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   filterMutationCandidates,
   selectKillFloor,
@@ -228,7 +229,7 @@ describe("filterMutationCandidates — diff scoping (issue #653)", () => {
 
 describe("selectKillFloor — per-tier mutation floor (issue #778)", () => {
   const BASE = 30; // MUTATION_KILL_RATE_FLOOR default
-  const T3 = 55; // MUTATION_KILL_RATE_FLOOR_T3 default
+  const T3 = 50; // MUTATION_KILL_RATE_FLOOR_T3 default (issue #5273)
 
   test("T1 diffs use the base floor (no behavior change — AC#2)", () => {
     assert.equal(selectKillFloor(1, BASE, T3), 30);
@@ -239,14 +240,14 @@ describe("selectKillFloor — per-tier mutation floor (issue #778)", () => {
   });
 
   test("T3 diffs use the raised T3 floor (AC#1)", () => {
-    assert.equal(selectKillFloor(3, BASE, T3), 55);
+    assert.equal(selectKillFloor(3, BASE, T3), 50);
   });
 
   test("T4 inherits the T3 floor — never below it (tier>=3 predicate)", () => {
     // ADR-0015 monotonic ladder: T4 inherits T3's verification depth.
     // A tier===3 predicate would wrongly relax the floor for Verifier-Core
     // diffs; the predicate must be tier>=3.
-    assert.equal(selectKillFloor(4, BASE, T3), 55);
+    assert.equal(selectKillFloor(4, BASE, T3), 50);
   });
 
   test("selection is pure + deterministic from the tier integer (AC#3)", () => {
@@ -264,13 +265,13 @@ describe("selectKillFloor — per-tier mutation floor (issue #778)", () => {
 
   test("missing / non-finite tier falls back to the conservative T3 band", () => {
     // A garbled or absent PR_TIER must NOT silently relax the floor.
-    assert.equal(selectKillFloor(NaN, BASE, T3), 55);
-    assert.equal(selectKillFloor(Number.POSITIVE_INFINITY, BASE, T3), 55);
+    assert.equal(selectKillFloor(NaN, BASE, T3), 50);
+    assert.equal(selectKillFloor(Number.POSITIVE_INFINITY, BASE, T3), 50);
   });
 
   test("tiers above 4 still resolve to the T3 band (defensive >= )", () => {
     // Should never happen (Tier is 1|2|3|4) but the predicate stays safe.
-    assert.equal(selectKillFloor(5, BASE, T3), 55);
+    assert.equal(selectKillFloor(5, BASE, T3), 50);
   });
 });
 
@@ -564,6 +565,17 @@ describe("non-blocking rollout switch + conclusive kill rate (issue #4504)", () 
     assert.deepEqual(resolveKillRateVerdict(20, 55, false), { status: "warn", wouldFail: true, exitCode: 0 });
     assert.deepEqual(resolveKillRateVerdict(20, 55, true), { status: "fail", wouldFail: true, exitCode: 2 });
     assert.deepEqual(resolveKillRateVerdict(55, 55, false), { status: "pass", wouldFail: false, exitCode: 0 });
+  });
+
+  test("resolveKillRateVerdict: blocking at the T3 floor of 50 is inclusive (issue #5273)", () => {
+    assert.deepEqual(resolveKillRateVerdict(49, 50, true), { status: "fail", wouldFail: true, exitCode: 2 });
+    assert.deepEqual(resolveKillRateVerdict(50, 50, true), { status: "pass", wouldFail: false, exitCode: 0 });
+  });
+
+  test("ci.yml mutation gate step turns blocking on at T3 floor 50 (issue #5273)", () => {
+    const yml = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+    assert.ok(yml.includes("MUTATION_GATE_BLOCKING: ${{ vars.MUTATION_GATE_BLOCKING || '1' }}"));
+    assert.ok(yml.includes("MUTATION_KILL_RATE_FLOOR_T3: ${{ vars.MUTATION_KILL_RATE_FLOOR_T3 || '50' }}"));
   });
 
   test("conclusiveMutants excludes inconclusive + no-coverage + skipped", () => {
