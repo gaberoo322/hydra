@@ -28,7 +28,7 @@ export interface QaBounceInput {
 
 export type QaBounceResult =
   | { ok: true; to: "needs-dev-resume" | "ready-for-agent" }
-  | { ok: false; code: `parked:${string}`; counts: readonly CapCount[] }
+  | { ok: false; code: `parked:${string}` | `escalated:${string}`; counts: readonly CapCount[] }
   | { ok: false; code: string };
 
 export async function qaBounce(input: QaBounceInput, deps: SeamDeps): Promise<QaBounceResult> {
@@ -52,8 +52,8 @@ export async function qaBounce(input: QaBounceInput, deps: SeamDeps): Promise<Qa
       once,
     );
     if (res.ok === true) return { ok: true, to };
-    if (res.code.startsWith("parked:") && res.counts !== undefined) {
-      return { ok: false, code: res.code as `parked:${string}`, counts: res.counts };
+    if ((res.code.startsWith("parked:") || res.code.startsWith("escalated:")) && res.counts !== undefined) {
+      return { ok: false, code: res.code as `parked:${string}` | `escalated:${string}`, counts: res.counts };
     }
     return { ok: false, code: res.code };
   } catch (err) {

@@ -34,6 +34,8 @@ import {
 import { isUnsanctionedHoldExit } from "./hold-exit.ts";
 import {
   buildSeedEvidence,
+  capExitOf,
+  countDeepQaFailsAfterReset,
   countReviewedFailRoundsAfterReset,
   evaluateCaps,
   isLiveArm,
@@ -42,6 +44,7 @@ import {
   resolveCapLimits,
   type CapAttempt,
   type CapCount,
+  type CapExitCode,
   type CapEvaluation,
   type TimelineLabelEvent,
 } from "./caps.ts";
@@ -92,10 +95,12 @@ async function checkCaps(
       timeline = t.value;
     }
     let trailerRounds: number | null = null;
+    let deepQaFails: number | null = null;
     if (pr !== null) {
       const bodies = await deps.fetch.prBodies(pr);
       if (bodies.ok === false) return { status: "skipped" };
       trailerRounds = countReviewedFailRoundsAfterReset(bodies.value, pr, resetMs);
+      deepQaFails = countDeepQaFailsAfterReset(bodies.value, resetMs);
     }
     const evaluation = evaluateCaps({
       attempt,
@@ -104,6 +109,7 @@ async function checkCaps(
       resetMs,
       timeline,
       trailerRounds,
+      deepQaFails,
       limits: resolved.limits,
     });
     return { status: "checked", evaluation };
@@ -134,10 +140,10 @@ class CapStamp {
   }
 }
 
-/** A throwaway entry shaped like the park transition, used only to compute seed contributions. */
+/** A throwaway entry shaped like the cap-exit transition, used only to compute seed contributions. */
 function parkEntryProbe(deps: SeamDeps, over: NonNullable<CapEvaluation["over"]>): LifecycleJournalEntry {
   return {
-    v: 1, ts: deps.now(), kind: "transition", from: null, to: "parked", source: "cli", actor: "cli",
+    v: 1, ts: deps.now(), kind: "transition", from: null, to: capExitOf(over.arm) === "escalate" ? "ready-for-human" : "parked", source: "cli", actor: "cli",
     evidence: {}, reason: `cap:${over.arm}`, rationale: null, result: `parked:${over.arm}`, written: true,
   };
 }
@@ -185,7 +191,8 @@ interface CapGuardAttempt {
 
 type CapGuard =
   | {
-      parked: { code: `parked:${string}`; written: boolean; counts: readonly CapCount[] };
+      /** The cap exit landed (a park or an escalation); `code` is `parked:<arm>` or `escalated:<arm>`. */
+      parked: { code: CapExitCode; written: boolean; counts: readonly CapCount[] };
       stamp?: undefined;
       shadowOver?: undefined;
     }
@@ -220,7 +227,11 @@ export async function guardCaps(a: CapGuardAttempt, deps: SeamDeps, mode: Lifecy
       deps,
     );
     return {
-      parked: { code: `parked:${over.arm}`, written: park.written, counts: check.evaluation.counts },
+      parked: {
+        code: capExitOf(over.arm) === "escalate" ? `escalated:${over.arm}` : `parked:${over.arm}`,
+        written: park.written,
+        counts: check.evaluation.counts,
+      },
     };
   }
   return { parked: null, stamp, shadowOver: over };
@@ -281,7 +292,7 @@ export type AdvanceResult =
       code: string;
       mode: LifecycleMode | null;
       written: boolean;
-      /** A `parked:<arm>` refusal carries the arm counts `parkForCap` rendered, so every caller sees why. */
+      /** A `parked:<arm>` or `escalated:<arm>` refusal carries the arm counts `parkForCap` rendered, so every caller sees why. */
       counts?: readonly CapCount[];
     };
 

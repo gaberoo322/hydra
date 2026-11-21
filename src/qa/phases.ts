@@ -285,13 +285,12 @@ export async function runQaVerdictPhase(
       const priorBodies = await priorBodiesOrNull(i.priorBodies, f, i.pr);
       if (priorBodies === null) {
         console.error(`[qa-verdict] round-action: prior bodies unreadable for PR #${i.pr}, degrading to a bounce`);
-        // T4: a degraded decision would be `decideDeepQaAction(verdict, [])` =
-        // fail #1, resetting the 2-strike block-and-escalate count. There is no
-        // safe degraded T4 answer, so it is a pre-verdict exit (nothing posted,
-        // needs-qa stays, the next dispatch retries). T1-T3 carry no deep-QA
-        // state: deepQa / failMarker / passMarker are null as in the normal path.
+        // T4: the round number and the head-bound markers cannot be rendered without the prior
+        // bodies, so there is no safe degraded T4 answer: it is a pre-verdict exit (nothing posted,
+        // needs-qa stays, the next dispatch retries). T1-T3 carry no deep-QA state:
+        // failMarker / passMarker are null as in the normal path.
         if (i.tier === 4) {
-          throw new Error(`round-action: prior bodies unreadable for T4 PR #${i.pr}; deep-QA fail count cannot be read`);
+          throw new Error(`round-action: prior bodies unreadable for T4 PR #${i.pr}; the round cannot be numbered`);
         }
         return {
           round: {
@@ -300,7 +299,6 @@ export async function runQaVerdictPhase(
             failRound: null,
             reason: "prior bodies unreadable: round cannot be counted, so this round bounces and never escalates",
           },
-          deepQa: null,
           passMarker: null,
           escalationSummary: null,
           labels: QA_ESCALATION_LABELS,

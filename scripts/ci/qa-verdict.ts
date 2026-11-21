@@ -76,7 +76,6 @@ export {
 export {
   DEEP_QA_FAIL_MARKER,
   QA_ESCALATION_LABELS,
-  decideDeepQaAction,
   decideQaRoundAction,
   hasFreshDeepQaPass,
   renderDeepQaPassMarker,
