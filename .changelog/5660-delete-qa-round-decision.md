@@ -1,0 +1,1 @@
+- refactor: delete the unused QA round decision; the park comment summary now renders from the lifecycle seam counts (#5660)

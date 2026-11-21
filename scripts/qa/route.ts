@@ -12,9 +12,9 @@
  * reaches the fold and fails closed to the `reviewer-output-malformed` high
  * blocker), then the step-10 / step-6.6 effects, then ONE JSON result.
  *
- * No verdict rule lives here. The verdict literal, the round cap, the Deep-QA
- * action, the PASS/FAIL markers and the escalation label sets all come from the
- * engine's result; this file only spells the comment bodies (byte-for-byte the
+ * No verdict rule lives here. The verdict literal, the Deep-QA action and the
+ * PASS/FAIL markers come from the engine's result, and the T1-T3 round cap is
+ * the lifecycle seam's park (this file only renders its counts); this file only spells the comment bodies (byte-for-byte the
  * playbook's old bash templates) and the gh calls, in a pinned order.
  *
  * Reviewer commit, class A (issue #5415, ADR-0046 Decision 2): on a reviewed FAIL the
@@ -57,6 +57,7 @@ import {
   type PlumbingPorts,
   type SeamMoveResult,
 } from "./_lib.ts";
+import { renderCapCounts, type CapCount } from "../../src/lifecycle/caps.ts";
 import type { QaBounceResult } from "../../src/lifecycle/qa-bounce.ts";
 import { readPreflight } from "./packet.ts";
 import {
@@ -143,7 +144,21 @@ export const SKIP_REVIEW_REPORT = `_${QA_ADMISSION_SKIP_MARKER} (issue #3815): a
 /** The lifecycle-seam actor of every QA state move (the trailer-less defer arm admits only this one). */
 const QA_ACTOR = "hydra-qa";
 
-const ESC_FALLBACK_SUMMARY = "See the PR thread for the round-by-round findings.";
+/**
+ * The park comment's summary, rendered from the counts the seam's `parked:<arm>`
+ * refusal carries (the seam is the only round counter). Pure and total: a missing or
+ * arm-less `counts` still names the arm from the `parked:<arm>` code.
+ */
+export function renderParkSummary(code: string, counts: readonly CapCount[] | undefined): string {
+  const arm = code.startsWith("parked:") ? code.slice("parked:".length) : code;
+  const all = counts ?? [];
+  const over = all.find((c) => c.arm === arm);
+  const head = over
+    ? `This PR reached the QA round cap: \`${arm}\` is at ${over.count}/${over.limit} (per ${over.unit}), so QA is not bouncing it to dev again.`
+    : `This PR reached the QA round cap: \`${arm}\`, so QA is not bouncing it to dev again.`;
+  const table = all.length > 0 ? ` All arms: ${renderCapCounts(all)}.` : "";
+  return `${head}${table} Each round's findings table is in the QA comments on the PR.`;
+}
 
 /** A pre-verdict failure with its own `QA-Verdict-Error reason=` (default: `fold-phase-failed`). */
 class PreVerdictError extends Error {
@@ -595,11 +610,7 @@ async function runRouteImpl(
     tier,
     verdict,
     reviewVerdict,
-    currentReviewed,
-    currentTrailer: trailer,
   });
-  const round = isRecord(roundOut.round) ? roundOut.round : {};
-  const roundAction = requireField(round.action as string | undefined, "round.action");
   if (Array.isArray(roundOut.degraded)) degraded.push(...roundOut.degraded.map(String));
   if (Array.isArray(trailerOut.degraded)) degraded.push(...trailerOut.degraded.map(String));
 
@@ -662,9 +673,9 @@ async function runRouteImpl(
       }
       if (escalated) {
         // The seam wrote ready-for-human (t4-deep-qa-exhausted) and posted the unified cap comment itself.
-      } else if (escalate) {
+      } else if (adv.ok === false && escalate) {
         // Off-list escalation (ADR-0047 D6): the issue is PARKED, never ready-for-human.
-        const esc = typeof roundOut.escalationSummary === "string" && roundOut.escalationSummary !== "" ? roundOut.escalationSummary : ESC_FALLBACK_SUMMARY;
+        const esc = renderParkSummary(adv.code, "counts" in adv ? adv.counts : undefined);
         await issueComment(bodies.failEscalated(verdict, pr, summary, esc, trailer), "escalate-issue-comment");
       } else if (label === "needs-dev-resume") {
         await issueComment(

@@ -1,5 +1,5 @@
 /**
- * src/qa/round-action.ts — the round-action phase: bounce / escalate (T1-T3 round cap) and the T4 deep-QA remediation loop + PASS marker.
+ * src/qa/round-action.ts — the round-action phase: the T4 deep-QA remediation loop + PASS marker (the T1-T3 round cap is the lifecycle seam's Cap Arm).
  *
  * Moved verbatim out of scripts/ci/qa-verdict.ts (issue #5079, qa-verdict-engine
  * slice 2/4; ADR-0038). Pure — no fs/network. The workflow-facing facade
@@ -13,9 +13,8 @@ import { classifyQaFixPath } from "./fix-proof.ts";
 import { detectOneWayDoor, requiresOneWayDepth } from "./one-way-door.ts";
 import type { ReviewerCommitsValue } from "./rollout-switches.ts";
 import { FOLLOW_UPS_HEADING } from "./fold.ts";
-import { qaVerdictHistory } from "./prior-round.ts";
-import { CAP_DEFAULTS, DEEP_QA_FAIL_MARKER, countReviewedFailRoundsSinceReset } from "../lifecycle/caps.ts";
-import { isFailVerdict, nextQaVerdictRound, type FinalVerdict, type QaVerdictTrailer } from "./verdict-trailer.ts";
+import { DEEP_QA_FAIL_MARKER } from "../lifecycle/caps.ts";
+import type { FinalVerdict } from "./verdict-trailer.ts";
 
 /**
  * T4 Deep-QA Remediation Loop (issue #740, ADR-0015; #5662).
@@ -95,28 +94,11 @@ export function hasFreshDeepQaPass(
 }
 
 // ---------------------------------------------------------------------------
-// Convergent QA (issue #4735): round cap, re-review context.
+// Convergent QA (issue #4735): the admission-skip marker.
 //
-// A 150-PR audit found 17 of 67 FAIL rounds raised a blocker that had already
-// existed at an earlier round, and single PRs bounced up to 7 times. Two rules
-// make re-review convergent, both read from the `QA-Verdict:` trailers on the
-// PR (the PR is the ledger; no new Redis key or counter):
-//
-// - Round cap: the 3rd FAIL round on a T1–T3 PR escalates to the operator
-//   (`ready-for-human`) instead of bouncing to dev again. T4 FAILs are counted
-//   by the seam's `deep-qa-fails` arm (2nd FAIL escalates), not here.
-// - Re-review context (prompt only): after a FAIL, reviewers also get the prior
-//   findings table and, when the prior `sha=` is safely usable,
-//   `git diff <prior sha>..HEAD`. They still review the FULL diff, and
-//   `foldReviewFindings` alone decides the verdict: no code here filters,
-//   demotes or narrows a finding (operator decision on #4735, after two QA
-//   rounds found fail-open holes in a code-level re-review filter).
-//
-// Pure, never throws.
+// The round cap itself is a Cap Arm owned by the lifecycle seam (`qaBounce` parks
+// the 3rd reviewed FAIL round, ADR-0047 D6); nothing in this module decides it.
 // ---------------------------------------------------------------------------
-
-/** The FAIL round (1-based, per PR) at which T1–T3 QA escalates instead of bouncing. */
-export const QA_FAIL_ROUND_CAP = CAP_DEFAULTS["qa-fail-rounds"];
 
 /**
  * The marker text the step-6.6 admission-gate skip path puts in its
@@ -127,208 +109,38 @@ export const QA_FAIL_ROUND_CAP = CAP_DEFAULTS["qa-fail-rounds"];
  */
 export const QA_ADMISSION_SKIP_MARKER = "Review skipped by the admission gate";
 
-/**
- * Label routing for an escalated issue and its PR. Every dev lane keys on
- * `ready-for-agent` (dev_orch, the GLM drainer via `glmLane`) or
- * `needs-dev-resume` (the pinned resume / GLM forward-fix), so both are
- * removed; `ready-for-human` on the PR also drops it from collect-state's
- * dev-resume pick, which skips a `ready-for-human` PR.
- */
-export const QA_ESCALATION_LABELS: {
-  issueRemove: readonly string[];
-  issueAdd: readonly string[];
-  prAdd: readonly string[];
-} = {
-  issueRemove: ["needs-qa", "ready-for-agent", "needs-dev-resume", "in-progress"],
-  issueAdd: ["ready-for-human"],
-  prAdd: ["ready-for-human"],
-};
-
-export type QaRoundAction = "proceed" | "bounce" | "escalate" | "deep-qa";
-
-export interface QaRoundDecision {
-  /**
-   * - `proceed` — the verdict is not a FAIL; normal routing.
-   * - `bounce` — FAIL rounds 1–2: the universal remediation loop.
-   * - `escalate` — FAIL round 3+ on T1–T3: `ready-for-human`, no dev bounce.
-   * - `deep-qa` — T4: the seam's `deep-qa-fails` arm owns FAIL routing (#5662).
-   */
-  action: QaRoundAction;
-  /** The round this verdict's trailer carries (`nextQaVerdictRound`). */
-  round: number;
-  /** 1-based FAIL round this verdict represents; null unless bounce/escalate. */
-  failRound: number | null;
-  reason: string;
-}
-
-/**
- * Bounce or escalate a T1–T3 FAIL, from the FAIL rounds already on the PR.
- * Only REVIEWED FAIL rounds count: a round whose comment has a `### Findings`
- * table (`priorFindingsSection`). A CI-only `skip-required-failed` round
- * reviewed nothing, so an ambient red required check can never walk a PR to
- * the cap (PR #4759 QA r1). `failRound` = reviewed prior FAIL rounds (by
- * `round=`) + 1 when the current round was reviewed (`currentReviewed`,
- * default true); a CI-only current round never escalates. A null tier is
- * routed like T1–T3, the same as the playbook's step-10 FAIL block.
- */
-export function decideQaRoundAction(input: {
-  tier: number | null;
-  verdict: FinalVerdict | string;
-  pr: number;
-  priorBodies: ReadonlyArray<string | null | undefined>;
-  currentReviewed?: boolean;
-}): QaRoundDecision {
-  const round = nextQaVerdictRound(input.priorBodies, input.pr);
-  if (input.tier === 4) {
-    return { action: "deep-qa", round, failRound: null, reason: "T4 Verifier-Core: the seam's deep-qa-fails arm owns FAIL routing (2nd FAIL escalates)." };
-  }
-  const verdict = String(input.verdict ?? "").trim() as FinalVerdict;
-  if (!isFailVerdict(verdict)) {
-    return { action: "proceed", round, failRound: null, reason: "Not a FAIL — normal verdict routing." };
-  }
-  // Only rounds after the latest `Hydra-Cap-Reset:` marker count (ADR-0047 D6). This positional
-  // count is advisory: `scripts/qa/route.ts` reads the decision but never acts on it. The seam's
-  // timestamped `countReviewedFailRoundsAfterReset` is authoritative and decides the park.
-  const priorFails = countReviewedFailRoundsSinceReset(input.priorBodies, input.pr);
-  const currentReviewed = input.currentReviewed !== false;
-  const failRound = priorFails + (currentReviewed ? 1 : 0);
-  if (currentReviewed && failRound >= QA_FAIL_ROUND_CAP) {
-    return {
-      action: "escalate",
-      round,
-      failRound,
-      reason: `FAIL round ${failRound} on this PR (cap ${QA_FAIL_ROUND_CAP}) — escalate to the operator (the issue is parked); no further dev bounce.`,
-    };
-  }
-  return {
-    action: "bounce",
-    round,
-    failRound,
-    reason: `FAIL round ${failRound} of ${QA_FAIL_ROUND_CAP} — bounce to dev (the universal remediation loop).`,
-  };
-}
-
-export type QaEscalationRecommendation = "redesign" | "accept-with-follow-ups" | "close";
-
-const RECOMMENDATION_LABEL: Record<QaEscalationRecommendation, string> = {
-  redesign: "redesign via grill",
-  "accept-with-follow-ups": "accept with follow-ups",
-  close: "close",
-};
-
-/**
- * Recommend how the operator should resolve an escalated PR, from its FAIL
- * rounds (in round order). A high blocker still open, or blockers that are
- * not falling, means the approach is not converging → redesign. Fewer,
- * medium-or-lower blockers than round 1 → accept with follow-ups. `close` is
- * always offered as an option but is the operator's call, never computed.
- */
-export function recommendQaEscalation(
-  failRounds: ReadonlyArray<Pick<QaVerdictTrailer, "blockers" | "maxSeverity">>,
-): { recommendation: QaEscalationRecommendation; reason: string } {
-  const first = failRounds[0];
-  const last = failRounds[failRounds.length - 1];
-  if (!first || !last) {
-    return { recommendation: "redesign", reason: "No FAIL rounds could be read — review the PR from scratch." };
-  }
-  if (last.maxSeverity === "high") {
-    return { recommendation: "redesign", reason: "A high-severity blocker is still open in the latest round — the approach likely needs a redesign." };
-  }
-  if (last.blockers < first.blockers) {
-    return {
-      recommendation: "accept-with-follow-ups",
-      reason: `Blockers fell from ${first.blockers} to ${last.blockers} and none is high — the rest may be fine as tracked follow-ups.`,
-    };
-  }
-  return { recommendation: "redesign", reason: `Blockers did not fall (${first.blockers} → ${last.blockers}) — the rounds are not converging.` };
-}
-
-/**
- * The escalation comment body (before the trailer): one table row per QA
- * round on the PR (last 10), the recommendation, and the three options.
- * Rounds come from the PR's trailers plus the current trailer; an
- * unparseable current trailer is simply left out, never fatal.
- */
-export function renderQaEscalationSummary(input: {
-  pr: number;
-  priorBodies: ReadonlyArray<string | null | undefined>;
-  currentTrailer: string;
-}): string {
-  const history = qaVerdictHistory([...input.priorBodies, input.currentTrailer], input.pr);
-  const fails = history.filter((t) => isFailVerdict(t.verdict));
-  const rec = recommendQaEscalation(fails);
-  const rows = history.slice(-10).map((t) => `| ${t.round} | ${t.verdict} | ${t.sha} | ${t.blockers} | ${t.maxSeverity} |`);
-  return [
-    `This PR reached the QA round cap (${QA_FAIL_ROUND_CAP} reviewed FAIL rounds), so QA is not bouncing it to dev again.`,
-    "",
-    "| Round | Verdict | SHA | Blockers | Max severity |",
-    "|---|---|---|---|---|",
-    ...rows,
-    "",
-    `**Recommendation: ${RECOMMENDATION_LABEL[rec.recommendation]}** — ${rec.reason}`,
-    "",
-    "Options: (1) **redesign** — re-grill the issue (`hydra-grill`) and close this PR; " +
-      "(2) **accept with follow-ups** — merge after your review and file the open findings as issues; " +
-      "(3) **close** — close the PR and the issue. Each round's findings table is in the QA comments on the PR.",
-  ].join("\n");
-}
-
 // ---------------------------------------------------------------------------
 // Phase head (issue #5079, INV-3): the ONE composed entry the round-action
-// step binds to. T1-T3: decideQaRoundAction (+ renderQaEscalationSummary when
-// it escalates). T4: the FAIL or SHA-bound PASS marker. No new
-// rule — every branch below is owned by the helpers it calls.
+// step binds to. Only T4 has a decision here: the FAIL marker or the
+// SHA-bound PASS marker. T1-T3 carry no deep-QA state. No new rule — every
+// branch below is owned by the helpers it calls.
 // ---------------------------------------------------------------------------
 
 export interface DecideRoundInput {
   tier: number | null;
   /** The final verdict literal (PASS / FAIL / PASS-pending-CI / FAIL-pending-CI). */
   verdict: FinalVerdict | string;
-  /** The folded review verdict, the input of the T4 deep-QA loop. */
+  /** The folded review verdict (a T4 PASS needs both the verdict and the review to be non-FAIL). */
   reviewVerdict: ReviewVerdict;
-  pr: number;
   headSha: string;
-  priorBodies: ReadonlyArray<string | null | undefined>;
-  currentReviewed?: boolean;
-  /** The current round's rendered trailer (for the escalation summary table). */
-  currentTrailer?: string;
 }
 
 export interface DecideRoundResult {
-  round: QaRoundDecision;
   /** The T4 `Verifier-Core deep-QA: PASS @ <sha>` line; set only on a T4 round that did not FAIL. */
   passMarker: string | null;
-  /** The structured escalation comment; set exactly when `round.action === "escalate"`. */
-  escalationSummary: string | null;
-  /** The escalation label sets, always present so the playbook spells no label name (issue #5081). */
-  labels: typeof QA_ESCALATION_LABELS;
   /** `DEEP_QA_FAIL_MARKER` on a T4 FAIL round, else null (issue #5081). */
   failMarker: string | null;
 }
 
 export function decideRound(input: DecideRoundInput): DecideRoundResult {
-  const round = decideQaRoundAction({
-    tier: input.tier,
-    verdict: input.verdict,
-    pr: input.pr,
-    priorBodies: input.priorBodies,
-    currentReviewed: input.currentReviewed,
-  });
+  if (input.tier !== 4) return { passMarker: null, failMarker: null };
   // A T4 FAIL driven by CI alone (review PASS, a required check red) is still a deep-QA FAIL:
   // it carries the marker and never the PASS proof (QA round-1 finding on #5306).
-  const t4Fail = round.action === "deep-qa" && (String(input.verdict).startsWith("FAIL") || input.reviewVerdict === "FAIL");
+  const fail = String(input.verdict).startsWith("FAIL") || input.reviewVerdict === "FAIL";
   // Only a T4 PASS carries the SHA-bound proof `hasFreshDeepQaPass` trusts.
-  const passMarker = round.action === "deep-qa" && !t4Fail ? renderDeepQaPassMarker(input.headSha) : null;
-  const escalationSummary =
-    round.action === "escalate"
-      ? renderQaEscalationSummary({
-          pr: input.pr,
-          priorBodies: input.priorBodies,
-          currentTrailer: input.currentTrailer ?? "",
-        })
-      : null;
-  const failMarker = t4Fail ? DEEP_QA_FAIL_MARKER : null;
-  return { round, passMarker, escalationSummary, labels: QA_ESCALATION_LABELS, failMarker };
+  return fail
+    ? { passMarker: null, failMarker: DEEP_QA_FAIL_MARKER }
+    : { passMarker: renderDeepQaPassMarker(input.headSha), failMarker: null };
 }
 
 // ---------------------------------------------------------------------------

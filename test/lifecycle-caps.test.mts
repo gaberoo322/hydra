@@ -15,7 +15,6 @@ import {
   classRole,
   countDeepQaFailsAfterReset,
   countReviewedFailRoundsAfterReset,
-  countReviewedFailRoundsSinceReset,
   evaluateCaps,
   latestResetMs,
   parseCapResetTs,
@@ -145,15 +144,20 @@ describe("reset marker (INV-4, INV-5)", () => {
     assert.equal(latestResetMs(["x", "Hydra-Cap-Reset: by=op ts=garbage"]), 0);
   });
 
-  test("countReviewedFailRoundsSinceReset counts only bodies after the last marker", () => {
-    const bodies = [failBody(7, 1), failBody(7, 2), "Hydra-Cap-Reset: by=op ts=2026-11-04T10:00:00Z", failBody(7, 3)];
-    assert.equal(countReviewedFailRoundsSinceReset(bodies.slice(0, 2), 7), 2);
-    assert.equal(countReviewedFailRoundsSinceReset(bodies, 7), 1);
+  test("countReviewedFailRoundsAfterReset counts only bodies newer than a reset marker's ts", () => {
+    const T0 = Date.parse("2026-11-04T10:00:00Z");
+    const marker: TimedBody = { body: "Hydra-Cap-Reset: by=op ts=2026-11-04T10:00:00Z", tsMs: T0 };
+    const f = (round: number, min: number): TimedBody => ({ body: failBody(7, round), tsMs: T0 + min * 60_000 });
+    assert.equal(countReviewedFailRoundsAfterReset([f(1, -3), f(2, -2)], 7, 0), 2);
+    assert.equal(countReviewedFailRoundsAfterReset([f(1, -3), f(2, -2), marker, f(3, 1)], 7, 0), 1);
   });
 
   test("a malformed Hydra-Cap-Reset line does NOT reset the PR-side round count (INV-4)", () => {
+    const T0 = Date.parse("2026-11-04T10:00:00Z");
+    const f = (round: number, min: number): TimedBody => ({ body: failBody(7, round), tsMs: T0 + min * 60_000 });
     for (const bad of ["Hydra-Cap-Reset: garbage", "Hydra-Cap-Reset: by=op", "Hydra-Cap-Reset: by=op ts=notadate"]) {
-      assert.equal(countReviewedFailRoundsSinceReset([failBody(7, 1), failBody(7, 2), bad, failBody(7, 3)], 7), 3, bad);
+      const badBody: TimedBody = { body: bad, tsMs: T0 };
+      assert.equal(countReviewedFailRoundsAfterReset([f(1, -3), f(2, -2), badBody, f(3, 1)], 7, 0), 3, bad);
     }
   });
 });
