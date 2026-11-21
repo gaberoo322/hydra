@@ -98,7 +98,11 @@ async function checkCaps(
     let deepQaFails: number | null = null;
     if (pr !== null) {
       const bodies = await deps.fetch.prBodies(pr);
-      if (bodies.ok === false) return { status: "skipped" };
+      if (bodies.ok === false) {
+        // INV-12: never park on a degraded read. The qa-verdict gate already refuses a qa-fail bounce on this failure.
+        logger.warn({ issue, pr, attempt: attempt.kind }, "[lifecycle] PR bodies unreadable; cap check skipped for this call");
+        return { status: "skipped" };
+      }
       trailerRounds = countReviewedFailRoundsAfterReset(bodies.value, pr, resetMs);
       deepQaFails = countDeepQaFailsAfterReset(bodies.value, resetMs);
     }

@@ -766,6 +766,25 @@ describe("caps as data (#5421)", () => {
   });
 });
 
+describe("qa-fail edge with unreadable PR bodies (#5662 QA round 2)", () => {
+  test("a T4 FAIL bounce with unreadable PR bodies fails closed at the qa-verdict gate: refused fetch-failed, nothing written", async () => {
+    const w = world("enforce", ["needs-qa"]);
+    w.fetchFail.add("prBodies");
+    const res = (await advance({ issue: 42, to: "needs-dev-resume", evidence: { pr: "5" } }, w.deps)) as any;
+    assert.equal(res.ok, false);
+    assert.equal(res.code, "fetch-failed");
+    assert.deepEqual(w.edits, []);
+  });
+
+  test("sibling shape: with the bodies readable the second deep-QA FAIL marker still escalates", async () => {
+    const w = world("enforce", ["needs-qa"]);
+    w.prBodies = ["Verifier-Core deep-QA: FAIL", "Verifier-Core deep-QA: FAIL"];
+    const res = (await advance({ issue: 42, to: "needs-dev-resume", evidence: { pr: "5" } }, w.deps)) as any;
+    assert.equal(res.ok, false);
+    assert.equal(res.code, "escalated:deep-qa-fails");
+  });
+});
+
 describe("resetsCapsOnExit (#5661 INV-1)", () => {
   test("true only for the two Cap Arm human-hold states", () => {
     for (const s of ["parked", "ready-for-human"]) assert.equal(resetsCapsOnExit(s), true, s);
