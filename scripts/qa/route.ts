@@ -673,6 +673,10 @@ async function runRouteImpl(
       }
       if (escalated) {
         // The seam wrote ready-for-human (t4-deep-qa-exhausted) and posted the unified cap comment itself.
+        // Fail loudly when that write did not land: an unwritten escalation must never read as success.
+        if (adv.ok === false && "written" in adv && adv.written === false) {
+          throw new Error("lifecycle escalation refused (escalated:deep-qa-fails not written) - not editing labels by hand");
+        }
       } else if (adv.ok === false && escalate) {
         // Off-list escalation (ADR-0047 D6): the issue is PARKED, never ready-for-human.
         const esc = renderParkSummary(adv.code, "counts" in adv ? adv.counts : undefined);

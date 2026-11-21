@@ -13,7 +13,7 @@
  * (STD-VERIFY-NEVER-THROW); every outcome is a result object.
  */
 import { logger } from "../logger.ts";
-import type { CapCount } from "./caps.ts";
+import type { CapCount, CapExitCode } from "./caps.ts";
 import { qaBounceTargetOf, type Fetched, type QaLivePr } from "./gates.ts";
 import { advance } from "./seam.ts";
 import type { SeamDeps } from "./seam-deps.ts";
@@ -28,7 +28,7 @@ export interface QaBounceInput {
 
 export type QaBounceResult =
   | { ok: true; to: "needs-dev-resume" | "ready-for-agent" }
-  | { ok: false; code: `parked:${string}` | `escalated:${string}`; counts: readonly CapCount[] }
+  | { ok: false; code: CapExitCode; counts: readonly CapCount[]; /** Whether the cap-exit label write landed. */ written?: boolean }
   | { ok: false; code: string };
 
 export async function qaBounce(input: QaBounceInput, deps: SeamDeps): Promise<QaBounceResult> {
@@ -53,7 +53,7 @@ export async function qaBounce(input: QaBounceInput, deps: SeamDeps): Promise<Qa
     );
     if (res.ok === true) return { ok: true, to };
     if ((res.code.startsWith("parked:") || res.code.startsWith("escalated:")) && res.counts !== undefined) {
-      return { ok: false, code: res.code as `parked:${string}` | `escalated:${string}`, counts: res.counts };
+      return { ok: false, code: res.code as CapExitCode, counts: res.counts, written: res.written };
     }
     return { ok: false, code: res.code };
   } catch (err) {

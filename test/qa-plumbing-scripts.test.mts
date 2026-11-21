@@ -104,6 +104,8 @@ interface HarnessOptions {
   advanceHandler?: (args: string[]) => Partial<SeamOutcome> | undefined;
   /** The counts a `parked:<arm>` bounce refusal carries (default: none). */
   parkCounts?: CapCount[];
+  /** Whether an `escalated:<arm>` bounce refusal's exit write landed (default: omitted, as a pre-#5662 seam). */
+  exitWritten?: boolean;
   http?: PlumbingPorts["http"];
   fetchers?: QaVerdictFetchers;
   phase?: PlumbingPorts["phase"];
@@ -132,7 +134,10 @@ function harness(o: HarnessOptions = {}): Harness {
       log.push(["lifecycle", "advance", ...args]);
       const out = seamResult({ rc: 0, code: "", ...(o.advanceHandler?.(args) ?? {}) });
       if (out.ok === true) return { ok: true, to: lane.to };
-      return out.code.startsWith("parked:") ? { ok: false, code: out.code, counts: o.parkCounts ?? [] } : { ok: false, code: out.code };
+      if (out.code.startsWith("escalated:")) {
+        return { ok: false, code: out.code as `escalated:${string}`, counts: o.parkCounts ?? [], ...(o.exitWritten === undefined ? {} : { written: o.exitWritten }) };
+      }
+      return out.code.startsWith("parked:") ? { ok: false, code: out.code as `parked:${string}`, counts: o.parkCounts ?? [] } : { ok: false, code: out.code };
     },
     async gh(argv) {
       gh.push(argv);
@@ -902,6 +907,17 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
     await runRoute(ROUTE_OPTS, pre, escalated.ports, realDeps());
     assert.deepEqual(escalated.writes().map((a) => `${a[0]} ${a[1]}`), ["pr merge", "pr comment", "lifecycle advance"]);
     assert.deepEqual(escalated.advances.map(advTo), ["needs-dev-resume"], "the route names no ready-for-human advance of its own");
+
+    // Sibling shape: an escalation whose exit write landed stays a quiet success.
+    const landed = harness({ ghHandler: withState("OPEN"), advanceHandler: refuse("needs-dev-resume", "escalated:deep-qa-fails"), exitWritten: true, phase: cannedPhase(t4Fail) });
+    await runRoute(ROUTE_OPTS, pre, landed.ports, realDeps());
+  });
+
+  test("route T4 FAIL: an escalated refusal whose ready-for-human write did NOT land fails loudly, never a silent success", async () => {
+    const pre = readyPre({ tier: { num: 4, adversarial: true } });
+    const t4Fail: Canned = { verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high", failMarker: "FAIL-MARKER" };
+    const lost = harness({ ghHandler: withState("OPEN"), advanceHandler: refuse("needs-dev-resume", "escalated:deep-qa-fails"), exitWritten: false, phase: cannedPhase(t4Fail) });
+    await assert.rejects(runRoute(ROUTE_OPTS, pre, lost.ports, realDeps()), /escalation refused/);
   });
 
   test("route: PASS-pending-CI posts the pending comment then enters qa-passed through the seam", async () => {
