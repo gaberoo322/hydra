@@ -224,7 +224,7 @@ describe("decideRound — the composed round-action head (issue #5079, INV-3)", 
   const prior1 = verdictBody(1, "FAIL", SHA_A, 1, "medium");
   const prior2 = verdictBody(2, "FAIL", SHA_B, 1, "medium");
 
-  test("T1-T3 FAIL round 1 bounces, equal to decideQaRoundAction, with no fail marker or summary", () => {
+  test("T1-T3 FAIL round 1 bounces, equal to decideQaRoundAction, with no deep-QA or summary", () => {
     const input = { tier: 3, verdict: "FAIL", reviewVerdict: "FAIL" as const, pr: 7, headSha: SHA_C, priorBodies: [] as string[] };
     const r = decideRound(input);
     assert.deepEqual(r.round, decideQaRoundAction(input));
