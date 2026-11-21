@@ -766,7 +766,7 @@ describe("caps as data (#5421)", () => {
   });
 });
 
-describe("qa-fail edge with unreadable PR bodies (#5662 QA round 2)", () => {
+describe("qa-fail edge with unreadable PR bodies", () => {
   test("a T4 FAIL bounce with unreadable PR bodies fails closed at the qa-verdict gate: refused fetch-failed, nothing written", async () => {
     const w = world("enforce", ["needs-qa"]);
     w.fetchFail.add("prBodies");

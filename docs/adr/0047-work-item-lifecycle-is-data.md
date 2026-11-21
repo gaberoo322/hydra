@@ -135,8 +135,6 @@ Caps are per arm, plus a total dispatch-claim budget per issue. The limits live 
   every park row. An escalation takes the same one cap-exit path as a park (`parkForCap`): closes the
   claim, journals `reason=cap:deep-qa-fails`, posts the unified cap comment, and `qaBounce` returns
   `escalated:deep-qa-fails`.
-  A degraded PR-bodies read fails closed: the `qa-verdict` gate refuses the bounce `fetch-failed` before any
-  write, so a T4 FAIL is never bounced uncounted (the cap check's own INV-12 skip only covers non-gated edges).
 
 - **Edges carry their cap:** a `Transition` row in `src/lifecycle/transitions.ts` may declare
   `cap: "requeue" | "qa-fail"` (`in-progress -> ready-for-agent` is `requeue`; the `needs-qa ->
