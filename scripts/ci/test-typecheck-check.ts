@@ -109,9 +109,9 @@ async function runTsc(root: string): Promise<string> {
     // to parse (a real crash, e.g. config not found): the Ratchet reports it as
     // crashed (exit 2), never as a count of 0.
     const out = (err?.stdout ?? "") + (err?.stderr ?? "");
-    if (!out.trim()) {
+    if (countTscErrors(out) === 0) {
       throw new GateInvariantError(
-        `tsc produced no output (exit ${err?.code}). This is a crash, not type errors. stderr: ${err?.stderr ?? ""}`,
+        `tsc exited ${err?.code} with no type diagnostics. This is a crash, not type errors. output: ${out.trim()}`,
       );
     }
     return out;

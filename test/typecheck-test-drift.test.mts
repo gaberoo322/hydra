@@ -26,6 +26,9 @@
 
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { typecheckRatchet } from "../scripts/ci/test-typecheck-check.ts";
 
@@ -33,5 +36,16 @@ describe("test/scripts type-check does not silently re-accumulate (issue #4046)"
   test("tsc -p tsconfig.test.json error count matches the committed baseline", { timeout: 60_000 }, async () => {
     const v = await typecheckRatchet.verdict();
     assert.ok(v.ok, v.advice);
+  });
+
+  test("a tsc run with no output (no tsconfig.test.json) is a crash, never a count of 0 (INV-3)", { timeout: 60_000 }, async () => {
+    const root = mkdtempSync(join(tmpdir(), "typecheck-crash-"));
+    try {
+      const v = await typecheckRatchet.verdict(root);
+      assert.equal(v.crashed, true);
+      assert.equal(v.ok, false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
