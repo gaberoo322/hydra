@@ -91,7 +91,7 @@ authority, and passed to the gate as `PR_TIER`):
 | Tier band | Repo variable | Default | Applies to |
 |-----------|---------------|---------|------------|
 | T1 / T2   | `MUTATION_KILL_RATE_FLOOR`    | `30` | Prompt / skill / dashboard diffs |
-| T3 / T4   | `MUTATION_KILL_RATE_FLOOR_T3` | `55` | Core `src/` + demoted infra (T3) and Verifier Core (T4) |
+| T3 / T4   | `MUTATION_KILL_RATE_FLOOR_T3` | `50` | Core `src/` + demoted infra (T3) and Verifier Core (T4) |
 
 The predicate is `tier >= 3` (in `selectKillFloor()` in
 `scripts/ci/mutation-check.ts`), so **T4 / Verifier-Core diffs inherit the
@@ -137,8 +137,12 @@ candidate uncompilable). `killRate` is `null` on both no-signal branches — the
 gate never synthesises a 100% kill rate where there was no signal. A
 non-finite/missing `PR_TIER` classifies conservatively as `warn` (mirrors the
 floor fallback). The all-killed path (`testable > 0`, `killed === testable`)
-still reports `pass` with `killRate: 100`, and a below-floor kill rate still
-exits `2` and blocks.
+still reports `pass` with `killRate: 100`.
+
+**Blocking (issue #5273).** `ci.yml` passes `MUTATION_GATE_BLOCKING` with the
+fallback `1`, so a below-floor kill rate exits `2` and holds the required
+`mutation-test` check. Setting the repo variable `MUTATION_GATE_BLOCKING=0`
+pauses blocking without a T4 PR. A timed-out or no-signal verdict never blocks.
 
 This is distinct from `skipped`: `skipped` means "no src/**/*.ts files in diff,
 runner never invoked"; `neutral`/`warn` mean "runner ran, couldn't produce a

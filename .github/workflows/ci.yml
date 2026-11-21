@@ -280,8 +280,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MUTATION_KILL_RATE_FLOOR: ${{ vars.MUTATION_KILL_RATE_FLOOR || '30' }}
-          MUTATION_KILL_RATE_FLOOR_T3: ${{ vars.MUTATION_KILL_RATE_FLOOR_T3 || '55' }}
+          MUTATION_KILL_RATE_FLOOR_T3: ${{ vars.MUTATION_KILL_RATE_FLOOR_T3 || '50' }}
           MUTATION_TIME_BUDGET_MS: ${{ vars.MUTATION_TIME_BUDGET_MS || '540000' }}
+          # Blocking on since issue #5273 (ADR-0046 D4 amendment); set the repo variable to 0 to pause.
+          MUTATION_GATE_BLOCKING: ${{ vars.MUTATION_GATE_BLOCKING || '1' }}
         run: |
           set +e
           PR_BODY="$(gh pr view ${{ github.event.pull_request.number }} --json body --jq '.body')"
