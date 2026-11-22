@@ -237,6 +237,22 @@ describe("advance needs-qa -> verdict targets", () => {
     assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["needs-dev-resume"] }]);
   });
 
+  test("enforce: a valid FAIL trailer with unreadable PR bodies refuses fetch-failed and writes nothing (the bounce would be uncounted)", async () => {
+    const w = world("enforce", live({ timedBodies: [timed(failBody(1))] }), [failBody(1)]);
+    w.deps.fetch.prBodies = async () => ({ ok: false });
+    const res = (await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7" } }, w.deps)) as { ok: boolean; code?: string };
+    assert.deepEqual({ ok: res.ok, code: res.code }, { ok: false, code: "fetch-failed" });
+    assert.deepEqual(w.edits, []);
+  });
+
+  test("sibling shape: shadow mode with unreadable PR bodies still bounces (INV-12, never refuse on a degraded read outside enforce)", async () => {
+    const w = world("shadow", live({ timedBodies: [timed(failBody(1))] }), [failBody(1)]);
+    w.deps.fetch.prBodies = async () => ({ ok: false });
+    const res = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7" } }, w.deps);
+    assert.equal(res.ok, true);
+    assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["needs-dev-resume"] }]);
+  });
+
   test("FAIL with the PR CLOSED unmerged routes to ready-for-agent", async () => {
     const w = world("enforce", live({ state: "CLOSED", timedBodies: [timed(failBody(1))] }), [failBody(1)]);
     const res = await advance({ issue: 10, to: "ready-for-agent", evidence: { pr: "7" } }, w.deps);

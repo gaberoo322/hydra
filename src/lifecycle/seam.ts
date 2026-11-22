@@ -63,7 +63,7 @@ import {
 // ---------------------------------------------------------------------------
 
 type CapCheck =
-  | { status: "skipped" }
+  | { status: "skipped"; prBodiesUnreadable?: true }
   | { status: "checked"; evaluation: CapEvaluation };
 
 /**
@@ -99,9 +99,9 @@ async function checkCaps(
     if (pr !== null) {
       const bodies = await deps.fetch.prBodies(pr);
       if (bodies.ok === false) {
-        // INV-12: never park on a degraded read. The qa-verdict gate already refuses a qa-fail bounce on this failure.
+        // INV-12: never park on a degraded read. A qa-fail edge refuses on this (advance, step 3c): the qa-verdict gate reads qaLive, not prBodies, so it would not.
         logger.warn({ issue, pr, attempt: attempt.kind }, "[lifecycle] PR bodies unreadable; cap check skipped for this call");
-        return { status: "skipped" };
+        return { status: "skipped", prBodiesUnreadable: true };
       }
       trailerRounds = countReviewedFailRoundsAfterReset(bodies.value, pr, resetMs);
       deepQaFails = countDeepQaFailsAfterReset(bodies.value, resetMs);
@@ -199,8 +199,9 @@ type CapGuard =
       parked: { code: CapExitCode; written: boolean; counts: readonly CapCount[] };
       stamp?: undefined;
       shadowOver?: undefined;
+      prBodiesUnreadable?: undefined;
     }
-  | { parked: null; stamp: CapStamp; shadowOver: CapOver | null };
+  | { parked: null; stamp: CapStamp; shadowOver: CapOver | null; prBodiesUnreadable: boolean };
 
 /**
  * The ONE cap step (ADR-0047 D6/D7). Checks the caps for `attempt`, then:
@@ -215,7 +216,8 @@ export async function guardCaps(a: CapGuardAttempt, deps: SeamDeps, mode: Lifecy
     a.attempt === null ? { status: "skipped" } : await checkCaps(deps, a.issue, a.attempt, a.pr);
   const stamp = new CapStamp(check);
   const over = check.status === "checked" ? check.evaluation.over : null;
-  if (check.status !== "checked" || over === null) return { parked: null, stamp, shadowOver: null };
+  const prBodiesUnreadable = check.status === "skipped" && check.prBodiesUnreadable === true;
+  if (check.status !== "checked" || over === null) return { parked: null, stamp, shadowOver: null, prBodiesUnreadable };
   const live = mode !== "enforce" && isLiveArm(over.arm);
   if (mode === "enforce" || live) {
     const park = await parkForCap(
@@ -238,7 +240,7 @@ export async function guardCaps(a: CapGuardAttempt, deps: SeamDeps, mode: Lifecy
       },
     };
   }
-  return { parked: null, stamp, shadowOver: over };
+  return { parked: null, stamp, shadowOver: over, prBodiesUnreadable };
 }
 
 /** The cap attempt an edge's `cap` field implies for this call, or null when it does not count. */
@@ -419,6 +421,11 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
       const guard = await guardCaps({ issue, from, attempt: edge.attempt, pr: edge.pr, actor: input.actor }, deps, mode);
       if (guard.parked !== null) {
         return { ok: false, issue, code: guard.parked.code, mode, written: guard.parked.written, counts: guard.parked.counts };
+      }
+      if (guard.prBodiesUnreadable && edge.attempt.kind === "qa-fail" && mode === "enforce") {
+        // Fail closed: an uncounted T4 FAIL bounce could loop past the deep-qa-fails escalation.
+        await jr(entry(deps, { kind: "refused", from, result: "refused:fetch-failed", written: false }, input));
+        return { ok: false, issue, code: "fetch-failed", mode, written: false };
       }
       stamp = guard.stamp;
       shadowOver = guard.shadowOver;

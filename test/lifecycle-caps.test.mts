@@ -767,8 +767,13 @@ describe("caps as data (#5421)", () => {
 });
 
 describe("qa-fail edge with unreadable PR bodies", () => {
-  test("a T4 FAIL bounce with unreadable PR bodies fails closed at the qa-verdict gate: refused fetch-failed, nothing written", async () => {
+  test("a T4 FAIL bounce with unreadable PR bodies fails closed: refused fetch-failed, nothing written", async () => {
     const w = world("enforce", ["needs-qa"]);
+    w.deps.fetch.qaLive = async () => ({
+      ok: true,
+      value: { number: 5, state: "OPEN", isDraft: false, mergeStateStatus: "CLEAN", headSha: "0123456789abcdef0123456789abcdef01234567", checks: "green", bodies: [], timedBodies: [{ body: "QA-Verdict: FAIL pr=5 round=1 sha=0123456789ab blockers=1 max_severity=high", createdAtMs: NOW + 1 }] },
+    });
+    w.deps.fetch.stateEntry = async () => ({ ok: true, value: { enteredAtMs: NOW - 60_000 } });
     w.fetchFail.add("prBodies");
     const res = (await advance({ issue: 42, to: "needs-dev-resume", evidence: { pr: "5" } }, w.deps)) as any;
     assert.equal(res.ok, false);
