@@ -55,22 +55,21 @@
  *
  * # Baseline ratchet
  *
- * Like `redis-seam-check.ts` (ADR-0009), this implements a shrink-only baseline.
- * Pre-existing violations live in `scripts/ci/target-coupling-baseline.json` and
- * are tolerated; NEW violations fail the gate; a violation that gets cleaned up
- * must be removed from the baseline (the check fails loudly if the baseline is
- * stale). The baseline is ONE flat sorted list of lane-prefixed keys
- * (`lane::file::token::severity`); per-lane counts are derived by prefix. The
- * intended end state (issue #731 / #4412) is an EMPTY baseline.
+ * Runs on the Ratchet module (`ratchet.ts`, #5654): a SET ceiling. Pre-existing
+ * violations live in `scripts/ci/target-coupling-baseline.json` (a sorted JSON
+ * array of `lane::file::token::severity` keys) and are tolerated; ANY new key
+ * fails the gate — comment-context keys (`name-comment` / `vocab-comment`) ratchet
+ * like fatal ones; a key that gets cleaned up must be removed from the baseline
+ * (a stale row fails the verdict). The intended end state (issue #731 / #4412) is
+ * an EMPTY baseline.
  *
  * Usage:
  *   npx tsx scripts/ci/target-coupling-check.ts
  *   npm run coupling-check
  *
- * Update flow when intentionally introducing/removing a known violation:
- *   1. Make the change.
- *   2. Run with `--write-baseline` to regenerate the baseline file.
- *   3. Commit the new baseline alongside the change.
+ * Update flow when removing a known violation: fix it, then `--write-baseline`
+ * (only tightens; add `--allow-grow` for reviewed growth plus a PR-body
+ * `Baseline-raise:` line) and commit the shrunk baseline.
  *
  * Self-test:
  *   --self-test exercises the pure classifier against synthetic fixtures and
@@ -81,22 +80,17 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { isCliEntrypoint, loadJsonBaseline, writeJsonBaseline } from "./seam-check-lib.ts";
+import { InvalidArgumentError } from "../../src/errors.ts";
+import { isCliEntrypoint } from "./seam-check-lib.ts";
+import { defineRatchet, runIfCli } from "./ratchet.ts";
 
 const execFileAsync = promisify(execFile);
 
-const REPO_ROOT = resolve(fileURLToPath(import.meta.url), "../../..");
-const BASELINE_PATH = join(REPO_ROOT, "scripts/ci/target-coupling-baseline.json");
-
 /** The seam itself legitimately owns the default literals. */
 const SEAM_FILE = "src/target-config.ts";
-
-const WRITE_BASELINE = process.argv.includes("--write-baseline");
-const SELF_TEST = process.argv.includes("--self-test");
 
 /**
  * HARD literals — the concrete target identity. These must never be hardcoded
@@ -126,9 +120,6 @@ export type Severity =
   | "vocab-code" // domain vocab in CODE — fatal
   | "vocab-comment"; // domain vocab in a COMMENT — advisory
 
-/** Severities that fail the gate when newly introduced. */
-const FATAL: ReadonlySet<Severity> = new Set<Severity>(["name", "vocab-code"]);
-
 export type LaneId = "src" | "playbooks" | "autopilot";
 
 /**
@@ -146,8 +137,6 @@ export interface Lane {
   isComment: (line: string) => boolean;
   /** A line matching this is skipped entirely BEFORE token matching. */
   exemptLine?: RegExp;
-  /** Printed after new fatal leaks in this lane — names the seam to route through. */
-  seamHint: string[];
 }
 
 /** TS heuristic: `//`, `*`, or `/*` after trimming (line comments + JSDoc). */
@@ -174,10 +163,6 @@ export const LANES: readonly Lane[] = [
     globs: ["src/*.ts", "src/**/*.ts"],
     exclude: file => file === SEAM_FILE,
     isComment: isTsCommentLine,
-    seamHint: [
-      "Route target identifiers through src/target-config.ts (getTargetName / getTargetGithubRepo / getTargetServiceName).",
-      "Replace betting-domain literals with target-agnostic heuristics or config-declared signals (ADR-0013, ADR-0002).",
-    ],
   },
   {
     id: "playbooks",
@@ -185,11 +170,6 @@ export const LANES: readonly Lane[] = [
     // Playbook prose IS the program — no comment context, every match is fatal-class.
     isComment: () => false,
     exemptLine: HISTORICAL_EXEMPT_RE,
-    seamHint: [
-      "Playbooks: resolve the Target through the seam preamble — `@include _fragments/target-seam-preamble.md` — and use $TARGET_NAME / $TARGET_GH_REPO / $TARGET_WS / $TARGET_SERVICE / $TARGET_WEB_URL / $TARGET_APP_DIR instead of a literal.",
-      "Target facts come from src/target-config.ts accessors and the Target Manifest (<workspace>/.hydra/manifest.json, ADR-0026) via scripts/target/print-target-facts.ts — never restate a default in prose (ADR-0002, ADR-0013).",
-      "A provenance-only mention may stay on a `Historical:`-prefixed line (line-level allow; `> Historical:` is fine).",
-    ],
   },
   {
     id: "autopilot",
@@ -200,10 +180,6 @@ export const LANES: readonly Lane[] = [
       "scripts/autopilot/**/*.sh",
     ],
     isComment: isHashCommentLine,
-    seamHint: [
-      "scripts/autopilot: read HYDRA_TARGET_* env (no literal fallback) or the per-turn seam output of scripts/target/print-target-facts.ts (the Turn Snapshot's target_risk_surface_json → state.target_risk_surface).",
-      "Target identity/defaults live ONLY in src/target-config.ts and the Target Manifest (<workspace>/.hydra/manifest.json, ADR-0026) — a hardcoded default in a .py/.sh file breaks the swap (ADR-0013, ADR-0002).",
-    ],
   },
 ];
 
@@ -233,12 +209,6 @@ export interface Violation {
   excerpt: string;
 }
 
-interface BaselineFile {
-  /** Sorted list of `lane::file::token::severity` violation keys that are tolerated. */
-  violations: string[];
-  note: string;
-}
-
 /**
  * Stable key for baseline membership. We key on lane+file+token+severity, NOT
  * line, because line numbers churn on unrelated edits while the *fact* of a
@@ -247,22 +217,6 @@ interface BaselineFile {
  */
 export function violationKey(v: Violation): string {
   return `${v.lane}::${v.file}::${v.token}::${v.severity}`;
-}
-
-/** Lane of a baseline key (the text before the first `::`). */
-function laneOfKey(key: string): string {
-  const idx = key.indexOf("::");
-  return idx === -1 ? key : key.slice(0, idx);
-}
-
-/** `src=3 playbooks=60 autopilot=22` — per-lane counts in LANES order. */
-function perLaneSummary(keys: Iterable<string>): string {
-  const counts = new Map<string, number>(LANES.map(l => [l.id, 0]));
-  for (const k of keys) {
-    const lane = laneOfKey(k);
-    counts.set(lane, (counts.get(lane) ?? 0) + 1);
-  }
-  return [...counts.entries()].map(([lane, n]) => `${lane}=${n}`).join(" ");
 }
 
 // ---------------------------------------------------------------------------
@@ -283,7 +237,7 @@ function perLaneSummary(keys: Iterable<string>): string {
  */
 export function isCommentLine(line: string, lane: LaneId = "src"): boolean {
   const l = LANE_BY_ID.get(lane);
-  if (!l) throw new Error(`[target-coupling-check] unknown lane: ${lane}`);
+  if (!l) throw new InvalidArgumentError(`[target-coupling-check] unknown lane: ${lane}`);
   return l.isComment(line);
 }
 
@@ -313,7 +267,7 @@ const VOCAB_REGEXES = VOCAB_DENYLIST.map(t => ({ token: t, re: wholeWordRegex(t)
 export function classifyFile(file: string, body: string, lane?: LaneId): Violation[] {
   const laneId = lane ?? laneFor(file);
   const l = LANE_BY_ID.get(laneId);
-  if (!l) throw new Error(`[target-coupling-check] unknown lane: ${laneId}`);
+  if (!l) throw new InvalidArgumentError(`[target-coupling-check] unknown lane: ${laneId}`);
 
   const out: Violation[] = [];
   const lines = body.split("\n");
@@ -408,11 +362,11 @@ export function pickDistinctiveDependencies(deps: string[]): string[] {
 // File discovery + I/O
 // ---------------------------------------------------------------------------
 
-async function listTrackedFiles(lane: Lane): Promise<string[]> {
+async function listTrackedFiles(lane: Lane, root: string): Promise<string[]> {
   const { stdout } = await execFileAsync(
     "git",
     ["ls-files", ...lane.globs],
-    { cwd: REPO_ROOT },
+    { cwd: root },
   );
   const seen = new Set<string>();
   const out: string[] = [];
@@ -428,12 +382,12 @@ async function listTrackedFiles(lane: Lane): Promise<string[]> {
 
 const LANE_ORDER: ReadonlyMap<LaneId, number> = new Map(LANES.map((l, i) => [l.id, i]));
 
-async function findViolations(): Promise<Violation[]> {
+async function findViolations(root: string): Promise<Violation[]> {
   const all: Violation[] = [];
   for (const lane of LANES) {
-    const tracked = await listTrackedFiles(lane);
+    const tracked = await listTrackedFiles(lane, root);
     for (const relPath of tracked) {
-      const abs = join(REPO_ROOT, relPath);
+      const abs = join(root, relPath);
       let body: string;
       try {
         body = await readFile(abs, "utf8");
@@ -452,26 +406,6 @@ async function findViolations(): Promise<Violation[]> {
     if (la !== lb) return la - lb;
     return a.file === b.file ? a.line - b.line : a.file.localeCompare(b.file);
   });
-}
-
-/**
- * Load the baseline via the shared primitive's default (non-strict) mode
- * (issue #4580): a missing/unparseable baseline is "not yet seeded" — every
- * match is then new.
- */
-async function loadBaseline(): Promise<BaselineFile> {
-  return loadJsonBaseline(BASELINE_PATH, {
-    violations: [],
-    note: "baseline not yet seeded",
-  });
-}
-
-async function writeBaselineFile(keys: string[]): Promise<void> {
-  const payload: BaselineFile = {
-    violations: [...new Set(keys)].sort(),
-    note: `Auto-generated by scripts/ci/target-coupling-check.ts --write-baseline on ${new Date().toISOString()}. ADR-0013 swap-seam ratchet: shrink only. Target state: empty.`,
-  };
-  await writeJsonBaseline(BASELINE_PATH, payload);
 }
 
 // ---------------------------------------------------------------------------
@@ -589,82 +523,42 @@ function runSelfTest(): number {
 // Main
 // ---------------------------------------------------------------------------
 
-async function main(): Promise<number> {
-  if (SELF_TEST) return runSelfTest();
+/**
+ * ALL severities ratchet (name / name-comment / vocab-code / vocab-comment): a new
+ * comment-context key fails the verdict exactly like a fatal one.
+ *
+ * Seam routing for a new leak, by lane:
+ *   src        route target identifiers through src/target-config.ts
+ *              (getTargetName / getTargetGithubRepo / getTargetServiceName) and replace
+ *              betting-domain literals with target-agnostic heuristics (ADR-0013, ADR-0002).
+ *   playbooks  resolve the Target through `@include _fragments/target-seam-preamble.md`
+ *              ($TARGET_NAME / $TARGET_GH_REPO / $TARGET_WS / $TARGET_SERVICE /
+ *              $TARGET_WEB_URL / $TARGET_APP_DIR); target facts come from src/target-config.ts
+ *              and the Target Manifest (ADR-0026) via scripts/target/print-target-facts.ts; a
+ *              provenance-only mention may stay on a `Historical:`-prefixed line.
+ *   autopilot  read HYDRA_TARGET_* env (no literal fallback) or the per-turn seam output of
+ *              scripts/target/print-target-facts.ts; target identity lives ONLY in
+ *              src/target-config.ts and the Target Manifest (ADR-0013, ADR-0002).
+ */
+export const targetCouplingRatchet = defineRatchet({
+  id: "target-coupling-check",
+  baseline: "scripts/ci/target-coupling-baseline.json",
+  shape: "set",
+  polarity: "ceiling",
+  stale: "fail",
+  enforcement: "advisory",
+  async measure(root) {
+    return (await findViolations(resolve(root))).map(violationKey);
+  },
+  help: [
+    "Route target identifiers through src/target-config.ts; playbooks resolve the Target via the seam preamble",
+    "(`@include _fragments/target-seam-preamble.md`). Seam routing per lane: header comment of scripts/ci/target-coupling-check.ts.",
+  ],
+});
 
-  const violations = await findViolations();
-  const keys = violations.map(violationKey);
-
-  if (WRITE_BASELINE) {
-    await writeBaselineFile(keys);
-    const unique = new Set(keys);
-    console.log(
-      `[target-coupling-check] Wrote baseline with ${unique.size} entries (${perLaneSummary(unique)}) to ${relative(REPO_ROOT, BASELINE_PATH)}`,
-    );
-    return 0;
-  }
-
-  const baseline = await loadBaseline();
-  const baselineSet = new Set(baseline.violations);
-  const currentSet = new Set(keys);
-
-  // Comment-context matches never fail the gate on their own — they're advisory.
-  // Only code-context matches (severity in FATAL) block a merge.
-  const newViolations = violations.filter(v => !baselineSet.has(violationKey(v)));
-  const newFatal = newViolations.filter(v => FATAL.has(v.severity));
-  const newAdvisory = newViolations.filter(v => !FATAL.has(v.severity));
-
-  const fixed = [...baselineSet].filter(k => !currentSet.has(k));
-
-  let failed = false;
-
-  if (newFatal.length > 0) {
-    console.error("[target-coupling-check] NEW target-coupling leaks (ADR-0013):");
-    for (const v of newFatal) {
-      const label = v.severity === "name" ? "TARGET-IDENTITY" : "DOMAIN-VOCAB";
-      console.error(`  - [${v.lane}] ${v.file}:${v.line} [${label}] "${v.token}"  ${v.excerpt}`);
-    }
-    // Name the seam per lane — only for lanes that actually have new leaks.
-    const lanesHit = new Set(newFatal.map(v => v.lane));
-    for (const lane of LANES) {
-      if (!lanesHit.has(lane.id)) continue;
-      console.error("");
-      for (const hint of lane.seamHint) console.error(hint);
-    }
-    failed = true;
-  }
-
-  if (newAdvisory.length > 0) {
-    console.warn("[target-coupling-check] WARNING — new target-coupling in comments (advisory, not fatal):");
-    for (const v of newAdvisory) {
-      console.warn(`  - [${v.lane}] ${v.file}:${v.line} "${v.token}"  ${v.excerpt}`);
-    }
-  }
-
-  if (fixed.length > 0) {
-    console.error("[target-coupling-check] Baseline is stale — these leaks are resolved:");
-    for (const k of fixed) console.error(`  - ${k}`);
-    console.error("");
-    console.error("Re-run with --write-baseline and commit the shrunk baseline.");
-    failed = true;
-  }
-
-  if (failed) return 1;
-
-  console.log(
-    `[target-coupling-check] OK — ${violations.length} known matches (${perLaneSummary(keys)}; ${baseline.violations.length} baselined: ${perLaneSummary(baselineSet)}), no new leaks.`,
-  );
-  return 0;
-}
-
-// Guarded so importing the pure exports (classifyFile, HISTORICAL_EXEMPT_RE)
-// never runs the scan, exits the importer, or honours its --write-baseline.
-if (isCliEntrypoint(import.meta.url)) {
-  main().then(
-    code => process.exit(code),
-    err => {
-      console.error("[target-coupling-check] crash:", err);
-      process.exit(2);
-    },
-  );
+// --self-test is script-handled; every other flag belongs to the Ratchet CLI.
+if (isCliEntrypoint(import.meta.url) && process.argv.includes("--self-test")) {
+  process.exit(runSelfTest());
+} else {
+  runIfCli(import.meta.url, targetCouplingRatchet);
 }
