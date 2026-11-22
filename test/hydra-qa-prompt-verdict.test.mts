@@ -458,7 +458,7 @@ describe("hydra-qa playbook wires convergent review (issue #4735)", () => {
     const t13 = routeSrc.slice(routeSrc.indexOf("// Every FAIL (any tier)"));
     // The verdict comment (this round's trailer) precedes the first seam call.
     const comment = t13.indexOf("await prComment(bodies.fail(");
-    const firstAdvance = t13.indexOf('await bounce("fail-bounce-advance")');
+    const firstAdvance = t13.indexOf('await bounce("fail-bounce-advance", false, tier === 4)');
     assert.ok(comment > 0 && comment < firstAdvance, "the PR verdict comment is posted before the seam counts the round");
     assert.ok(t13.includes('"parked:qa-fail-rounds"'), "enforce: a parked:qa-fail-rounds refusal is the escalation, not an error");
     assert.ok(!t13.includes("wouldPark"), "no shadow-park branch: qa-fail-rounds is a live arm, the seam parks in shadow too (#5421)");
