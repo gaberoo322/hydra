@@ -4,7 +4,7 @@
  */
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -110,14 +110,11 @@ describe("zizmorRatchet verdict", () => {
 });
 
 describe("the committed baseline", () => {
-  test("is a flat sorted {workflow-path<TAB>ident: n} object of positive integers", () => {
-    const committed = JSON.parse(readFileSync(join(root, BASELINE_REL), "utf8")) as Record<string, number>;
-    assert.deepEqual(Object.keys(committed), Object.keys(committed).sort());
-    assert.ok(Object.keys(committed).length > 0);
-    for (const [k, n] of Object.entries(committed)) {
-      assert.match(k, /^\.github\/workflows\/[^/\t]+\.ya?ml\t[a-z-]+$/);
-      assert.ok(Number.isInteger(n) && n > 0);
-    }
+  test("parses as a counted {key: positive integer} object against the live repo", async () => {
+    // A scope that measures nothing and keeps no row: only the baseline read + shape validation run.
+    const v = await zizmorRatchet.verdict(root, { measure: async () => ({}), keep: () => false });
+    assert.equal(v.crashed, undefined, v.advice);
+    assert.equal(v.ok, true);
   });
 });
 

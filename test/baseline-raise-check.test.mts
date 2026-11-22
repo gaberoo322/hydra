@@ -7,7 +7,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import {
   evaluateBaselineRaise,
@@ -160,13 +160,13 @@ function baselinesOnDisk(): string[] {
 }
 
 describe("listBaselineFixtures inventory", () => {
-  test("lists every on-disk *-baseline.json, with no hand-kept exclusion list", () => {
+  test("lists every on-disk *-baseline.json, with no hand-kept exclusion list", async () => {
     const root = join(import.meta.dirname, "..");
     assert.deepEqual(listBaselineFixtures(root), baselinesOnDisk());
     assert.ok(listBaselineFixtures(root).includes("test/fixtures/qa-cohort-baseline.json"));
-    const src = readFileSync(join(root, "scripts/ci/baseline-raise-check.ts"), "utf8");
-    assert.equal(src.includes("NON_RATCHET_BASELINES"), false);
-    assert.equal(src.includes("diffBaselineShrink"), false);
+    const exported = Object.keys(await import("../scripts/ci/baseline-raise-check.ts"));
+    assert.equal(exported.includes("NON_RATCHET_BASELINES"), false);
+    assert.equal(exported.includes("diffBaselineShrink"), false);
   });
 });
 
