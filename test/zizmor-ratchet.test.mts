@@ -4,22 +4,20 @@
  */
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  BASELINE_REL,
+  DEFAULT_INPUT,
   UNKNOWN_FILE,
   ZizmorInputError,
-  buildBaseline,
-  compareAgainstBaseline,
   countFindings,
-  formatReport,
-  loadBaseline,
   loadFindings,
-  mergeBaselineForFiles,
   repoRelative,
-  type Baseline,
+  toRows,
+  zizmorRatchet,
 } from "../scripts/ci/zizmor-ratchet.ts";
 
 const root = join(import.meta.dirname, "..");
@@ -31,8 +29,6 @@ function finding(ident: string, path: string | null, extra: Record<string, unkno
 
 const WF_A = ".github/workflows/a.yml";
 const WF_B = ".github/workflows/b.yml";
-
-const base = (files: Baseline["files"]): Baseline => ({ note: "n", files });
 
 describe("countFindings", () => {
   test("counts per workflow x ident and keys rows by the repo-relative path", () => {
@@ -64,65 +60,63 @@ describe("countFindings", () => {
   });
 });
 
-describe("compareAgainstBaseline", () => {
-  test("a clean tree (counts equal the baseline) reports nothing", () => {
-    const found = countFindings([finding("unpinned-uses", WF_A)]);
-    const cmp = compareAgainstBaseline(found, base({ [WF_A]: { "unpinned-uses": 1 } }));
-    assert.deepEqual(cmp, { exceeded: [], stale: [] });
-    assert.equal(formatReport(cmp), "");
+describe("zizmorRatchet verdict", () => {
+  const withBaseline = async (baseline: Record<string, number>, findings: unknown[]) => {
+    const dir = mkdtempSync(join(tmpdir(), "zizmor-ratchet-"));
+    mkdirSync(join(dir, "scripts/ci"), { recursive: true });
+    writeFileSync(join(dir, BASELINE_REL), JSON.stringify(baseline));
+    writeFileSync(join(dir, DEFAULT_INPUT), JSON.stringify(findings));
+    return zizmorRatchet.verdict(dir);
+  };
+  const key = (file: string, ident: string) => `${file}\t${ident}`;
+
+  test("a clean tree (counts equal the baseline) passes", async () => {
+    const v = await withBaseline({ [key(WF_A, "unpinned-uses")]: 1 }, [finding("unpinned-uses", WF_A)]);
+    assert.equal(v.ok, true);
+    assert.deepEqual(v.stale, []);
   });
 
-  test("a count above its cell is exceeded, and every ident is ratcheted (not just two)", () => {
-    const found = countFindings([finding("template-injection", WF_A), finding("unpinned-uses", WF_A)]);
-    const cmp = compareAgainstBaseline(found, base({ [WF_A]: { "unpinned-uses": 1 } }));
-    assert.deepEqual(cmp.exceeded, [{ file: WF_A, key: "template-injection", count: 1, baseline: 0 }]);
-    assert.match(formatReport(cmp), /a\.yml: template-injection count 1 > baseline 0/);
+  test("a count above its row is a violation, and every ident is ratcheted (not just two)", async () => {
+    const v = await withBaseline({ [key(WF_A, "unpinned-uses")]: 1 }, [
+      finding("template-injection", WF_A),
+      finding("unpinned-uses", WF_A),
+    ]);
+    assert.equal(v.ok, false);
+    assert.deepEqual(v.added, [key(WF_A, "template-injection")]);
+    assert.match(v.advice, /template-injection/);
   });
 
-  test("a count below its cell is stale (nudge), never exceeded", () => {
-    const found = countFindings([finding("unpinned-uses", WF_A)]);
-    const cmp = compareAgainstBaseline(found, base({ [WF_A]: { "unpinned-uses": 3 }, [WF_B]: { artipacked: 1 } }));
-    assert.deepEqual(cmp.exceeded, []);
-    assert.equal(cmp.stale.length, 2);
-    assert.match(formatReport(cmp), /lower/);
+  test("a count below its row is a stale hint, never a violation", async () => {
+    const v = await withBaseline({ [key(WF_A, "unpinned-uses")]: 3, [key(WF_B, "artipacked")]: 1 }, [
+      finding("unpinned-uses", WF_A),
+    ]);
+    assert.equal(v.ok, true);
+    assert.equal(v.stale.length, 2);
   });
 
-  test("fixing a finding in one file does not mask a new one in another", () => {
-    const found = countFindings([finding("unpinned-uses", WF_B)]);
-    const cmp = compareAgainstBaseline(found, base({ [WF_A]: { "unpinned-uses": 1 } }));
-    assert.equal(cmp.exceeded.length, 1);
-    assert.equal(cmp.exceeded[0]?.file, WF_B);
-    assert.equal(cmp.stale.length, 1);
+  test("fixing a finding in one file does not mask a new one in another", async () => {
+    const v = await withBaseline({ [key(WF_A, "unpinned-uses")]: 1 }, [finding("unpinned-uses", WF_B)]);
+    assert.equal(v.ok, false);
+    assert.deepEqual(v.added, [key(WF_B, "unpinned-uses")]);
+    assert.deepEqual(v.stale, [key(WF_A, "unpinned-uses")]);
+  });
+
+  test("toRows flattens per-file counts to tab-keyed rows", () => {
+    assert.deepEqual(toRows({ [WF_A]: { "unpinned-uses": 2, artipacked: 1 } }), {
+      [key(WF_A, "unpinned-uses")]: 2,
+      [key(WF_A, "artipacked")]: 1,
+    });
   });
 });
 
-describe("baseline writers", () => {
-  test("buildBaseline sorts file and ident keys and drops empty rows", () => {
-    const b = buildBaseline({ [WF_B]: { z: 1, a: 2 }, [WF_A]: { "unpinned-uses": 1 }, ".github/workflows/empty.yml": {} });
-    assert.deepEqual(Object.keys(b.files), [WF_A, WF_B]);
-    assert.deepEqual(Object.keys(b.files[WF_B] ?? {}), ["a", "z"]);
-  });
-
-  test("a rebuild from the same findings is byte-identical", () => {
-    const found = countFindings([finding("b", WF_B), finding("a", WF_A), finding("a", WF_A)]);
-    assert.equal(JSON.stringify(buildBaseline(found)), JSON.stringify(buildBaseline(countFindings([finding("a", WF_A), finding("a", WF_A), finding("b", WF_B)]))));
-  });
-
-  test("a scoped re-seed replaces only the named files' rows and keeps the note", () => {
-    const existing = base({ [WF_A]: { "unpinned-uses": 3 }, [WF_B]: { artipacked: 2 } });
-    const found = countFindings([finding("unpinned-uses", WF_A), finding("artipacked", WF_B)]);
-    const merged = mergeBaselineForFiles(existing, found, [WF_A]);
-    assert.deepEqual(merged.files, { [WF_A]: { "unpinned-uses": 1 }, [WF_B]: { artipacked: 2 } });
-    assert.equal(merged.note, "n");
-  });
-
-  test("the committed baseline is sorted, positive-only and keyed by repo-relative workflow paths", async () => {
-    const committed = await loadBaseline();
-    assert.deepEqual(Object.keys(committed.files), Object.keys(committed.files).sort());
-    for (const [file, row] of Object.entries(committed.files)) {
-      assert.match(file, /^\.github\/workflows\/[^/]+\.ya?ml$/);
-      assert.deepEqual(Object.keys(row), Object.keys(row).sort());
-      for (const n of Object.values(row)) assert.ok(Number.isInteger(n) && n > 0);
+describe("the committed baseline", () => {
+  test("is a flat sorted {workflow-path<TAB>ident: n} object of positive integers", () => {
+    const committed = JSON.parse(readFileSync(join(root, BASELINE_REL), "utf8")) as Record<string, number>;
+    assert.deepEqual(Object.keys(committed), Object.keys(committed).sort());
+    assert.ok(Object.keys(committed).length > 0);
+    for (const [k, n] of Object.entries(committed)) {
+      assert.match(k, /^\.github\/workflows\/[^/\t]+\.ya?ml\t[a-z-]+$/);
+      assert.ok(Number.isInteger(n) && n > 0);
     }
   });
 });
@@ -154,6 +148,12 @@ describe("CLI exit codes", () => {
     writeFileSync(file, JSON.stringify([finding("brand-new-ident", WF_A)]));
     const r = run(["--input", file]);
     assert.equal(r.status, 1);
-    assert.match(r.stderr, /brand-new-ident count 1 > baseline 0/);
+    assert.match(r.stderr, /brand-new-ident/);
+  });
+
+  test("the retired --files flag is an unknown flag (exit 2)", () => {
+    const r = run(["--input", join(mkdtempSync(join(tmpdir(), "zizmor-ratchet-")), "x.json"), "--files", "a"]);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /unknown flag --files/);
   });
 });

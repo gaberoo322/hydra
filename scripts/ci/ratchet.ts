@@ -28,14 +28,10 @@
  *                      retired spellings: exit 2 naming the replacement.
  *   exit 0 pass, 1 ratchet violation (including refused growth), 2 crash/usage.
  */
+import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { GateInvariantError } from "../../src/errors.ts";
-import {
-  REPO_ROOT,
-  isCliEntrypoint,
-  loadJsonBaseline,
-  writeJsonBaseline,
-} from "./seam-check-lib.ts";
+import { REPO_ROOT, isCliEntrypoint } from "./seam-check-lib.ts";
 
 export type RatchetShape = "set" | "counted";
 export type RatchetPolarity = "ceiling" | "floor";
@@ -93,6 +89,115 @@ export interface Ratchet {
 }
 
 type Counts = Map<string, number>;
+
+/** One way a baseline JSON document differs from another. */
+export interface BaselineJsonRow {
+  /** Slash-joined JSON path ("" is the root). */
+  path: string;
+  kind:
+    | "raised"
+    | "added-key"
+    | "added-element"
+    | "shape-changed"
+    | "lowered"
+    | "removed-key"
+    | "removed-element";
+  from: string;
+  to: string;
+  /** Untruncated canonical JSON of the array element (element kinds only), for subject derivation. */
+  raw?: string;
+}
+
+function jsonKind(v: unknown): string {
+  if (v === null) return "null";
+  if (Array.isArray(v)) return "array";
+  return typeof v;
+}
+
+const shortJson = (c: string): string => (c.length > 120 ? `${c.slice(0, 117)}...` : c);
+
+/**
+ * The one two-direction comparison of baseline JSON (shape-agnostic, pure, no I/O): `grown` is
+ * every raised number, added object key, added array element (a multiset of canonical-JSON
+ * strings, so a duplicate counts) and JSON-type change; `shrunk` is every lowered number,
+ * removed key and removed element. Strings, booleans and null differing (a timestamped note)
+ * are neither. The shrink-only writer gate and the PR guard both read this, so "growth" has
+ * one definition; which side is the LOOSENING one depends on the polarity of the baseline.
+ */
+export function diffBaselineJson(
+  prev: unknown,
+  next: unknown,
+): { grown: BaselineJsonRow[]; shrunk: BaselineJsonRow[] } {
+  const grown: BaselineJsonRow[] = [];
+  const shrunk: BaselineJsonRow[] = [];
+  const walk = (a: unknown, b: unknown, path: string): void => {
+    const ka = jsonKind(a);
+    const kb = jsonKind(b);
+    if (ka !== kb) {
+      grown.push({ path, kind: "shape-changed", from: ka, to: kb });
+      return;
+    }
+    if (kb === "number") {
+      if ((b as number) > (a as number)) grown.push({ path, kind: "raised", from: String(a), to: String(b) });
+      else if ((b as number) < (a as number)) shrunk.push({ path, kind: "lowered", from: String(a), to: String(b) });
+    } else if (kb === "array") {
+      const multiset = (xs: unknown[]): Map<string, number> => {
+        const m = new Map<string, number>();
+        for (const e of xs) {
+          const c = JSON.stringify(e);
+          m.set(c, (m.get(c) ?? 0) + 1);
+        }
+        return m;
+      };
+      const left = multiset(a as unknown[]);
+      const right = multiset(b as unknown[]);
+      for (const e of b as unknown[]) {
+        const c = JSON.stringify(e);
+        const n = left.get(c) ?? 0;
+        if (n > 0) left.set(c, n - 1);
+        else grown.push({ path, kind: "added-element", from: "(absent)", to: shortJson(c), raw: c });
+      }
+      for (const e of a as unknown[]) {
+        const c = JSON.stringify(e);
+        const n = right.get(c) ?? 0;
+        if (n > 0) right.set(c, n - 1);
+        else shrunk.push({ path, kind: "removed-element", from: shortJson(c), to: "(absent)", raw: c });
+      }
+    } else if (kb === "object") {
+      const oa = a as Record<string, unknown>;
+      const ob = b as Record<string, unknown>;
+      for (const k of Object.keys(ob)) {
+        const sub = path ? `${path}/${k}` : k;
+        if (!Object.hasOwn(oa, k)) grown.push({ path: sub, kind: "added-key", from: "(absent)", to: "(present)" });
+        else walk(oa[k], ob[k], sub);
+      }
+      for (const k of Object.keys(oa)) {
+        if (!Object.hasOwn(ob, k)) {
+          shrunk.push({ path: path ? `${path}/${k}` : k, kind: "removed-key", from: "(present)", to: "(absent)" });
+        }
+      }
+    }
+  };
+  walk(prev, next, "");
+  return { grown, shrunk };
+}
+
+/** Read the baseline JSON: ENOENT yields `fallback` (unseeded), every other error propagates unwrapped. */
+async function readBaselineJson(path: string, fallback: unknown): Promise<unknown> {
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException | null)?.code === "ENOENT") return fallback;
+    throw err;
+  }
+  return JSON.parse(raw);
+}
+
+/** Write the baseline as two-space JSON with a trailing newline (the on-disk form every baseline uses). */
+async function writeBaselineJson(path: string, payload: unknown): Promise<void> {
+  await writeFile(path, JSON.stringify(payload, null, 2) + "\n", "utf8");
+}
 
 const RETIRED_FLAGS: Readonly<Record<string, string>> = {
   "--init": "--write-baseline --allow-grow (seed)",
@@ -247,9 +352,7 @@ async function computeVerdict(
     return fail(`[${policy.id}] measure failed (fail closed): ${describeError(err)}`);
   }
   try {
-    const raw = await loadJsonBaseline<unknown>(resolve(root, policy.baseline), policy.shape === "set" ? [] : {}, {
-      strict: true,
-    });
+    const raw = await readBaselineJson(resolve(root, policy.baseline), policy.shape === "set" ? [] : {});
     full = parseBaseline(raw, policy);
   } catch (err) {
     /* intentional: STD-VERIFY-NEVER-THROW — a corrupt baseline is returned as {ok:false} advice, never thrown */
@@ -279,14 +382,18 @@ async function writeBaseline(
     console.error(v.advice);
     return 2;
   }
-  if (v.added.length > 0 && !allowGrow) {
-    console.error(`[${policy.id}] --write-baseline only tightens; refusing to loosen the baseline:`);
-    console.error(v.advice);
-    return 1;
+  const path = resolve(root, policy.baseline);
+  const payload = serialise(v.counts.measured, policy.shape);
+  if (!allowGrow) {
+    // The writer gate: the same two-direction diff the PR guard reads; the loosening side follows polarity.
+    const d = diffBaselineJson(await readBaselineJson(path, policy.shape === "set" ? [] : {}), payload);
+    if ((policy.polarity === "ceiling" ? d.grown : d.shrunk).length > 0) {
+      console.error(`[${policy.id}] --write-baseline only tightens; refusing to loosen the baseline:`);
+      console.error(v.advice);
+      return 1;
+    }
   }
-  await writeJsonBaseline(resolve(root, policy.baseline), serialise(v.counts.measured, policy.shape), {
-    allowGrow: true,
-  });
+  await writeBaselineJson(path, payload);
   console.log(`[${policy.id}] baseline written: ${v.measured} row(s)`);
   return 0;
 }
