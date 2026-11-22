@@ -237,12 +237,20 @@ describe("advance needs-qa -> verdict targets", () => {
     assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["needs-dev-resume"] }]);
   });
 
-  test("enforce: a valid FAIL trailer with unreadable PR bodies refuses fetch-failed and writes nothing (the bounce would be uncounted)", async () => {
+  test("enforce: a valid T4 FAIL trailer with unreadable PR bodies refuses fetch-failed and writes nothing (the bounce would be uncounted)", async () => {
     const w = world("enforce", live({ timedBodies: [timed(failBody(1))] }), [failBody(1)]);
     w.deps.fetch.prBodies = async () => ({ ok: false });
-    const res = (await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7" } }, w.deps)) as { ok: boolean; code?: string };
+    const res = (await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7", t4: "1" } }, w.deps)) as { ok: boolean; code?: string };
     assert.deepEqual({ ok: res.ok, code: res.code }, { ok: false, code: "fetch-failed" });
     assert.deepEqual(w.edits, []);
+  });
+
+  test("sibling shape: enforce, non-T4, unreadable PR bodies still bounces (a transient read failure must not refuse a T1-T3 FAIL)", async () => {
+    const w = world("enforce", live({ timedBodies: [timed(failBody(1))] }), [failBody(1)]);
+    w.deps.fetch.prBodies = async () => ({ ok: false });
+    const res = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7" } }, w.deps);
+    assert.equal(res.ok, true);
+    assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["needs-dev-resume"] }]);
   });
 
   test("sibling shape: shadow mode with unreadable PR bodies still bounces (INV-12, never refuse on a degraded read outside enforce)", async () => {

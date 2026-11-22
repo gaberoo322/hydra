@@ -422,8 +422,8 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
       if (guard.parked !== null) {
         return { ok: false, issue, code: guard.parked.code, mode, written: guard.parked.written, counts: guard.parked.counts };
       }
-      if (guard.prBodiesUnreadable && edge.attempt.kind === "qa-fail" && mode === "enforce") {
-        // Fail closed: an uncounted T4 FAIL bounce could loop past the deep-qa-fails escalation.
+      if (guard.prBodiesUnreadable && edge.attempt.kind === "qa-fail" && gateEvidence.t4 === "1" && mode === "enforce") {
+        // Fail closed for T4 only: an uncounted T4 FAIL bounce could loop past the deep-qa-fails escalation; T1-T3 bounces self-heal.
         await jr(entry(deps, { kind: "refused", from, result: "refused:fetch-failed", written: false }, input));
         return { ok: false, issue, code: "fetch-failed", mode, written: false };
       }

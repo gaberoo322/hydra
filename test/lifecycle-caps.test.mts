@@ -775,10 +775,18 @@ describe("qa-fail edge with unreadable PR bodies", () => {
     });
     w.deps.fetch.stateEntry = async () => ({ ok: true, value: { enteredAtMs: NOW - 60_000 } });
     w.fetchFail.add("prBodies");
-    const res = (await advance({ issue: 42, to: "needs-dev-resume", evidence: { pr: "5" } }, w.deps)) as any;
+    const res = (await advance({ issue: 42, to: "needs-dev-resume", evidence: { pr: "5", t4: "1" } }, w.deps)) as any;
     assert.equal(res.ok, false);
     assert.equal(res.code, "fetch-failed");
     assert.deepEqual(w.edits, []);
+  });
+
+  test("sibling shape: a non-T4 FAIL bounce with unreadable PR bodies still bounces in enforce", async () => {
+    const w = world("enforce", ["needs-qa"]);
+    w.deps.fetch.stateEntry = async () => ({ ok: true, value: { enteredAtMs: NOW - 60_000 } });
+    w.fetchFail.add("prBodies");
+    const res = (await advance({ issue: 42, to: "needs-dev-resume", evidence: { pr: "5" } }, w.deps)) as any;
+    assert.equal(res.ok, true);
   });
 
   test("sibling shape: with the bodies readable the second deep-QA FAIL marker still escalates", async () => {

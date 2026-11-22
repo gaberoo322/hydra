@@ -24,6 +24,8 @@ export interface QaBounceInput {
   actor: string;
   /** The trailer-less defer arm (no verdict was emitted): admits only this bounce. */
   defer?: boolean;
+  /** The PR is a T4 Verifier-Core PR: an unreadable PR-bodies read then refuses the bounce (the deep-qa-fails count cannot be skipped). */
+  t4?: boolean;
 }
 
 export type QaBounceResult =
@@ -46,7 +48,7 @@ export async function qaBounce(input: QaBounceInput, deps: SeamDeps): Promise<Qa
       {
         issue: input.issue,
         to,
-        evidence: { pr: String(input.pr), ...(input.defer === true ? { defer: "1" } : {}) },
+        evidence: { pr: String(input.pr), ...(input.defer === true ? { defer: "1" } : {}), ...(input.t4 === true ? { t4: "1" } : {}) },
         actor: input.actor,
       },
       once,

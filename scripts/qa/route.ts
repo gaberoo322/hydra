@@ -304,12 +304,12 @@ async function runRouteImpl(
    * live PR read, so this file never names a bounce lane. `pr-merged` is not an error (see `advance`).
    * A dry run cannot read the PR, so it reports the OPEN-PR lane.
    */
-  const bounce = async (kind: string, defer = false): Promise<QaBounceResult> => {
+  const bounce = async (kind: string, defer = false, t4 = false): Promise<QaBounceResult> => {
     if (opts.dryRun) {
       effects.push({ kind, target: `issue#${issue}`, ok: true });
       return { ok: true, to: "needs-dev-resume" };
     }
-    const res = await ports.qaBounce({ issue, pr, actor: QA_ACTOR, ...(defer ? { defer: true } : {}) });
+    const res = await ports.qaBounce({ issue, pr, actor: QA_ACTOR, ...(defer ? { defer: true } : {}), ...(t4 ? { t4: true } : {}) });
     effects.push({ kind, target: `issue#${issue}`, ok: res.ok });
     if (res.ok === false && res.code === "pr-merged") throw new PrMergedStop();
     if (res.ok === false) console.error(`[hydra-qa] WARN: lifecycle bounce on issue#${issue} refused (${res.code || "unknown"})`);
@@ -661,7 +661,7 @@ async function runRouteImpl(
       let escalate = false;
       let escalated = false;
       let label: "needs-dev-resume" | "ready-for-agent" = "needs-dev-resume";
-      const adv = await bounce("fail-bounce-advance");
+      const adv = await bounce("fail-bounce-advance", false, tier === 4);
       if (adv.ok === true) {
         label = adv.to;
       } else {
