@@ -27,9 +27,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  PROMPT_RULE_ID,
   READ_KINDS,
-  RULE_ID,
   advisoryPromptSites,
   isCodePathLiteral,
   pinRow,
@@ -42,12 +40,7 @@ import {
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const BASELINE_PATH = "test/fixtures/test-source-read-baseline.json";
 
-describe("test-source-read ratchet (live tree)", () => {
-  it("every code-reading test file is listed under a sanctioned kind, no pin count grew, and no row is stale", async () => {
-    const v = await testSourceReadRatchet.verdict();
-    assert.ok(v.ok, `${v.advice}\nRules: ${RULE_ID} (code reads / pins), ${PROMPT_RULE_ID} (prompt pins)`);
-  });
-
+describe("test-source-read ratchet (baseline fixture)", () => {
   it("the ratchet test lists itself as invariant-lint", () => {
     const rows = JSON.parse(readFileSync(join(ROOT, BASELINE_PATH), "utf8")) as Record<string, number>;
     assert.equal(rows[readerRow("test/test-source-read-ratchet.test.mts", "invariant-lint")], 1);

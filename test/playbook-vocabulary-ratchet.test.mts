@@ -335,13 +335,6 @@ describe("playbook-vocabulary-ratchet: the process-meta shape", () => {
 });
 
 describe("playbook-vocabulary-ratchet: the real playbooks", () => {
-  test("no playbook or fragment is above or below its baselined count", async () => {
-    const v = await vocabularyRatchet.verdict();
-    assert.equal(v.ok, true, v.advice);
-    assert.equal(v.added.length, 0);
-    assert.equal(v.stale.length, 0);
-  });
-
   test("target-seam-preamble.md carries zero symbol-cite hits (cleaned in this PR; INV-4 amendment)", () => {
     const rel = "docs/operator-playbooks/_fragments/target-seam-preamble.md";
     const hits = scanRepo()[rel] ?? [];

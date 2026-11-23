@@ -17,6 +17,8 @@
  * changes one. Importing this module has no side effects: every ratchet module
  * gates its CLI behind `runIfCli`.
  */
+import { existsSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { anthropicSeamRatchet } from "./anthropic-seam-check.ts";
 import { claudeCliSeamRatchet } from "./claude-cli-seam-check.ts";
 import { failLoudRatchet } from "./fail-loud-ratchet.ts";
@@ -143,4 +145,22 @@ export function rowEnforcement(row: RatchetRow): RatchetEnforcement | undefined 
 /** The only lookup: the row that owns `baselinePath`, or undefined for a path no row claims. */
 export function registryRowFor(baselinePath: string): RatchetRow | undefined {
   return RATCHETS.find((row) => rowBaseline(row) === baselinePath);
+}
+
+/** Every `*-baseline.json` on disk (scripts/ci non-recursive, test/fixtures recursive), sorted: the registry owns the claim that each has exactly one row. */
+export function listBaselineFixtures(root: string): string[] {
+  const out: string[] = [];
+  const walk = (rel: string, recurse: boolean): void => {
+    const dir = join(root, rel);
+    if (!existsSync(dir)) return;
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const r = `${rel}/${e.name}`;
+      if (e.isDirectory()) {
+        if (recurse) walk(r, recurse);
+      } else if (e.name.endsWith("-baseline.json")) out.push(r);
+    }
+  };
+  walk("scripts/ci", false);
+  walk("test/fixtures", true);
+  return out.sort();
 }

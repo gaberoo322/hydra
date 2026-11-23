@@ -20,11 +20,11 @@
  * advisory step in advisory-checks.yml — never ci.yml (Verifier Core).
  */
 import { execFileSync } from "node:child_process";
-import { appendFileSync, existsSync, readdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { appendFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { diffBaselineJson, loosening, type BaselineJsonRow, type RatchetPolarity } from "./ratchet.ts";
-import { registryRowFor, rowPolarity } from "./ratchets.ts";
+import { listBaselineFixtures, registryRowFor, rowPolarity } from "./ratchets.ts";
 
 export type FindingKind = BaselineJsonRow["kind"] | "unparseable";
 
@@ -80,23 +80,6 @@ export function parseBaselineRaiseLines(body: string): {
     else malformed.push(line);
   }
   return { lines, malformed };
-}
-
-export function listBaselineFixtures(root: string): string[] {
-  const out: string[] = [];
-  const walk = (rel: string, recurse: boolean): void => {
-    const dir = join(root, rel);
-    if (!existsSync(dir)) return;
-    for (const e of readdirSync(dir, { withFileTypes: true })) {
-      const r = `${rel}/${e.name}`;
-      if (e.isDirectory()) {
-        if (recurse) walk(r, recurse);
-      } else if (e.name.endsWith("-baseline.json")) out.push(r);
-    }
-  };
-  walk("scripts/ci", false);
-  walk("test/fixtures", true);
-  return out.sort();
 }
 
 const looksLikePath = (s: string): boolean => /^[\w.@-]+(\/[\w.@-]+)+$/.test(s) && /\.[A-Za-z0-9]+$/.test(s);

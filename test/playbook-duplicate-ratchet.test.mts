@@ -131,13 +131,6 @@ describe("playbook-duplicate-ratchet: policy", () => {
 });
 
 describe("playbook-duplicate-ratchet: the real playbooks", () => {
-  test("no playbook or fragment is above or below its baselined span count", async () => {
-    const v = await duplicateRatchet.verdict();
-    assert.equal(v.ok, true, v.advice);
-    assert.equal(v.added.length, 0);
-    assert.equal(v.stale.length, 0);
-  });
-
   test("the standard the report points at defines STD-PLAYBOOK-ONE-HOME and names this ratchet", () => {
     const standard = readFileSync(join(REPO_ROOT, STANDARD_REL), "utf8");
     assert.match(standard, /^### STD-PLAYBOOK-ONE-HOME\n[\s\S]*?enforced-by: reviewer, scripts\/ci\/playbook-duplicate-ratchet\.ts/m);

@@ -1,0 +1,1 @@
+- refactor(test): one required meta-test runs every required Ratchet on the live tree; registry totality moves to it (#5657)

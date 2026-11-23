@@ -231,11 +231,4 @@ describe("playbook-reference-check: the real playbooks", () => {
     assert.ok(files.some((f: string) => f.startsWith("docs/operator-playbooks/_fragments/")));
     assert.ok(!files.some((f: string) => f.endsWith("README.md")));
   });
-
-  test("no unresolved reference outside the baseline, and no stale baseline entry", async () => {
-    const v = await referenceRatchet.verdict();
-    assert.equal(v.ok, true, v.advice);
-    assert.equal(v.added.length, 0);
-    assert.equal(v.stale.length, 0);
-  });
 });

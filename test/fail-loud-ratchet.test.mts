@@ -1,8 +1,7 @@
 /**
  * test/fail-loud-ratchet.test.mts — blocking shrink-only STD-CATCH-FAIL-LOUD
- * ratchet (issue #5424). The live describe is the gate (runs in the REQUIRED
- * `test` job); the pure describe pins the key/diff semantics. Fails closed:
- * an ast-grep spawn/exit/parse failure FAILS the live test, never skips it.
+ * ratchet (issue #5424). The pure describe pins the key/diff semantics; the
+ * live-tree verdict runs in test/ratchets-live.test.mts (REQUIRED `test` job).
  */
 
 import { test, describe } from "node:test";
@@ -14,7 +13,6 @@ const {
   buildScanArgs,
   hitKey,
   normaliseText,
-  failLoudRatchet,
   toHits,
 } = await import("../scripts/ci/fail-loud-ratchet.ts");
 
@@ -44,13 +42,5 @@ describe("fail-loud-ratchet: pure semantics", () => {
   test("src/ lane rule is in the ratchet filter beside the generic rule (#5435 QA)", () => {
     assert.ok(FAIL_LOUD_RULE_IDS.includes("fail-loud-catch-src" as never));
     assert.ok(FAIL_LOUD_RULE_IDS.includes("fail-loud-catch"));
-  });
-});
-
-describe("fail-loud-ratchet: live tree vs committed baseline", () => {
-  test("no new silent catch/except/`|| true` hits (fails closed on tool error)", async () => {
-    const v = await failLoudRatchet.verdict();
-    assert.equal(v.ok, true, v.advice);
-    assert.equal(v.added.length, 0, v.advice);
   });
 });
