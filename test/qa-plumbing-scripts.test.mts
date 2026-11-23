@@ -106,6 +106,8 @@ interface HarnessOptions {
   parkCounts?: CapCount[];
   /** Whether an `escalated:<arm>` bounce refusal's exit write landed (default: omitted, as a pre-#5662 seam). */
   exitWritten?: boolean;
+  /** Whether the PR-bodies preflight read succeeds (default: true). */
+  prBodiesReadable?: boolean;
   http?: PlumbingPorts["http"];
   fetchers?: QaVerdictFetchers;
   phase?: PlumbingPorts["phase"];
@@ -139,6 +141,7 @@ function harness(o: HarnessOptions = {}): Harness {
       }
       return out.code.startsWith("parked:") ? { ok: false, code: out.code as `parked:${string}`, counts: o.parkCounts ?? [] } : { ok: false, code: out.code };
     },
+    prBodiesReadable: async () => o.prBodiesReadable !== false,
     async gh(argv) {
       gh.push(argv);
       if (isWrite(argv)) log.push(argv);
@@ -918,6 +921,22 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
     const t4Fail: Canned = { verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high", failMarker: "FAIL-MARKER" };
     const lost = harness({ ghHandler: withState("OPEN"), advanceHandler: refuse("needs-dev-resume", "escalated:deep-qa-fails"), exitWritten: false, phase: cannedPhase(t4Fail) });
     await assert.rejects(runRoute(ROUTE_OPTS, pre, lost.ports, realDeps()), /escalation refused/);
+  });
+
+  test("route T4 FAIL with unreadable PR bodies refuses before ANY side effect: no disarm, no comment, no marker, no bounce", async () => {
+    const pre = readyPre({ tier: { num: 4, adversarial: true } });
+    const t4Fail: Canned = { verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high", failMarker: "FAIL-MARKER" };
+    const unreadable = harness({ ghHandler: withState("OPEN"), prBodiesReadable: false, phase: cannedPhase(t4Fail) });
+    await assert.rejects(runRoute(ROUTE_OPTS, pre, unreadable.ports, realDeps()), /fetch-failed/);
+    assert.deepEqual(unreadable.writes(), [], "nothing written: needs-qa retained, no marker to double-count on retry");
+    assert.deepEqual(unreadable.advances, []);
+  });
+
+  test("sibling shape: a T1-T3 FAIL does not preflight the PR bodies and still bounces", async () => {
+    const t3Fail: Canned = { verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high" };
+    const h = harness({ ghHandler: withState("OPEN"), prBodiesReadable: false, phase: cannedPhase(t3Fail) });
+    await runRoute(ROUTE_OPTS, readyPre(), h.ports, realDeps());
+    assert.equal(h.advances.length, 1);
   });
 
   test("route: PASS-pending-CI posts the pending comment then enters qa-passed through the seam", async () => {

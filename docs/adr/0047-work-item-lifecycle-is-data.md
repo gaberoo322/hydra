@@ -32,8 +32,9 @@ Exactly one state per open issue: `needs-triage`, `needs-info`, `needs-research`
 
 - `qa-passed` (new) ends the PASS→`in-progress`→`needs-qa` bounce. `in-progress` now means only
   "an agent is working".
-- `parked` (new) is where **every** cap exhaustion lands, the #4735 QA round cap included.
-  `ready-for-human` keeps exactly its ADR-0005 meaning.
+- `parked` (new) is where every cap exhaustion lands, the #4735 QA round cap included, with one
+  exception: the `deep-qa-fails` escalate exit (Decision 6) writes `ready-for-human`, ADR-0005 reason
+  `t4-deep-qa-exhausted`. `ready-for-human` keeps exactly its ADR-0005 meaning.
 - All other labels (GLM lane, `needs-design-concept`, producer/category, `keep-open`,
   `target-backlog`) are **flags**: orthogonal, free-write, never a state. `wayfinder:*` keeps its own
   native-frontier lifecycle.
@@ -131,10 +132,16 @@ Caps are per arm, plus a total dispatch-claim budget per issue. The limits live 
   Only `deep-qa-fails` escalates: ADR-0015 routes "a second failed deep-QA pass" to the operator, and
   `t4-deep-qa-exhausted` is one of the four ADR-0005 `ready-for-human` reasons (Decision 4). It counts
   the `Verifier-Core deep-QA: FAIL` marker comments on the PR after the latest `Hydra-Cap-Reset:` (the
-  seam fetches them itself; no tier is passed in), rides the `qa-fail` edges, and is evaluated before
+  seam fetches them itself; no tier or flag is passed in by a caller), rides the `qa-fail` edges, and is evaluated before
   every park row. An escalation takes the same one cap-exit path as a park (`parkForCap`): closes the
   claim, journals `reason=cap:deep-qa-fails`, posts the unified cap comment, and `qaBounce` returns
   `escalated:deep-qa-fails`.
+- **Fail closed on an unreadable ledger (INV-12 exception):** a `qa-fail` edge whose PR-bodies read fails
+  skips the cap check, but when the live PR record the seam already reads carries a deep-QA FAIL marker
+  (the seam decides T4 itself) it refuses `fetch-failed` instead of bouncing, in shadow as well as
+  enforce (the arm is `liveInShadow`). An unreadable PR record also refuses. T1-T3 bounces self-heal and
+  are unaffected. The QA route preflights the same read before its first T4 FAIL side effect, so a
+  refusal leaves no comment or marker behind and a retry cannot double-count.
 
 - **Edges carry their cap:** a `Transition` row in `src/lifecycle/transitions.ts` may declare
   `cap: "requeue" | "qa-fail"` (`in-progress -> ready-for-agent` is `requeue`; the `needs-qa ->

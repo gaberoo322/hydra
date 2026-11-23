@@ -304,12 +304,12 @@ async function runRouteImpl(
    * live PR read, so this file never names a bounce lane. `pr-merged` is not an error (see `advance`).
    * A dry run cannot read the PR, so it reports the OPEN-PR lane.
    */
-  const bounce = async (kind: string, defer = false, t4 = false): Promise<QaBounceResult> => {
+  const bounce = async (kind: string, defer = false): Promise<QaBounceResult> => {
     if (opts.dryRun) {
       effects.push({ kind, target: `issue#${issue}`, ok: true });
       return { ok: true, to: "needs-dev-resume" };
     }
-    const res = await ports.qaBounce({ issue, pr, actor: QA_ACTOR, ...(defer ? { defer: true } : {}), ...(t4 ? { t4: true } : {}) });
+    const res = await ports.qaBounce({ issue, pr, actor: QA_ACTOR, ...(defer ? { defer: true } : {}) });
     effects.push({ kind, target: `issue#${issue}`, ok: res.ok });
     if (res.ok === false && res.code === "pr-merged") throw new PrMergedStop();
     if (res.ok === false) console.error(`[hydra-qa] WARN: lifecycle bounce on issue#${issue} refused (${res.code || "unknown"})`);
@@ -652,6 +652,11 @@ async function runRouteImpl(
       // Every FAIL (any tier): the universal remediation bounce. Disarm FIRST (#4737), then the verdict
       // comment (carrying this round's trailer, and for T4 the deep-QA fail marker) goes FIRST; the seam
       // owns both caps: the 3rd reviewed FAIL parks, the 2nd T4 deep-QA FAIL escalates (#5662).
+      // A T4 FAIL reads the PR-bodies ledger BEFORE any side effect: unreadable refuses fetch-failed with nothing
+      // disarmed, posted or marked, so a retry can never double-count a deep-QA marker (the seam re-checks; T4 is decided there).
+      if (tier === 4 && !opts.dryRun && ports.prBodiesReadable !== undefined && !(await ports.prBodiesReadable(pr))) {
+        throw new Error("lifecycle bounce refused (fetch-failed): PR bodies unreadable before the T4 FAIL, nothing posted - not editing labels by hand");
+      }
       await disarmChecked();
       if (tier === 4) {
         await prComment(bodies.t4Review(report, verdict, verdictReason, t4FailMarker, checksBlock, trailer), "t4-review-comment");
@@ -661,7 +666,7 @@ async function runRouteImpl(
       let escalate = false;
       let escalated = false;
       let label: "needs-dev-resume" | "ready-for-agent" = "needs-dev-resume";
-      const adv = await bounce("fail-bounce-advance", false, tier === 4);
+      const adv = await bounce("fail-bounce-advance");
       if (adv.ok === true) {
         label = adv.to;
       } else {

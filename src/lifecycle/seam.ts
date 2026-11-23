@@ -35,6 +35,7 @@ import { isUnsanctionedHoldExit } from "./hold-exit.ts";
 import {
   buildSeedEvidence,
   capExitOf,
+  DEEP_QA_FAIL_MARKER,
   countDeepQaFailsAfterReset,
   countReviewedFailRoundsAfterReset,
   evaluateCaps,
@@ -202,6 +203,18 @@ type CapGuard =
       prBodiesUnreadable?: undefined;
     }
   | { parked: null; stamp: CapStamp; shadowOver: CapOver | null; prBodiesUnreadable: boolean };
+
+/**
+ * Whether the live PR record carries a Verifier-Core deep-QA FAIL marker, i.e. the PR is T4. The seam decides
+ * T4-ness itself from the record it reads (INV-3: no caller-supplied tier). An unreadable record cannot rule T4
+ * out, so it answers true (fail closed).
+ */
+async function recordShowsDeepQaFail(deps: SeamDeps, pr: number): Promise<boolean> {
+  const live = deps.fetch.qaLive === undefined ? undefined : await deps.fetch.qaLive(pr);
+  if (live === undefined || live.ok === false) return true;
+  const bodies = [...live.value.bodies, ...(live.value.timedBodies ?? []).map((t) => t.body)];
+  return bodies.some((b) => b.includes(DEEP_QA_FAIL_MARKER));
+}
 
 /**
  * The ONE cap step (ADR-0047 D6/D7). Checks the caps for `attempt`, then:
@@ -422,8 +435,8 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
       if (guard.parked !== null) {
         return { ok: false, issue, code: guard.parked.code, mode, written: guard.parked.written, counts: guard.parked.counts };
       }
-      if (guard.prBodiesUnreadable && edge.attempt.kind === "qa-fail" && gateEvidence.t4 === "1" && mode === "enforce") {
-        // Fail closed for T4 only: an uncounted T4 FAIL bounce could loop past the deep-qa-fails escalation; T1-T3 bounces self-heal.
+      if (guard.prBodiesUnreadable && edge.attempt.kind === "qa-fail" && edge.pr !== null && (await recordShowsDeepQaFail(deps, edge.pr))) {
+        // Fail closed for a T4 PR (decided here, from the live PR record) in BOTH modes: deep-qa-fails is a live arm, and an uncounted T4 FAIL bounce could loop past its escalation. T1-T3 bounces self-heal.
         await jr(entry(deps, { kind: "refused", from, result: "refused:fetch-failed", written: false }, input));
         return { ok: false, issue, code: "fetch-failed", mode, written: false };
       }
