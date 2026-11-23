@@ -141,7 +141,7 @@ Caps are per arm, plus a total dispatch-claim budget per issue. The limits live 
   (the seam decides T4 itself) it refuses `fetch-failed` instead of bouncing, in shadow as well as
   enforce (the arm is `liveInShadow`). An unreadable PR record also refuses. T1-T3 bounces self-heal and
   are unaffected. The QA route preflights the same read before its first T4 FAIL side effect, so a
-  refusal leaves no comment or marker behind and a retry cannot double-count: the count keys real deep-QA FAIL comments (marker on its own line plus a `QA-Verdict: FAIL` trailer) by head sha, so a retry on the same head is one FAIL even if the seam refuses after the comment posted.
+  refusal leaves no comment or marker behind and a retry cannot double-count.
 
 - **Edges carry their cap:** a `Transition` row in `src/lifecycle/transitions.ts` may declare
   `cap: "requeue" | "qa-fail"` (`in-progress -> ready-for-agent` is `requeue`; the `needs-qa ->
