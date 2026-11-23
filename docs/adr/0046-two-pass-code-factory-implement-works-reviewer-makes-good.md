@@ -51,8 +51,8 @@ authority for PR-body drift, baseline regen and missing pins.
 
 A required `test-source-read-ratchet` test gates test reads of code paths against a kind-tagged
 fixture (grandfathered rows only shrink). The mutation gate counts unparseable mutants as `skipped`
-(removes the ~28.7% free kills); it stays advisory (`MUTATION_GATE_BLOCKING` unset; turning it on is a
-separate T4 decision). The 20 runnable structure-sensitive pins convert in ~4 cluster issues;
+(removes the ~28.7% free kills); it was advisory when this decision was written (`MUTATION_GATE_BLOCKING` unset) — superseded by the
+2026-11-20 amendment below, which turns blocking on. The 20 runnable structure-sensitive pins convert in ~4 cluster issues;
 `docs/generated/` inventories drop `"line"` fields.
 
 **Amendment — MUTATION_GATE_BLOCKING on at T3 floor 50 (2026-11-20, issue #5273).** Operator
@@ -112,5 +112,5 @@ never edits QA prompts, the fold, `qa-verdict.ts` or rollout config. Cues are na
   and 64% of FAIL rounds need the implementer anyway.
 - **Move all of CLAUDE.md's standards out.** Rejected: extraction saves only ~8-13%; fences stay where
   breach needs prod-code rework. The 2.7k-word pitfalls section is a separate lever (#5218).
-- **Turn on `MUTATION_GATE_BLOCKING` now.** Deferred until ~30 `src/` PRs of validity-fixed kill rates.
+- **Turn on `MUTATION_GATE_BLOCKING` now.** Deferred until ~30 `src/` PRs of validity-fixed kill rates. (Superseded by the Decision 4 amendment: turned on 2026-11-20, #5273.)
 - **Third-party review services.** Out of scope; Hydra already builds its own.

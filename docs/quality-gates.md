@@ -142,7 +142,9 @@ still reports `pass` with `killRate: 100`.
 **Blocking (issue #5273).** `ci.yml` passes `MUTATION_GATE_BLOCKING` with the
 fallback `1`, so a below-floor kill rate exits `2` and holds the required
 `mutation-test` check. Setting the repo variable `MUTATION_GATE_BLOCKING=0`
-pauses blocking without a T4 PR. A timed-out or no-signal verdict never blocks.
+pauses blocking without a T4 PR. A timed-out or no-signal verdict never blocks. The T3/T4 floor was lowered from 55 to 50
+intentionally (observed in-budget minimum 50 over 37 verdicts); revisit and ratchet it up
+once the distribution of blocking-era verdicts supports a higher floor.
 
 This is distinct from `skipped`: `skipped` means "no src/**/*.ts files in diff,
 runner never invoked"; `neutral`/`warn` mean "runner ran, couldn't produce a

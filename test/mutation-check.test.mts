@@ -574,8 +574,33 @@ describe("non-blocking rollout switch + conclusive kill rate (issue #4504)", () 
 
   test("ci.yml mutation gate step turns blocking on at T3 floor 50 (issue #5273)", () => {
     const yml = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
-    assert.ok(yml.includes("MUTATION_GATE_BLOCKING: ${{ vars.MUTATION_GATE_BLOCKING || '1' }}"));
-    assert.ok(yml.includes("MUTATION_KILL_RATE_FLOOR_T3: ${{ vars.MUTATION_KILL_RATE_FLOOR_T3 || '50' }}"));
+    // Slice to the mutation-test job, then the `Run mutation gate` step, then its
+    // `env:` block (up to `run:`) so a match in a comment or another job cannot pass.
+    const job = yml.slice(yml.indexOf("\n  mutation-test:\n"));
+    const step = job.slice(job.indexOf("- name: Run mutation gate"));
+    const env = step.slice(step.indexOf("env:"), step.indexOf("run: |"));
+    const live = env.split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
+    assert.ok(live.includes("MUTATION_GATE_BLOCKING: ${{ vars.MUTATION_GATE_BLOCKING || '1' }}"));
+    assert.ok(live.includes("MUTATION_KILL_RATE_FLOOR_T3: ${{ vars.MUTATION_KILL_RATE_FLOOR_T3 || '50' }}"));
+  });
+
+  test("blocking on at tier>=3: timed-out and no-signal verdicts stay warn, never fail (issue #5273)", () => {
+    for (const tier of [3, 4]) {
+      // no signal: nothing conclusive
+      const ns = classifyNoSignal(makeReport({ totalMutants: 4, skipped: 4, candidatesGenerated: 4 }), tier);
+      assert.ok(ns);
+      assert.equal(ns.status, "warn");
+    }
+    // timed out with a partial kill rate (10%) far below the T3 floor of 50
+    const to = classifyTimedOut(
+      makeReport({ totalMutants: 10, killed: 1, survived: 9, timedOut: true, candidatesGenerated: 20 }),
+    );
+    assert.ok(to);
+    assert.equal(to.status, "warn");
+    assert.equal(to.killRate, 10);
+    // sibling shape: a complete run below the floor with blocking on DOES fail
+    assert.equal(classifyTimedOut(makeReport({ totalMutants: 10, killed: 1, survived: 9 })), null);
+    assert.equal(resolveKillRateVerdict(10, 50, true).status, "fail");
   });
 
   test("conclusiveMutants excludes inconclusive + no-coverage + skipped", () => {

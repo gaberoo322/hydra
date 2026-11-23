@@ -227,6 +227,8 @@ jobs:
   #   `status: "skipped"` with a clear reason when the set is empty
   #   (asset-only / doc-only / dashboard-only PRs). NOT a silent pass.
   #
+  # Blocking since issue #5273 (MUTATION_GATE_BLOCKING defaults on; ADR-0046 D4 amendment).
+  #
   # See docs/quality-gates.md for thresholds, overrides, and the
   # [quick-fix] bypass.
   mutation-test:
