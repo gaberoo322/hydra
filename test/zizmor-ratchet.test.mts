@@ -4,7 +4,7 @@
  */
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -115,6 +115,36 @@ describe("the committed baseline", () => {
     const v = await zizmorRatchet.verdict(root, { measure: async () => ({}), keep: () => false });
     assert.equal(v.crashed, undefined, v.advice);
     assert.equal(v.ok, true);
+  });
+});
+
+describe("committed baseline parity (INV-7)", () => {
+  test("findings synthesised from the committed rows give zero added, zero stale over 34 rows", async () => {
+    const baseline = JSON.parse(readFileSync(join(root, "scripts/ci/zizmor-baseline.json"), "utf8")) as Record<string, number>;
+    const findings: unknown[] = [];
+    for (const [key, n] of Object.entries(baseline)) {
+      const [file, ident] = key.split("\t");
+      for (let i = 0; i < n; i++) findings.push(finding(ident, file));
+    }
+    const dir = mkdtempSync(join(tmpdir(), "zizmor-ratchet-"));
+    writeFileSync(join(dir, "zizmor-results.json"), JSON.stringify(findings));
+    const v = await zizmorRatchet.verdict(root, {
+      measure: async () => toRows(loadFindings(join(dir, "zizmor-results.json"))),
+      keep: () => true,
+    });
+    assert.equal(Object.keys(baseline).length, 34);
+    assert.deepEqual(v.added, []);
+    assert.deepEqual(v.stale, []);
+    assert.equal(v.ok, true);
+  });
+
+  test("sibling shape: one extra finding over the committed rows is added, not parity", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "zizmor-ratchet-"));
+    const file = join(dir, "f.json");
+    writeFileSync(file, JSON.stringify([finding("brand-new-ident", WF_A)]));
+    const v = await zizmorRatchet.verdict(root, { measure: async () => toRows(loadFindings(file)), keep: () => true });
+    assert.equal(v.ok, false);
+    assert.equal(v.added.length, 1);
   });
 });
 
