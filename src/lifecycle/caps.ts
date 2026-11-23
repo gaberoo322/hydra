@@ -214,7 +214,30 @@ export const DEEP_QA_FAIL_MARKER = "Verifier-Core deep-QA: FAIL";
  */
 export function countDeepQaFailsAfterReset(bodies: ReadonlyArray<TimedBody>, issueResetMs: number): number {
   const resetMs = Math.max(issueResetMs, latestResetMs(bodies.map((b) => b.body)));
-  return bodies.filter((b) => (b.tsMs === null || b.tsMs > resetMs) && b.body.includes(DEEP_QA_FAIL_MARKER)).length;
+  const shas = new Set<string>();
+  let unkeyed = 0;
+  for (const b of bodies) {
+    if (!(b.tsMs === null || b.tsMs > resetMs)) continue;
+    const key = deepQaFailKey(b.body);
+    if (key === null) continue;
+    if (key === "") unkeyed++;
+    else shas.add(key);
+  }
+  return shas.size + unkeyed;
+}
+
+/**
+ * Whether `body` is a real deep-QA FAIL verdict comment: the marker alone on its own line AND a
+ * `QA-Verdict: FAIL` trailer line. Returns the trailer's head sha (a retry on the same head is one
+ * FAIL, not two), "" when the trailer carries no sha, or null when it is not a deep-QA FAIL comment
+ * (a T1-T3 PR quoting the marker literal in prose never counts).
+ */
+function deepQaFailKey(body: string): string | null {
+  const lines = body.split("\n").map((l) => l.trim());
+  if (!lines.includes(DEEP_QA_FAIL_MARKER)) return null;
+  const trailer = lines.find((l) => /^QA-Verdict:\s*FAIL\b/.test(l));
+  if (trailer === undefined) return null;
+  return /\bsha=([0-9a-f]+)/.exec(trailer)?.[1] ?? "";
 }
 
 // ---------------------------------------------------------------------------

@@ -490,7 +490,9 @@ describe("qaBounce: the seam picks a QA FAIL's exit from one live read (#5659)",
 describe("the 2nd T4 deep-QA FAIL escalates through the deep-qa-fails Cap Arm (#5662)", () => {
   const MARK = "Verifier-Core deep-QA: FAIL";
   /** A T4 FAIL comment: the marker, plus a trailer for round `n` (so it also counts as a reviewed round). */
-  const deepFail = (n: number) => `${failBody(n)}\n\n${MARK}`;
+  const deepFail = (n: number, sha = SHA12) =>
+    `### Findings\n| x |\n\n## Standards\n\n${MARK}\n\n${trailer("FAIL", n, sha)}`;
+  const shaOf = (n: number) => String(n).repeat(12);
   const input = { issue: 10, pr: 7, actor: "hydra-qa" };
 
   test("the first T4 FAIL bounces", async () => {
@@ -500,7 +502,7 @@ describe("the 2nd T4 deep-QA FAIL escalates through the deep-qa-fails Cap Arm (#
   });
 
   test("the second escalates to ready-for-human with one unified cap comment, journaled cap:deep-qa-fails", async () => {
-    const two = [deepFail(1), deepFail(2)];
+    const two = [deepFail(1, shaOf(1)), deepFail(2, shaOf(2))];
     const w = world("enforce", live({ timedBodies: [timed(deepFail(2))] }), two);
     const res = await qaBounce(input, w.deps);
     assert.equal(res.ok, false);
@@ -516,7 +518,7 @@ describe("the 2nd T4 deep-QA FAIL escalates through the deep-qa-fails Cap Arm (#
   });
 
   test("shadow mode escalates too: deep-qa-fails is a live arm", async () => {
-    const w = world("shadow", live({ timedBodies: [timed(deepFail(2))] }), [deepFail(1), deepFail(2)]);
+    const w = world("shadow", live({ timedBodies: [timed(deepFail(2))] }), [deepFail(1, shaOf(1)), deepFail(2, shaOf(2))]);
     const res = await qaBounce(input, w.deps);
     assert.equal((res as { code?: string }).code, "escalated:deep-qa-fails");
     assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["ready-for-human"] }]);
@@ -525,10 +527,10 @@ describe("the 2nd T4 deep-QA FAIL escalates through the deep-qa-fails Cap Arm (#
   test("a FAIL after an operator reset counts as the first again and bounces", async () => {
     const resetTs = Date.parse("2026-11-04T09:00:00Z");
     const bodies: TimedBody[] = [
-      { body: deepFail(1), tsMs: resetTs - 2000 },
-      { body: deepFail(2), tsMs: resetTs - 1000 },
+      { body: deepFail(1, shaOf(1)), tsMs: resetTs - 2000 },
+      { body: deepFail(2, shaOf(2)), tsMs: resetTs - 1000 },
       { body: "Hydra-Cap-Reset: by=op ts=2026-11-04T09:00:00Z", tsMs: resetTs },
-      { body: deepFail(3), tsMs: resetTs + 1000 },
+      { body: deepFail(3, shaOf(3)), tsMs: resetTs + 1000 },
     ];
     const w = world("enforce", live({ timedBodies: [timed(deepFail(3))] }), bodies);
     assert.deepEqual(await qaBounce(input, w.deps), { ok: true, to: "needs-dev-resume" });
@@ -536,7 +538,7 @@ describe("the 2nd T4 deep-QA FAIL escalates through the deep-qa-fails Cap Arm (#
   });
 
   test("with both arms over their limits, the escalate row wins over the park row", async () => {
-    const three = [deepFail(1), deepFail(2), deepFail(3)];
+    const three = [deepFail(1, shaOf(1)), deepFail(2, shaOf(2)), deepFail(3, shaOf(3))];
     const w = world("enforce", live({ timedBodies: [timed(deepFail(3))] }), three);
     const res = await qaBounce(input, w.deps);
     assert.equal((res as { code?: string }).code, "escalated:deep-qa-fails");
@@ -548,5 +550,20 @@ describe("the 2nd T4 deep-QA FAIL escalates through the deep-qa-fails Cap Arm (#
     const w = world("enforce", live({ timedBodies: [timed(failBody(3))] }), three);
     assert.equal(((await qaBounce(input, w.deps)) as { code?: string }).code, "parked:qa-fail-rounds");
     assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["parked"] }]);
+  });
+
+  test("a retried FAIL on the same head sha is one deep-QA FAIL, not two (retry cannot double-count)", async () => {
+    const dup = [deepFail(1), deepFail(1)];
+    const w = world("enforce", live({ timedBodies: [timed(deepFail(1))] }), dup);
+    assert.deepEqual(await qaBounce(input, w.deps), { ok: true, to: "needs-dev-resume" });
+    assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["needs-dev-resume"] }]);
+  });
+
+  test("a T3 PR quoting the marker literal twice in prose bounces on its first FAIL, never escalates", async () => {
+    const quote = `we discuss ${MARK} in prose`;
+    const bodies = [quote, `${quote} again`, failBody(1)];
+    const w = world("enforce", live({ timedBodies: [timed(failBody(1))] }), bodies);
+    assert.deepEqual(await qaBounce(input, w.deps), { ok: true, to: "needs-dev-resume" });
+    assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["needs-dev-resume"] }]);
   });
 });
