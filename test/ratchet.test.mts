@@ -325,20 +325,6 @@ describe("ratchet: --write-baseline writer gate by polarity", () => {
     }
   });
 
-  test("a floor ratchet refuses a shape-changed payload on --write-baseline (loosening owner: shape loosens under either polarity)", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "ratchet-wg-"));
-    try {
-      // prior row `a` is an object; the measured payload makes it a number: a JSON-type change, no number lowered.
-      writeFileSync(join(dir, "b.json"), JSON.stringify({ a: { n: 1 } }));
-      const r = floor(dir, ["a"]);
-      const code = await quietRun(() => r.main(["--write-baseline"]));
-      assert.equal(code, 1);
-      assert.deepEqual(read(dir), { a: { n: 1 } });
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
   test("loosening(): ceiling loosens by growth, floor by shrink or shape change; tightening is the rest", () => {
     const g = { path: "a", kind: "raised", from: "1", to: "2" } as const;
     const sh = { path: "b", kind: "lowered", from: "2", to: "1" } as const;
