@@ -483,7 +483,7 @@ export function decideReviewAdmission(
   const requiredFailed = classifyVerdict("PASS", checks).summary.requiredFailed;
   if (requiredFailed > 0) {
     if (tier === 4) {
-      // INV-B — the gate can only DEFER a T4 review. decideDeepQaAction needs a
+      // INV-B — the gate can only DEFER a T4 review. The T4 deep-QA FAIL marker needs a
       // real review verdict; skipping the fan-out would leave none, so defer
       // until CI concludes and the full Verifier-Core fan-out can run.
       return {

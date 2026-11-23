@@ -38,7 +38,7 @@
   "pins\ttest/hydra-hitl-grill-option-table.test.mts\tprompt": 2,
   "pins\ttest/hydra-qa-needs-qa-clear.test.mts\tcode": 2,
   "pins\ttest/hydra-qa-needs-qa-clear.test.mts\tprompt": 2,
-  "pins\ttest/hydra-qa-prompt-verdict.test.mts\tcode": 40,
+  "pins\ttest/hydra-qa-prompt-verdict.test.mts\tcode": 38,
   "pins\ttest/hydra-retro-emit.test.mts\tcode": 2,
   "pins\ttest/hydra-review-option-table.test.mts\tprompt": 2,
   "pins\ttest/hydra-review-stalled-pr-bucket.test.mts\tprompt": 5,

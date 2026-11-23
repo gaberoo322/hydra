@@ -21,7 +21,6 @@ import {
   type FinalVerdict,
 } from "../src/qa/verdict-trailer.ts";
 import {
-  decideDeepQaAction,
 } from "../src/qa/round-action.ts";
 import { decideAdmission } from "../src/qa/admission.ts";
 import { isPromptOnlyChange } from "../src/qa/change-shape.ts";
@@ -405,8 +404,8 @@ describe("decideReviewAdmission — reviewer admission gate (issue #3815)", () =
 
   test("the admission gate introduces no new FinalVerdict literal (INV-D)", () => {
     // A skipped review never yields PASS; the only verdict the gate ever carries
-    // is the FAIL the fold already determined. classifyVerdict / aggregate /
-    // decideDeepQaAction semantics are untouched — the gate only declines to
+    // is the FAIL the fold already determined. classifyVerdict / aggregate
+    // semantics are untouched — the gate only declines to
     // spawn moot reviewers.
     for (const tier of [1, 2, 3, 4]) {
       for (const checks of [green, reqFailed, reqPending]) {

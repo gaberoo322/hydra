@@ -237,6 +237,33 @@ describe("advance needs-qa -> verdict targets", () => {
     assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["needs-dev-resume"] }]);
   });
 
+  const T4_MARK = "Verifier-Core deep-QA: FAIL";
+
+  for (const mode of ["enforce", "shadow"] as const) {
+    test(`${mode}: a T4 FAIL (deep-QA marker on the live PR record) with unreadable PR bodies refuses fetch-failed and writes nothing`, async () => {
+      const w = world(mode, live({ bodies: [T4_MARK], timedBodies: [timed(failBody(1)), timed(T4_MARK)] }), [failBody(1)]);
+      w.deps.fetch.prBodies = async () => ({ ok: false });
+      const res = (await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7" } }, w.deps)) as { ok: boolean; code?: string };
+      assert.deepEqual({ ok: res.ok, code: res.code }, { ok: false, code: "fetch-failed" });
+      assert.deepEqual(w.edits, []);
+    });
+
+    test(`sibling shape: ${mode}, non-T4 (no marker on the live record), unreadable PR bodies still bounces`, async () => {
+      const w = world(mode, live({ timedBodies: [timed(failBody(1))] }), [failBody(1)]);
+      w.deps.fetch.prBodies = async () => ({ ok: false });
+      const res = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7" } }, w.deps);
+      assert.equal(res.ok, true);
+      assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["needs-dev-resume"] }]);
+    });
+  }
+
+  test("a caller-supplied t4 evidence flag has no effect: the seam decides T4 from the record", async () => {
+    const w = world("enforce", live({ timedBodies: [timed(failBody(1))] }), [failBody(1)]);
+    w.deps.fetch.prBodies = async () => ({ ok: false });
+    const res = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7", t4: "1" } }, w.deps);
+    assert.equal(res.ok, true);
+  });
+
   test("FAIL with the PR CLOSED unmerged routes to ready-for-agent", async () => {
     const w = world("enforce", live({ state: "CLOSED", timedBodies: [timed(failBody(1))] }), [failBody(1)]);
     const res = await advance({ issue: 10, to: "ready-for-agent", evidence: { pr: "7" } }, w.deps);
@@ -457,5 +484,86 @@ describe("qaBounce: the seam picks a QA FAIL's exit from one live read (#5659)",
     };
     assert.deepEqual(await qaBounce(input, wf.deps), { ok: false, code: "crashed" });
     assert.deepEqual(wf.edits, []);
+  });
+});
+
+describe("the 2nd T4 deep-QA FAIL escalates through the deep-qa-fails Cap Arm (#5662)", () => {
+  const MARK = "Verifier-Core deep-QA: FAIL";
+  /** A T4 FAIL comment: the marker, plus a trailer for round `n` (so it also counts as a reviewed round). */
+  const deepFail = (n: number, sha = SHA12) =>
+    `### Findings\n| x |\n\n## Standards\n\n${MARK}\n\n${trailer("FAIL", n, sha)}`;
+  const shaOf = (n: number) => String(n).repeat(12);
+  const input = { issue: 10, pr: 7, actor: "hydra-qa" };
+
+  test("the first T4 FAIL bounces", async () => {
+    const w = world("enforce", live({ timedBodies: [timed(deepFail(1))] }), [deepFail(1)]);
+    assert.deepEqual(await qaBounce(input, w.deps), { ok: true, to: "needs-dev-resume" });
+    assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["needs-dev-resume"] }]);
+  });
+
+  test("the second escalates to ready-for-human with one unified cap comment, journaled cap:deep-qa-fails", async () => {
+    const two = [deepFail(1, shaOf(1)), deepFail(2, shaOf(2))];
+    const w = world("enforce", live({ timedBodies: [timed(deepFail(2))] }), two);
+    const res = await qaBounce(input, w.deps);
+    assert.equal(res.ok, false);
+    const out = res as { code: string; counts?: ReadonlyArray<{ arm: string; count: number }> };
+    assert.equal(out.code, "escalated:deep-qa-fails");
+    assert.equal(out.counts?.find((c) => c.arm === "deep-qa-fails")?.count, 2);
+    assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["ready-for-human"] }]);
+    assert.equal(w.comments.filter((c) => c.number === 10 && c.body.startsWith("## Hydra cap escalation")).length, 1);
+    const entry = w.journal.find((e) => e.to === "ready-for-human")!;
+    assert.equal(entry.reason, "cap:deep-qa-fails");
+    assert.equal(entry.evidence["adr5-reason"], "t4-deep-qa-exhausted");
+    assert.equal(entry.result, "escalated:deep-qa-fails");
+  });
+
+  test("shadow mode escalates too: deep-qa-fails is a live arm", async () => {
+    const w = world("shadow", live({ timedBodies: [timed(deepFail(2))] }), [deepFail(1, shaOf(1)), deepFail(2, shaOf(2))]);
+    const res = await qaBounce(input, w.deps);
+    assert.equal((res as { code?: string }).code, "escalated:deep-qa-fails");
+    assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["ready-for-human"] }]);
+  });
+
+  test("a FAIL after an operator reset counts as the first again and bounces", async () => {
+    const resetTs = Date.parse("2026-11-04T09:00:00Z");
+    const bodies: TimedBody[] = [
+      { body: deepFail(1, shaOf(1)), tsMs: resetTs - 2000 },
+      { body: deepFail(2, shaOf(2)), tsMs: resetTs - 1000 },
+      { body: "Hydra-Cap-Reset: by=op ts=2026-11-04T09:00:00Z", tsMs: resetTs },
+      { body: deepFail(3, shaOf(3)), tsMs: resetTs + 1000 },
+    ];
+    const w = world("enforce", live({ timedBodies: [timed(deepFail(3))] }), bodies);
+    assert.deepEqual(await qaBounce(input, w.deps), { ok: true, to: "needs-dev-resume" });
+    assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["needs-dev-resume"] }]);
+  });
+
+  test("with both arms over their limits, the escalate row wins over the park row", async () => {
+    const three = [deepFail(1, shaOf(1)), deepFail(2, shaOf(2)), deepFail(3, shaOf(3))];
+    const w = world("enforce", live({ timedBodies: [timed(deepFail(3))] }), three);
+    const res = await qaBounce(input, w.deps);
+    assert.equal((res as { code?: string }).code, "escalated:deep-qa-fails");
+    assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["ready-for-human"] }]);
+  });
+
+  test("T1-T3 FAILs carry no marker: the 3rd reviewed FAIL still parks, never escalates", async () => {
+    const three = [failBody(1), failBody(2), failBody(3)];
+    const w = world("enforce", live({ timedBodies: [timed(failBody(3))] }), three);
+    assert.equal(((await qaBounce(input, w.deps)) as { code?: string }).code, "parked:qa-fail-rounds");
+    assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["parked"] }]);
+  });
+
+  test("a retried FAIL on the same head sha is one deep-QA FAIL, not two (retry cannot double-count)", async () => {
+    const dup = [deepFail(1), deepFail(1)];
+    const w = world("enforce", live({ timedBodies: [timed(deepFail(1))] }), dup);
+    assert.deepEqual(await qaBounce(input, w.deps), { ok: true, to: "needs-dev-resume" });
+    assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["needs-dev-resume"] }]);
+  });
+
+  test("a T3 PR quoting the marker literal twice in prose bounces on its first FAIL, never escalates", async () => {
+    const quote = `we discuss ${MARK} in prose`;
+    const bodies = [quote, `${quote} again`, failBody(1)];
+    const w = world("enforce", live({ timedBodies: [timed(failBody(1))] }), bodies);
+    assert.deepEqual(await qaBounce(input, w.deps), { ok: true, to: "needs-dev-resume" });
+    assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["needs-dev-resume"] }]);
   });
 });

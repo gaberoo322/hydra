@@ -135,7 +135,6 @@ export const RouteResultSchema = z.object({
   worstFinding: z.string(),
   trailer: z.string(),
   round: z.number().int().nullable(),
-  deepQa: z.unknown().nullable(),
   effects: z.array(RouteEffectSchema),
   nextStep: z.enum(["arm-auto-merge", "reviewer-commit", "none"]),
   reviewerCommit: ReviewerCommitPlanSchema.optional(),

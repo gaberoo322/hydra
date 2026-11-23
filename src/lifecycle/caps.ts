@@ -28,10 +28,17 @@ export const CAP_ARMS = [
   "stale-requeue",
   "needs-dev-resume-claims",
   "total-claims",
+  "deep-qa-fails",
 ] as const;
 export type CapArm = (typeof CAP_ARMS)[number];
 
 type CapUnit = "issue" | "pr";
+
+/**
+ * Where an exhausted arm sends the issue: `park` (`-> parked`, the operator un-parks) or
+ * `escalate` (`-> ready-for-human`, an ADR-0005 operator escalation).
+ */
+export type CapExit = "park" | "escalate";
 
 export interface CapRow {
   readonly arm: CapArm;
@@ -43,18 +50,29 @@ export interface CapRow {
    * Not env-overridable.
    */
   readonly liveInShadow: boolean;
+  /** The state an exhausted arm writes. Every arm parks except `deep-qa-fails` (ADR-0047 D6). */
+  readonly exit: CapExit;
 }
 
 /** Table order is the park-naming order: per-arm rows first, then the total. */
 export const CAP_TABLE: readonly CapRow[] = [
-  { arm: "qa-fail-rounds", unit: "pr", limit: 3, liveInShadow: true },
-  { arm: "dev-nopr-resume", unit: "issue", limit: 2, liveInShadow: true },
-  { arm: "qa-stall", unit: "issue", limit: 3, liveInShadow: true },
-  { arm: "red-ci-forward-fix", unit: "pr", limit: 2, liveInShadow: true },
-  { arm: "stale-requeue", unit: "issue", limit: 2, liveInShadow: false },
-  { arm: "needs-dev-resume-claims", unit: "issue", limit: 4, liveInShadow: false },
-  { arm: "total-claims", unit: "issue", limit: 10, liveInShadow: false },
+  { arm: "qa-fail-rounds", unit: "pr", limit: 3, liveInShadow: true, exit: "park" },
+  { arm: "dev-nopr-resume", unit: "issue", limit: 2, liveInShadow: true, exit: "park" },
+  { arm: "qa-stall", unit: "issue", limit: 3, liveInShadow: true, exit: "park" },
+  { arm: "red-ci-forward-fix", unit: "pr", limit: 2, liveInShadow: true, exit: "park" },
+  { arm: "stale-requeue", unit: "issue", limit: 2, liveInShadow: false, exit: "park" },
+  { arm: "needs-dev-resume-claims", unit: "issue", limit: 4, liveInShadow: false, exit: "park" },
+  { arm: "total-claims", unit: "issue", limit: 10, liveInShadow: false, exit: "park" },
+  { arm: "deep-qa-fails", unit: "pr", limit: 2, liveInShadow: true, exit: "escalate" },
 ];
+
+/** The refusal code a cap exit returns: `parked:<arm>` for a park row, `escalated:<arm>` for an escalate row. */
+export type CapExitCode = `parked:${string}` | `escalated:${string}`;
+
+/** The exit an exhausted `arm` takes (the `exit` column). */
+export function capExitOf(arm: CapArm): CapExit {
+  return CAP_TABLE.find((r) => r.arm === arm)?.exit ?? "park";
+}
 
 /** Whether `arm` parks for real even in shadow mode (the `liveInShadow` column). */
 export function isLiveArm(arm: CapArm): boolean {
@@ -65,8 +83,8 @@ export const CAP_DEFAULTS: Readonly<Record<CapArm, number>> = Object.fromEntries
   CAP_TABLE.map((r) => [r.arm, r.limit]),
 ) as Record<CapArm, number>;
 
-/** The arm whose limit is NOT env-overridable (seam and merge guard must agree). */
-const NON_OVERRIDABLE: readonly CapArm[] = ["qa-fail-rounds"];
+/** The arms whose limits are NOT env-overridable (seam and merge guard must agree). */
+const NON_OVERRIDABLE: readonly CapArm[] = ["qa-fail-rounds", "deep-qa-fails"];
 
 const CAP_ENV_PREFIX = "HYDRA_LIFECYCLE_CAP_";
 
@@ -181,6 +199,47 @@ export function countReviewedFailRoundsAfterReset(
   ).length;
 }
 
+/**
+ * The machine-greppable marker every T4 deep-QA FAIL comment carries on its own line
+ * (ADR-0015, #740). The PR is the ledger: the `deep-qa-fails` arm counts these.
+ */
+export const DEEP_QA_FAIL_MARKER = "Verifier-Core deep-QA: FAIL";
+
+/**
+ * The seam's `deep-qa-fails` count: `Verifier-Core deep-QA: FAIL` markers on the PR
+ * posted AFTER the latest `Hydra-Cap-Reset:` (issue-side `issueResetMs` or a marker
+ * already on a PR body). Same timestamp rule as the round count: a body with no usable
+ * time counts as newer than any reset. The marker of the FAIL being routed is already
+ * posted when the seam counts, so the count includes the attempt itself.
+ */
+export function countDeepQaFailsAfterReset(bodies: ReadonlyArray<TimedBody>, issueResetMs: number): number {
+  const resetMs = Math.max(issueResetMs, latestResetMs(bodies.map((b) => b.body)));
+  const shas = new Set<string>();
+  let unkeyed = 0;
+  for (const b of bodies) {
+    if (!(b.tsMs === null || b.tsMs > resetMs)) continue;
+    const key = deepQaFailKey(b.body);
+    if (key === null) continue;
+    if (key === "") unkeyed++;
+    else shas.add(key);
+  }
+  return shas.size + unkeyed;
+}
+
+/**
+ * Whether `body` is a real deep-QA FAIL verdict comment: the marker alone on its own line AND a
+ * `QA-Verdict: FAIL` trailer line. Returns the trailer's head sha (a retry on the same head is one
+ * FAIL, not two), "" when the trailer carries no sha, or null when it is not a deep-QA FAIL comment
+ * (a T1-T3 PR quoting the marker literal in prose never counts).
+ */
+function deepQaFailKey(body: string): string | null {
+  const lines = body.split("\n").map((l) => l.trim());
+  if (!lines.includes(DEEP_QA_FAIL_MARKER)) return null;
+  const trailer = lines.find((l) => /^QA-Verdict:\s*FAIL\b/.test(l));
+  if (trailer === undefined) return null;
+  return /\bsha=([0-9a-f]+)/.exec(trailer)?.[1] ?? "";
+}
+
 // ---------------------------------------------------------------------------
 // Count sources
 // ---------------------------------------------------------------------------
@@ -288,6 +347,7 @@ function countJournalArm(arm: CapArm, entries: readonly CapJournalEntry[], pr: n
       return n;
     }
     case "qa-fail-rounds":
+    case "deep-qa-fails":
       return 0; // trailer-sourced; see evaluateCaps
   }
 }
@@ -327,6 +387,8 @@ export interface CapInput {
   timeline: readonly TimelineLabelEvent[] | null;
   /** Reviewed FAIL rounds from trailers; null when the PR was not read. */
   trailerRounds: number | null;
+  /** Deep-QA FAIL markers since the reset; null when the PR was not read. */
+  deepQaFails?: number | null;
   limits: Readonly<Record<CapArm, number>>;
 }
 
@@ -360,7 +422,7 @@ export function evaluateCaps(input: CapInput): CapEvaluation {
   const pr = claim ? claim.pr : null;
 
   const applicable = (arm: CapArm): boolean => {
-    if (qaFail) return arm === "qa-fail-rounds";
+    if (qaFail) return arm === "qa-fail-rounds" || arm === "deep-qa-fails";
     if (!claim) return arm === "stale-requeue";
     switch (arm) {
       case "total-claims":
@@ -375,6 +437,7 @@ export function evaluateCaps(input: CapInput): CapEvaluation {
         return claim.purpose === "forward-fix" && pr !== null;
       case "qa-fail-rounds":
         return pr !== null;
+      case "deep-qa-fails":
       case "stale-requeue":
         return false;
     }
@@ -385,6 +448,9 @@ export function evaluateCaps(input: CapInput): CapEvaluation {
     let source: CapSource = "journal";
     if (row.arm === "qa-fail-rounds") {
       count = input.trailerRounds ?? 0;
+      source = "trailer";
+    } else if (row.arm === "deep-qa-fails") {
+      count = input.deepQaFails ?? 0;
       source = "trailer";
     } else if ((TIMELINE_ARMS as readonly string[]).includes(row.arm)) {
       const arm = row.arm as TimelineArm;
@@ -411,7 +477,9 @@ export function evaluateCaps(input: CapInput): CapEvaluation {
     }
     return { arm: row.arm, unit: row.unit, count, limit: input.limits[row.arm], source, applicable: applicable(row.arm) };
   });
-  const over = counts.find((c) => c.applicable && c.count >= c.limit) ?? null;
+  // Escalate rows are evaluated before park rows (ADR-0047 D6): an exhausted escalate arm names the exit.
+  const exhausted = counts.filter((c) => c.applicable && c.count >= c.limit);
+  const over = exhausted.find((c) => capExitOf(c.arm) === "escalate") ?? exhausted[0] ?? null;
   return { counts, over, journalMiss: miss, timelineCounts };
 }
 

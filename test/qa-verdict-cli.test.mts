@@ -196,27 +196,25 @@ describe("qa-verdict phases over the fixture fetcher", () => {
       { pr: 7, tier: 3, verdict: "FAIL", reviewVerdict: "FAIL", headSha: HEAD },
       fixtureFetchers(unreadable),
     )) as any;
-    assert.deepEqual(r, { deepQa: null, passMarker: null, failMarker: null, degraded: ["prior-bodies"] }, "T1-T3 carry no deep-QA state, degraded or not");
+    assert.deepEqual(r, { passMarker: null, failMarker: null, degraded: [] }, "round-action reads no PR history: unreadable bodies degrade nothing");
   });
 
-  test("round-action: a T4 round with unreadable history is a pre-verdict exit, never a fail-#1 reset", async () => {
-    await assert.rejects(
-      runQaVerdictPhase(
-        "round-action",
-        { pr: 7, tier: 4, verdict: "FAIL", reviewVerdict: "FAIL", headSha: HEAD },
-        fixtureFetchers({ priorBodies: async () => null }),
-      ),
-      /deep-QA fail count cannot be read/,
-    );
+  test("round-action: a T4 round needs no PR history: unreadable bodies still render the markers", async () => {
+    const r = (await runQaVerdictPhase(
+      "round-action",
+      { pr: 7, tier: 4, verdict: "FAIL", reviewVerdict: "FAIL", headSha: HEAD },
+      fixtureFetchers({ priorBodies: async () => null }),
+    )) as any;
+    assert.equal(r.failMarker, DEEP_QA_FAIL_MARKER);
+    assert.deepEqual(r.degraded, []);
   });
 
-  test("round-action: a T4 FAIL driven by CI alone (review PASS) still bounces and carries the FAIL marker", async () => {
+  test("round-action: a T4 FAIL driven by CI alone (review PASS) still carries the FAIL marker", async () => {
     const r = (await runQaVerdictPhase(
       "round-action",
       { pr: 7, tier: 4, verdict: "FAIL", reviewVerdict: "PASS", headSha: HEAD, priorBodies: [] },
       fixtureFetchers(),
     )) as any;
-    assert.equal(r.deepQa.action, "bounce");
     assert.equal(r.failMarker, DEEP_QA_FAIL_MARKER);
     assert.equal(r.passMarker, null, "a FAIL never carries the SHA-bound PASS marker");
     // Sibling shape: a clean T4 PASS keeps proceeding with the PASS marker and no FAIL marker.
@@ -225,7 +223,6 @@ describe("qa-verdict phases over the fixture fetcher", () => {
       { pr: 7, tier: 4, verdict: "PASS", reviewVerdict: "PASS", headSha: HEAD, priorBodies: [] },
       fixtureFetchers(),
     )) as any;
-    assert.equal(ok.deepQa.action, "proceed");
     assert.equal(ok.failMarker, null);
     assert.equal(ok.passMarker, renderDeepQaPassMarker(HEAD));
   });
@@ -244,20 +241,19 @@ describe("qa-verdict phases over the fixture fetcher", () => {
     assert.equal(admit.skipCiSummary, null);
   });
 
-  test("round-action: the output is exactly {deepQa, passMarker, failMarker, degraded}; failMarker symmetric with passMarker on T4", async () => {
+  test("round-action: the output is exactly {passMarker, failMarker, degraded}; failMarker symmetric with passMarker on T4", async () => {
     const t3 = (await runQaVerdictPhase(
       "round-action",
       { pr: 7, tier: 3, verdict: "PASS", reviewVerdict: "PASS", headSha: HEAD, priorBodies: [] },
       fixtureFetchers(),
     )) as any;
-    assert.deepEqual(Object.keys(t3).sort(), ["deepQa", "degraded", "failMarker", "passMarker"]);
+    assert.deepEqual(Object.keys(t3).sort(), ["degraded", "failMarker", "passMarker"]);
     assert.equal(t3.failMarker, null);
     const t4fail = (await runQaVerdictPhase(
       "round-action",
       { pr: 7, tier: 4, verdict: "FAIL", reviewVerdict: "FAIL", headSha: HEAD, priorBodies: [] },
       fixtureFetchers(),
     )) as any;
-    assert.equal(t4fail.deepQa.action, "bounce");
     assert.equal(t4fail.failMarker, DEEP_QA_FAIL_MARKER);
     assert.equal(t4fail.passMarker, null);
     const t4pass = (await runQaVerdictPhase(
@@ -278,7 +274,7 @@ describe("qa-verdict phases over the fixture fetcher", () => {
       { pr: 7, tier: 3, verdict: "FAIL", reviewVerdict: "FAIL", headSha: HEAD, priorBodies: prior },
       fixtureFetchers(),
     )) as any;
-    assert.deepEqual(out, { deepQa: null, passMarker: null, failMarker: null, degraded: [] });
+    assert.deepEqual(out, { passMarker: null, failMarker: null, degraded: [] });
   });
 
   // 1:1 homes for the executed playbook fold cases deleted with the shims (#5081 INV-8).
@@ -364,7 +360,6 @@ describe("qa-verdict phases over the fixture fetcher", () => {
       f,
     )) as any;
     assert.deepEqual(f.calls, []);
-    assert.equal(out.deepQa, null);
     assert.deepEqual(out.degraded, []);
   });
 });
