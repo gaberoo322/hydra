@@ -121,12 +121,40 @@ describe("the committed baseline", () => {
 });
 
 describe("committed baseline parity (INV-7)", () => {
-  test("findings synthesised from the committed rows give zero added, zero stale over 34 rows", async () => {
-    const baseline: Record<string, number> = committedBaseline;
+  // Pre-migration (#5640, commit 638156528) per-file counts, pinned independently of the committed baseline.
+  const PRE_MIGRATION: Record<string, Record<string, number>> = {
+    ".github/workflows/advisory-checks.yml": { "artipacked": 1 },
+    ".github/workflows/allow-scripts.yml": { "artipacked": 2, "unpinned-uses": 2 },
+    ".github/workflows/audit-nightly.yml": { "artipacked": 1, "unpinned-uses": 1 },
+    ".github/workflows/changelog-check.yml": { "artipacked": 1, "unpinned-uses": 1 },
+    ".github/workflows/ci.yml": { "artipacked": 5, "unpinned-uses": 5 },
+    ".github/workflows/deep-qa-gate.yml": { "artipacked": 1, "dangerous-triggers": 1, "unpinned-uses": 1 },
+    ".github/workflows/deps-check.yml": { "artipacked": 1, "unpinned-uses": 2 },
+    ".github/workflows/design-concept-comment.yml": { "excessive-permissions": 1 },
+    ".github/workflows/design-concept-reconcile.yml": { "artipacked": 1, "unpinned-uses": 1 },
+    ".github/workflows/issue-label-validation.yml": { "artipacked": 2, "excessive-permissions": 1, "unpinned-uses": 2 },
+    ".github/workflows/osv-scan.yml": { "artipacked": 1, "unpinned-uses": 2 },
+    ".github/workflows/protected-paths.yml": { "artipacked": 1, "unpinned-uses": 1 },
+    ".github/workflows/qa-fix-proof.yml": { "artipacked": 2, "unpinned-uses": 2 },
+    ".github/workflows/secret-scan.yml": { "artipacked": 1, "unpinned-uses": 1 },
+    ".github/workflows/stryker-check.yml": { "artipacked": 1, "unpinned-uses": 2 },
+    ".github/workflows/test-typecheck.yml": { "artipacked": 1, "unpinned-uses": 1 },
+    ".github/workflows/vendor-drift.yml": { "artipacked": 1, "unpinned-uses": 2 },
+  };
+
+  test("the committed rows equal the pinned pre-migration counts: no row dropped, altered or added by the re-key", () => {
+    const expected: Record<string, number> = {};
+    for (const [file, idents] of Object.entries(PRE_MIGRATION)) {
+      for (const [ident, n] of Object.entries(idents)) expected[`${file}\t${ident}`] = n;
+    }
+    assert.equal(Object.keys(expected).length, 34);
+    assert.deepEqual(committedBaseline, expected);
+  });
+
+  test("a snapshot built from the pinned counts gives zero added, zero stale", async () => {
     const findings: unknown[] = [];
-    for (const [key, n] of Object.entries(baseline)) {
-      const [file, ident] = key.split("\t");
-      for (let i = 0; i < n; i++) findings.push(finding(ident, file));
+    for (const [file, idents] of Object.entries(PRE_MIGRATION)) {
+      for (const [ident, n] of Object.entries(idents)) for (let i = 0; i < n; i++) findings.push(finding(ident, file));
     }
     const dir = mkdtempSync(join(tmpdir(), "zizmor-ratchet-"));
     writeFileSync(join(dir, "zizmor-results.json"), JSON.stringify(findings));
@@ -134,7 +162,6 @@ describe("committed baseline parity (INV-7)", () => {
       measure: async () => toRows(loadFindings(join(dir, "zizmor-results.json"))),
       keep: () => true,
     });
-    assert.equal(Object.keys(baseline).length, 34);
     assert.deepEqual(v.added, []);
     assert.deepEqual(v.stale, []);
     assert.equal(v.ok, true);
