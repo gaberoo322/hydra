@@ -117,6 +117,22 @@ function jsonKind(v: unknown): string {
 const shortJson = (c: string): string => (c.length > 120 ? `${c.slice(0, 117)}...` : c);
 
 /**
+ * The one owner of "which side is loosening": a ceiling loosens by growing; a floor loosens by
+ * shrinking. A shape change (a JSON-type change) loosens under either polarity. Returns the
+ * loosening rows and the tightening rows. The writer gate and the baseline-raise guard both read this.
+ */
+export function loosening(
+  d: { grown: BaselineJsonRow[]; shrunk: BaselineJsonRow[] },
+  polarity: RatchetPolarity,
+): { loosened: BaselineJsonRow[]; tightened: BaselineJsonRow[] } {
+  if (polarity === "ceiling") return { loosened: d.grown, tightened: d.shrunk };
+  return {
+    loosened: [...d.shrunk, ...d.grown.filter((r) => r.kind === "shape-changed")],
+    tightened: d.grown.filter((r) => r.kind !== "shape-changed"),
+  };
+}
+
+/**
  * The one two-direction comparison of baseline JSON (shape-agnostic, pure, no I/O): `grown` is
  * every raised number, added object key, added array element (a multiset of canonical-JSON
  * strings, so a duplicate counts) and JSON-type change; `shrunk` is every lowered number,
@@ -387,7 +403,7 @@ async function writeBaseline(
   if (!allowGrow) {
     // The writer gate: the same two-direction diff the PR guard reads; the loosening side follows polarity.
     const d = diffBaselineJson(await readBaselineJson(path, policy.shape === "set" ? [] : {}), payload);
-    if ((policy.polarity === "ceiling" ? d.grown : d.shrunk).length > 0) {
+    if (loosening(d, policy.polarity).loosened.length > 0) {
       console.error(`[${policy.id}] --write-baseline only tightens; refusing to loosen the baseline:`);
       console.error(v.advice);
       return 1;

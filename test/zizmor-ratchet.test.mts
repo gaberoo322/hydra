@@ -142,13 +142,33 @@ describe("committed baseline parity (INV-7)", () => {
     ".github/workflows/vendor-drift.yml": { "artipacked": 1, "unpinned-uses": 2 },
   };
 
-  test("the committed rows equal the pinned pre-migration counts: no row dropped, altered or added by the re-key", () => {
+  const preMigrationRows = (): Record<string, number> => {
     const expected: Record<string, number> = {};
     for (const [file, idents] of Object.entries(PRE_MIGRATION)) {
       for (const [ident, n] of Object.entries(idents)) expected[`${file}\t${ident}`] = n;
     }
-    assert.equal(Object.keys(expected).length, 34);
-    assert.deepEqual(committedBaseline, expected);
+    return expected;
+  };
+  /** The parity rule: no key outside the pre-migration set, and no count above its pre-migration count. */
+  const parityViolations = (rows: Record<string, number>): string[] => {
+    const expected = preMigrationRows();
+    return Object.entries(rows)
+      .filter(([k, n]) => !Object.hasOwn(expected, k) || n > expected[k])
+      .map(([k]) => k);
+  };
+
+  test("every committed row is within its pinned pre-migration count and no key is new (a shrink is allowed)", () => {
+    assert.equal(Object.keys(preMigrationRows()).length, 34);
+    assert.deepEqual(parityViolations(committedBaseline), []);
+  });
+
+  test("sibling: a shrunk or dropped row passes parity; a raised row or a new key fails it", () => {
+    const expected = preMigrationRows();
+    const [k0, k1] = Object.keys(expected);
+    const { [k1]: _dropped, ...withoutK1 } = expected;
+    assert.deepEqual(parityViolations({ ...withoutK1, [k0]: expected[k0] - 1 }), []);
+    assert.deepEqual(parityViolations({ ...expected, [k0]: expected[k0] + 1 }), [k0]);
+    assert.deepEqual(parityViolations({ ...expected, "x.yml\tbrand-new": 1 }), ["x.yml\tbrand-new"]);
   });
 
   test("a snapshot built from the pinned counts gives zero added, zero stale", async () => {

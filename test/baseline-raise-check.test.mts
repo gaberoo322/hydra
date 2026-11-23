@@ -31,6 +31,38 @@ const run = (base: unknown, head: unknown, changedFiles: string[] = [], prBody =
 const runFloor = (base: unknown, head: unknown, changedFiles: string[] = [], prBody = "") =>
   evaluateBaselineRaise({ fixtures: [pair(base, head, FLOOR, "floor")], changedFiles, prBody });
 
+describe("tab-keyed counted rows (zizmor <workflow>\\t<ident>)", () => {
+  const WF = ".github/workflows/ci.yml";
+  const ZZ = "scripts/ci/zizmor-baseline.json";
+  const zz = (base: unknown, head: unknown, changedFiles: string[] = [], prBody = "") =>
+    evaluateBaselineRaise({ fixtures: [pair(base, head, ZZ, "ceiling")], changedFiles, prBody });
+  const base = { [`${WF}\tartipacked`]: 1 };
+  const raised = { [`${WF}\tartipacked`]: 2 };
+
+  test("a raise with no Baseline-raise line is a finding, and an out-of-diff workflow is detected", () => {
+    const r = zz(base, raised, ["scripts/ci/zizmor-baseline.json"]);
+    assert.equal(r.ok, false);
+    assert.equal(r.findings.length, 1);
+    assert.equal(r.findings[0].outOfDiff, true);
+    assert.equal(zz(base, raised, [WF]).findings[0].outOfDiff, false);
+  });
+
+  test("a tab-free <path>:<ident> Baseline-raise line clears it", () => {
+    const r = zz(base, raised, [WF], `Baseline-raise: ${ZZ} ${WF}:artipacked - reviewed`);
+    assert.equal(r.ok, true);
+    assert.equal(r.cleared.length, 1);
+  });
+
+  test("sibling: a line naming a different ident does not clear it", () => {
+    const r = zz(base, raised, [WF], `Baseline-raise: ${ZZ} ${WF}:unpinned-uses - reviewed`);
+    assert.equal(r.ok, false);
+  });
+
+  test("sibling: an in-diff shrink of a tab-keyed row passes silently", () => {
+    assert.equal(zz(raised, base, [WF]).ok, true);
+  });
+});
+
 describe("evaluateBaselineRaise", () => {
   test("unaccompanied raise is reported with fixture and row", () => {
     const r = run({ a: 1 }, { a: 2 });

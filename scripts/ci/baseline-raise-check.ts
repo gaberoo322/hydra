@@ -23,7 +23,7 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { diffBaselineJson, type BaselineJsonRow, type RatchetPolarity } from "./ratchet.ts";
+import { diffBaselineJson, loosening, type BaselineJsonRow, type RatchetPolarity } from "./ratchet.ts";
 import { registryRowFor, rowPolarity } from "./ratchets.ts";
 
 export type FindingKind = BaselineJsonRow["kind"] | "unparseable";
@@ -117,6 +117,12 @@ function subjectCandidates(row: BaselineJsonRow): string[] | null {
     if (fields.length > 1) return fields[1] && looksLikePath(fields[1]) ? [fields[1]] : null;
     return looksLikePath(el) ? [el] : null;
   }
+  // A counted key may be `<path>\t<ident>` (zizmor): the subject file is the path half.
+  const tabAt = row.path.indexOf("\t");
+  if (tabAt >= 0) {
+    const file = row.path.slice(0, tabAt);
+    return looksLikePath(file) ? [file] : null;
+  }
   const allSegs = row.path.split("/").filter(Boolean);
   // Nested count rows (files/<path>.md/<counter>) end in a counter name, not the
   // file: trim trailing segments to the last one carrying a file extension.
@@ -129,6 +135,11 @@ function subjectCandidates(row: BaselineJsonRow): string[] | null {
     if (c.includes("/") && looksLikePath(c)) cands.push(c);
   }
   return cands.length ? cands : null;
+}
+
+/** The tab-free spelling of a `<path>\t<ident>` key (`<path>:<ident>`), since a Baseline-raise key is one \S+ token. */
+function tabFreeKey(key: string): string {
+  return key.replace("\t", ":");
 }
 
 function isOutOfDiff(row: BaselineJsonRow, changed: ReadonlySet<string>): boolean {
@@ -170,10 +181,7 @@ export function evaluateBaselineRaise(input: {
       continue;
     }
     const { grown, shrunk } = diffBaselineJson(base, head);
-    // A shape change loosens under either polarity; otherwise the loosening side follows the polarity.
-    const shape = grown.filter((r) => r.kind === "shape-changed");
-    const loosened = f.polarity === "ceiling" ? grown : [...shrunk, ...shape];
-    const tightened = f.polarity === "ceiling" ? shrunk : grown.filter((r) => r.kind !== "shape-changed");
+    const { loosened, tightened } = loosening({ grown, shrunk }, f.polarity);
     const rows = [
       ...loosened.map((row) => ({ row, loosens: true })),
       ...tightened.map((row) => ({ row, loosens: false })),
@@ -189,7 +197,7 @@ export function evaluateBaselineRaise(input: {
         to: row.to,
         outOfDiff,
       };
-      const clearedBy = valid.find((l) => l.fixture === f.path && (l.key === finding.key || l.key === "*"));
+      const clearedBy = valid.find((l) => l.fixture === f.path && (l.key === finding.key || l.key === "*" || l.key === tabFreeKey(finding.key)));
       if (clearedBy) {
         cleared.push(finding);
         if (clearedBy.key === "*" && !blanketUsed.has(f.path)) {
