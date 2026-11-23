@@ -17,7 +17,6 @@
     "test/autopilot-qa-orch-forbidden-ending-preamble.test.mts",
     "test/autopilot-token-cap.test.mts",
     "test/backfill-dedup-baseline.test.mts",
-    "test/baseline-raise-check.test.mts",
     "test/biome-check.test.mts",
     "test/builder-health-stagnation.test.mts",
     "test/capacity-floor-classifier.test.mts",
