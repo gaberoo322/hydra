@@ -220,9 +220,11 @@ success outcome for the experiment, not a failure.
 
 **What it does.** `scripts/ci/zizmor-ratchet.ts` reads the scan step's json-v1
 output (`--input zizmor-results.json`) and caps the findings per workflow file per
-ident at `scripts/ci/zizmor-baseline.json` (shrink-only: a count above its cell
-fails, a count below it prints a lower-the-row nudge). It never runs the scanner
-or touches the network.
+ident at `scripts/ci/zizmor-baseline.json`, a counted Ratchet (`ratchet.ts`)
+whose rows are `<workflow path>\t<ident>` (shrink-only: a count above its row
+fails, a count below it prints a lower-the-row hint). `--input <path>` narrows a
+check run to another findings file. It never runs the scanner or touches the
+network.
 
 **Where it runs.** An `if: always()` step right after the zizmor scan step in
 `advisory-checks.yml`. It is not in `ci.yml`, `npm test` or any required context:
@@ -238,8 +240,10 @@ failure (`::error`, red step). No step in the workflow swallows an exit with
 annotates any that appear (skip one with a `# intentional: <reason>` trailer).
 
 **Reseeding.** `bash scripts/zizmor-scan.sh > /tmp/z.json` (exit 14 is normal),
-then `npx tsx scripts/ci/zizmor-ratchet.ts --input /tmp/z.json --write-baseline
-[--files <workflow paths>]`. Growth is refused without `--allow-grow`.
+then `npx tsx scripts/ci/zizmor-ratchet.ts --input /tmp/z.json` to check; to
+tighten, save the scan as `zizmor-results.json` and run
+`npx tsx scripts/ci/zizmor-ratchet.ts --write-baseline` (or edit only the changed
+rows by hand). `--files` is retired. Growth is refused without `--allow-grow`.
 
 ### skill-size ratchet (required — via the `test` job)
 

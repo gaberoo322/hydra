@@ -1,0 +1,1 @@
+- refactor: a Ratchet registry (scripts/ci/ratchets.ts) gives every baseline file a kind, polarity and enforcement level; baseline-raise-check reads it, so adding tests no longer flags the suite-count floor (#5656)

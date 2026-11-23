@@ -2,13 +2,16 @@
  * scripts/ci/baseline-raise-check.ts — advisory PR guard for silent baseline
  * raises (issue #5553, parent #5550; STD-BASELINE-EDIT-ROWS reviewer aid).
  *
- * Every committed shrink-only baseline JSON is compared against its base-ref
- * version. A growth (raised number, added key, added array element, shape
- * change) fails unless the PR body carries a line
+ * Every committed baseline JSON the registry (`ratchets.ts`) gives a polarity
+ * is compared against its base-ref version with the Ratchet module's one
+ * two-direction diff (`diffBaselineJson`). The LOOSENING side fails unless the
+ * PR body carries a line
  *   `Baseline-raise: <fixture> <row-key> - <reason>`
- * matching it; any row moved (including a shrink) for a subject file that is
- * NOT in the PR diff fails the same way. The growth definition is
- * `diffBaselineGrowth` from seam-check-lib (never re-implemented here).
+ * matching it: a ceiling loosens by growing (raised number, added key, added
+ * array element), a floor by shrinking (lowered number, removed key or
+ * element); a shape change loosens under either. The TIGHTENING side passes
+ * silently unless its subject file is NOT in the PR diff. A baseline with no
+ * polarity (a fixture, or an external without one) is skipped.
  *
  * Split of duties: `evaluateBaselineRaise` is pure and never throws (unit
  * tested over synthetic base/head pairs); the CLI below is the only live
@@ -20,15 +23,10 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { diffBaselineGrowth, type GrowthRow } from "./seam-check-lib.ts";
+import { diffBaselineJson, loosening, type BaselineJsonRow, type RatchetPolarity } from "./ratchet.ts";
+import { registryRowFor, rowPolarity } from "./ratchets.ts";
 
-/** Snapshot/cohort fixtures that match the glob but are not shrink-only ceilings. */
-export const NON_RATCHET_BASELINES: readonly string[] = [
-  "test/fixtures/turn-snapshot/pr-gate-baseline.json",
-  "test/fixtures/qa-cohort-baseline.json",
-];
-
-export type FindingKind = GrowthRow["kind"] | "lowered" | "removed-key" | "removed-element" | "unparseable";
+export type FindingKind = BaselineJsonRow["kind"] | "unparseable";
 
 export interface BaselineFinding {
   fixture: string;
@@ -53,6 +51,8 @@ export interface FixturePair {
   base: string | null;
   /** Raw JSON text at head; null when absent at head. */
   head: string | null;
+  /** Which direction is bad (from the registry); absent means no polarity and the pair is skipped. */
+  polarity?: RatchetPolarity;
 }
 
 export interface BaselineRaiseResult {
@@ -61,15 +61,6 @@ export interface BaselineRaiseResult {
   cleared: BaselineFinding[];
   blanket: string[];
   malformedLines: string[];
-}
-
-interface Row {
-  path: string;
-  kind: FindingKind;
-  from: string;
-  to: string;
-  /** Untruncated JSON of the element, for subject derivation (from/to are display-only). */
-  raw?: string;
 }
 
 const LINE_RE = /^Baseline-raise:\s+(\S+)\s+(\S+)\s+[—–-]\s*(.+)$/;
@@ -105,55 +96,13 @@ export function listBaselineFixtures(root: string): string[] {
   };
   walk("scripts/ci", false);
   walk("test/fixtures", true);
-  return out.filter((p) => !NON_RATCHET_BASELINES.includes(p)).sort();
-}
-
-function jsonKind(v: unknown): string {
-  if (v === null) return "null";
-  if (Array.isArray(v)) return "array";
-  return typeof v;
-}
-
-const short = (c: string): string => (c.length > 120 ? `${c.slice(0, 117)}...` : c);
-
-/** Mirror of the growth walk: lowered numbers, removed keys, removed elements. */
-function diffBaselineShrink(prev: unknown, next: unknown): Row[] {
-  const rows: Row[] = [];
-  const walk = (a: unknown, b: unknown, path: string): void => {
-    const ka = jsonKind(a);
-    if (ka !== jsonKind(b)) return; // shape change is a growth row already
-    if (ka === "number") {
-      if ((b as number) < (a as number)) rows.push({ path, kind: "lowered", from: String(a), to: String(b) });
-    } else if (ka === "array") {
-      const right = new Map<string, number>();
-      for (const e of b as unknown[]) {
-        const c = JSON.stringify(e);
-        right.set(c, (right.get(c) ?? 0) + 1);
-      }
-      for (const e of a as unknown[]) {
-        const c = JSON.stringify(e);
-        const n = right.get(c) ?? 0;
-        if (n > 0) right.set(c, n - 1);
-        else rows.push({ path, kind: "removed-element", from: short(c), to: "(absent)", raw: c });
-      }
-    } else if (ka === "object") {
-      const oa = a as Record<string, unknown>;
-      const ob = b as Record<string, unknown>;
-      for (const k of Object.keys(oa)) {
-        const sub = path ? `${path}/${k}` : k;
-        if (!Object.hasOwn(ob, k)) rows.push({ path: sub, kind: "removed-key", from: "(present)", to: "(absent)" });
-        else walk(oa[k], ob[k], sub);
-      }
-    }
-  };
-  walk(prev, next, "");
-  return rows;
+  return out.sort();
 }
 
 const looksLikePath = (s: string): boolean => /^[\w.@-]+(\/[\w.@-]+)+$/.test(s) && /\.[A-Za-z0-9]+$/.test(s);
 
 /** Deterministic subject-file candidates for a row, or null when none is derivable. */
-function subjectCandidates(row: Row): string[] | null {
+function subjectCandidates(row: BaselineJsonRow): string[] | null {
   if (row.kind === "added-element" || row.kind === "removed-element") {
     const text = row.raw ?? (row.kind === "removed-element" ? row.from : row.to);
     let el: unknown = text;
@@ -167,6 +116,12 @@ function subjectCandidates(row: Row): string[] | null {
     const fields = el.split("\t");
     if (fields.length > 1) return fields[1] && looksLikePath(fields[1]) ? [fields[1]] : null;
     return looksLikePath(el) ? [el] : null;
+  }
+  // A counted key may be `<path>\t<ident>` (zizmor): the subject file is the path half.
+  const tabAt = row.path.indexOf("\t");
+  if (tabAt >= 0) {
+    const file = row.path.slice(0, tabAt);
+    return looksLikePath(file) ? [file] : null;
   }
   const allSegs = row.path.split("/").filter(Boolean);
   // Nested count rows (files/<path>.md/<counter>) end in a counter name, not the
@@ -182,7 +137,12 @@ function subjectCandidates(row: Row): string[] | null {
   return cands.length ? cands : null;
 }
 
-function isOutOfDiff(row: Row, changed: ReadonlySet<string>): boolean {
+/** The tab-free spelling of a `<path>\t<ident>` key (`<path>:<ident>`), since a Baseline-raise key is one \S+ token. */
+function tabFreeKey(key: string): string {
+  return key.replace("\t", ":");
+}
+
+function isOutOfDiff(row: BaselineJsonRow, changed: ReadonlySet<string>): boolean {
   const cands = subjectCandidates(row);
   if (!cands) return false;
   return !cands.some((c) => changed.has(c));
@@ -209,6 +169,7 @@ export function evaluateBaselineRaise(input: {
 
   for (const f of input.fixtures) {
     if (f.base === null || f.head === null) continue; // seeded or retired: no findings
+    if (f.polarity === undefined) continue; // no direction (fixture / external without one): nothing to guard
     let base: unknown;
     let head: unknown;
     try {
@@ -219,13 +180,15 @@ export function evaluateBaselineRaise(input: {
       findings.push({ fixture: f.path, key: "/", kind: "unparseable", from: "", to: "", outOfDiff: false });
       continue;
     }
-    const rows: Array<{ row: Row; growth: boolean }> = [
-      ...diffBaselineGrowth(base, head).map((row) => ({ row: row as Row, growth: true })),
-      ...diffBaselineShrink(base, head).map((row) => ({ row, growth: false })),
+    const { grown, shrunk } = diffBaselineJson(base, head);
+    const { loosened, tightened } = loosening({ grown, shrunk }, f.polarity);
+    const rows = [
+      ...loosened.map((row) => ({ row, loosens: true })),
+      ...tightened.map((row) => ({ row, loosens: false })),
     ];
-    for (const { row, growth } of rows) {
+    for (const { row, loosens } of rows) {
       const outOfDiff = isOutOfDiff(row, changed);
-      if (!growth && !outOfDiff) continue; // in-diff shrink passes silently
+      if (!loosens && !outOfDiff) continue; // in-diff tightening passes silently
       const finding: BaselineFinding = {
         fixture: f.path,
         key: row.path === "" ? "/" : row.path,
@@ -234,7 +197,7 @@ export function evaluateBaselineRaise(input: {
         to: row.to,
         outOfDiff,
       };
-      const clearedBy = valid.find((l) => l.fixture === f.path && (l.key === finding.key || l.key === "*"));
+      const clearedBy = valid.find((l) => l.fixture === f.path && (l.key === finding.key || l.key === "*" || l.key === tabFreeKey(finding.key)));
       if (clearedBy) {
         cleared.push(finding);
         if (clearedBy.key === "*" && !blanketUsed.has(f.path)) {
@@ -319,7 +282,11 @@ export function main(argv: string[], env: NodeJS.ProcessEnv): number {
       .filter(Boolean);
     const fixtures = buildFixturePairs(listBaselineFixtures(root), mergeBase, head, (sha, path) =>
       gitShow(root, sha, path),
-    );
+    ).map((pair) => {
+      const row = registryRowFor(pair.path);
+      const polarity = row ? rowPolarity(row) : undefined;
+      return polarity === undefined ? pair : { ...pair, polarity };
+    });
     const result = evaluateBaselineRaise({ fixtures, changedFiles, prBody: env.PR_BODY ?? "" });
     for (const f of result.findings) {
       console.log(`::warning title=baseline-raise::${f.fixture} ${f.key} ${f.kind} ${f.from}->${f.to}`);

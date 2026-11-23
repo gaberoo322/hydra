@@ -12,7 +12,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const { defineRatchet } = await import("../scripts/ci/ratchet.ts");
+const { defineRatchet, loosening } = await import("../scripts/ci/ratchet.ts");
 
 const BASELINE = "baseline.json";
 type Shape = "set" | "counted";
@@ -270,6 +270,102 @@ describe("ratchet: CLI main", () => {
       });
       assert.equal((await quiet(() => r.main(["--write-baseline"]))).value, 0);
       assert.deepEqual(onDisk(dir), ["a", "z"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("ratchet: --write-baseline writer gate by polarity", () => {
+  const quietRun = async (fn: () => Promise<number>) => {
+    const e = console.error;
+    const l = console.log;
+    console.error = () => {};
+    console.log = () => {};
+    try {
+      return await fn();
+    } finally {
+      console.error = e;
+      console.log = l;
+    }
+  };
+  const floor = (dir: string, rows: string[]) =>
+    defineRatchet({
+      id: "floor",
+      baseline: join(dir, "b.json"),
+      shape: "counted",
+      polarity: "floor",
+      stale: "hint",
+      enforcement: "advisory",
+      measure: async () => rows,
+    });
+  const ceiling = (dir: string, rows: string[], baseline = "b.json") =>
+    defineRatchet({
+      id: "ceil",
+      baseline: join(dir, baseline),
+      shape: "counted",
+      polarity: "ceiling",
+      stale: "hint",
+      enforcement: "advisory",
+      measure: async () => rows,
+    });
+  const read = (dir: string) => JSON.parse(readFileSync(join(dir, "b.json"), "utf8"));
+
+  test("a floor ratchet refuses a shrunk payload (exit 1) and --allow-grow permits it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ratchet-wg-"));
+    try {
+      writeFileSync(join(dir, "b.json"), JSON.stringify({ a: 2 }));
+      const r = floor(dir, ["a"]);
+      assert.equal(await quietRun(() => r.main(["--write-baseline"])), 1);
+      assert.deepEqual(read(dir), { a: 2 });
+      assert.equal(await quietRun(() => r.main(["--write-baseline", "--allow-grow"])), 0);
+      assert.deepEqual(read(dir), { a: 1 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("loosening(): ceiling loosens by growth, floor by shrink or shape change; tightening is the rest", () => {
+    const g = { path: "a", kind: "raised", from: "1", to: "2" } as const;
+    const sh = { path: "b", kind: "lowered", from: "2", to: "1" } as const;
+    const shape = { path: "c", kind: "shape-changed", from: "object", to: "number" } as const;
+    const d = { grown: [g, shape], shrunk: [sh] };
+    assert.deepEqual(loosening(d, "ceiling"), { loosened: [g, shape], tightened: [sh] });
+    assert.deepEqual(loosening(d, "floor"), { loosened: [sh, shape], tightened: [g] });
+  });
+
+  test("a floor ratchet writes a grown payload without --allow-grow (sibling: ceiling refuses growth)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ratchet-wg-"));
+    try {
+      writeFileSync(join(dir, "b.json"), JSON.stringify({ a: 1 }));
+      assert.equal(await quietRun(() => floor(dir, ["a", "a"]).main(["--write-baseline"])), 0);
+      assert.deepEqual(read(dir), { a: 2 });
+      writeFileSync(join(dir, "b.json"), JSON.stringify({ a: 1 }));
+      assert.equal(await quietRun(() => ceiling(dir, ["a", "a"]).main(["--write-baseline"])), 1);
+      assert.deepEqual(read(dir), { a: 1 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an unseeded baseline is an empty prior: a ceiling write of new rows is refused, --allow-grow seeds", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ratchet-wg-"));
+    try {
+      const r = ceiling(dir, ["a"]);
+      assert.equal(await quietRun(() => r.main(["--write-baseline"])), 1);
+      assert.equal(await quietRun(() => r.main(["--write-baseline", "--allow-grow"])), 0);
+      assert.deepEqual(read(dir), { a: 1 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a corrupt prior baseline exits 2 and is left untouched", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ratchet-wg-"));
+    try {
+      writeFileSync(join(dir, "b.json"), "{not json");
+      assert.equal(await quietRun(() => ceiling(dir, ["a"]).main(["--write-baseline", "--allow-grow"])), 2);
+      assert.equal(readFileSync(join(dir, "b.json"), "utf8"), "{not json");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
