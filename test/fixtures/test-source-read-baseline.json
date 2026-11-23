@@ -252,7 +252,6 @@
   "reader\ttest/turn-snapshot-json.test.mts\tbehaviour": 1,
   "reader\ttest/turn-snapshot-picks.test.mts\tgrandfathered": 1,
   "reader\ttest/turn-snapshot-target-board.test.mts\tbehaviour": 1,
-  "reader\ttest/typecheck-test-drift.test.mts\tdrift-guard": 1,
   "reader\ttest/wait-for-health.test.mts\tgrandfathered": 1,
   "reader\ttest/watchdog-claude-hooks.test.mts\tbehaviour": 1,
   "reader\ttest/watchdog-deploy-drift.test.mts\tdrift-guard": 1,

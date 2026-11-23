@@ -94,13 +94,10 @@ async function main(argv: string[]): Promise<number> {
   const [cmd, arg] = argv;
   if (cmd === "select") {
     const measured = await measureSkillSources();
-    const baselineFile = JSON.parse(await readFile(BASELINE_PATH, "utf8")) as {
-      files: Record<string, { body: number }>;
-    };
+    // Counted rows: `<path>` -> body words (a `/description` key is never looked up: pickSkill iterates measured paths).
+    const baseline = JSON.parse(await readFile(BASELINE_PATH, "utf8")) as Record<string, number>;
     const current: Record<string, number> = {};
     for (const [k, v] of Object.entries(measured)) current[k] = v.body;
-    const baseline: Record<string, number> = {};
-    for (const [k, v] of Object.entries(baselineFile.files)) baseline[k] = v.body;
     const pick = pickSkill(current, baseline, await readLedger(ledgerPath()));
     if (pick === null) {
       console.error("[skill-prune] no hydra-*.md playbook found");
