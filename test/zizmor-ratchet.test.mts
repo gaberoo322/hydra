@@ -4,7 +4,7 @@
  */
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +19,8 @@ import {
   toRows,
   zizmorRatchet,
 } from "../scripts/ci/zizmor-ratchet.ts";
+
+import committedBaseline from "../scripts/ci/zizmor-baseline.json" with { type: "json" };
 
 const root = join(import.meta.dirname, "..");
 
@@ -120,7 +122,7 @@ describe("the committed baseline", () => {
 
 describe("committed baseline parity (INV-7)", () => {
   test("findings synthesised from the committed rows give zero added, zero stale over 34 rows", async () => {
-    const baseline = JSON.parse(readFileSync(join(root, "scripts/ci/zizmor-baseline.json"), "utf8")) as Record<string, number>;
+    const baseline: Record<string, number> = committedBaseline;
     const findings: unknown[] = [];
     for (const [key, n] of Object.entries(baseline)) {
       const [file, ident] = key.split("\t");
