@@ -132,7 +132,7 @@ Authoring standard for `docs/operator-playbooks/` and its fragments, the source 
 
 ### STD-PLAYBOOK-POINT-DONT-RESTATE
 
-Name where a fact lives (the dispatch-class taxonomy, a script's help output, the tier endpoint) and read it at run time. Do not copy numbers, enums, key shapes, symbol names or line-number cites into prose.
+Name where a fact lives (the dispatch-class taxonomy, a script's help output, the tier endpoint) and read it at run time. Do not copy numbers, enums, key shapes, symbol names, step or gate numbers or line-number cites into prose.
 
 enforced-by: reviewer, scripts/ci/playbook-vocabulary-ratchet.ts
 
@@ -150,7 +150,7 @@ enforced-by: reviewer, scripts/ci/playbook-vocabulary-ratchet.ts
 
 ### STD-PLAYBOOK-ONE-HOME
 
-A rule two playbooks share lives in one fragment.
+A rule two playbooks share lives in one fragment; a rule one playbook states twice lives once in it.
 
 enforced-by: reviewer, scripts/ci/playbook-duplicate-ratchet.ts
 

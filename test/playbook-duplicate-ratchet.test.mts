@@ -18,6 +18,8 @@ const {
   tokenise,
   scanTexts,
   countSpans,
+  findIntraSpans,
+  measureTexts,
   duplicateRatchet,
 } = await import("../scripts/ci/playbook-duplicate-ratchet.ts");
 const { REPO_ROOT } = await import("../scripts/ci/seam-check-lib.ts");
@@ -96,8 +98,28 @@ describe("playbook-duplicate-ratchet: spans", () => {
     assert.deepEqual(found["a.md"][0].partners, ["b.md", "c.md"]);
   });
 
-  test("repetition inside one file is not a hit", () => {
+  test("repetition inside one file is not a cross-file hit", () => {
     assert.deepEqual(scanTexts({ "a.md": `${shared}\n\n${shared}`, "b.md": "unrelated words only" }), {});
+  });
+
+  test("repetition inside one file is an intra row, never a cross row", () => {
+    const rows = measureTexts({ "a.md": `${shared}\n\n${shared}`, "b.md": "unrelated words only" });
+    assert.deepEqual(rows, { "a.md\tintra": 1 });
+  });
+
+  test("a passage stated three times counts once per extra occurrence", () => {
+    const spans = findIntraSpans("a.md", tokenise(`${shared}\n\nx1 x2 x3\n\n${shared}\n\ny1 y2 y3\n\n${shared}`));
+    assert.equal(spans.length, 2);
+  });
+
+  test("a passage stated once is not an intra hit, and fenced repeats are exempt", () => {
+    assert.deepEqual(findIntraSpans("a.md", tokenise(shared)), []);
+    assert.deepEqual(findIntraSpans("a.md", tokenise(["```", shared, "```", "```", shared, "```"].join("\n"))), []);
+  });
+
+  test("a passage cross-shared and self-repeated counts in both arms independently", () => {
+    const rows = measureTexts({ "a.md": `${shared}\n\n${shared}`, "b.md": shared });
+    assert.deepEqual(rows, { "a.md": 2, "b.md": 1, "a.md\tintra": 1 });
   });
 
   test("exempt text shared between files is not a hit", () => {
