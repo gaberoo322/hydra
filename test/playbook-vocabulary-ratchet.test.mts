@@ -24,6 +24,10 @@ const {
   measureRows,
   vocabularyRatchet,
   scanRepo,
+  ADR_SHAPES,
+  listAdrs,
+  measureAdrRows,
+  adrVocabularyRatchet,
 } = await import("../scripts/ci/playbook-vocabulary-ratchet.ts");
 const { REPO_ROOT } = await import("../scripts/ci/seam-check-lib.ts");
 
@@ -344,5 +348,42 @@ describe("playbook-vocabulary-ratchet: the real playbooks", () => {
   test("the standard the report points at defines the playbook rules", () => {
     const standard = readFileSync(join(REPO_ROOT, STANDARD_REL), "utf8");
     assert.match(standard, /^### STD-PLAYBOOK-CURRENT-BEHAVIOUR$/m);
+  });
+});
+
+describe("playbook-vocabulary-ratchet: the ADR corpus (#5682)", () => {
+  test("the ADR policy is a separate required ceiling with its own baseline", () => {
+    assert.equal(adrVocabularyRatchet.policy.id, "adr-vocabulary-ratchet");
+    assert.equal(adrVocabularyRatchet.policy.baseline, "scripts/ci/adr-vocabulary-baseline.json");
+    assert.equal(adrVocabularyRatchet.policy.polarity, "ceiling");
+    assert.equal(adrVocabularyRatchet.policy.enforcement, "required");
+    assert.notEqual(adrVocabularyRatchet.policy.baseline, vocabularyRatchet.policy.baseline);
+  });
+
+  test("the corpus is the numbered ADR files, never README.md", () => {
+    const files = listAdrs();
+    assert.ok(files.length > 0);
+    for (const f of files) assert.match(f, /^docs\/adr\/\d{4}-[^/]+\.md$/);
+    assert.ok(!files.some((f) => f.endsWith("README.md")));
+  });
+
+  test("baseline rows are tab-keyed docs/adr rows of the two counted shapes only", () => {
+    const baseline = JSON.parse(readFileSync(join(REPO_ROOT, "scripts/ci/adr-vocabulary-baseline.json"), "utf8"));
+    for (const key of Object.keys(baseline)) {
+      const [file, shape] = key.split("\t");
+      assert.match(file, /^docs\/adr\/\d{4}-/);
+      assert.ok((ADR_SHAPES as readonly string[]).includes(shape), key);
+    }
+  });
+
+  test("measured rows carry only invariant-cite and symbol-cite", () => {
+    for (const key of Object.keys(measureAdrRows())) {
+      assert.ok((ADR_SHAPES as readonly string[]).includes(key.split("\t")[1]), key);
+    }
+  });
+
+  test("the live ADR tree is within its baseline", async () => {
+    const v = await adrVocabularyRatchet.verdict();
+    assert.equal(v.ok, true, JSON.stringify(v));
   });
 });
