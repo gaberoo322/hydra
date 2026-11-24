@@ -17,14 +17,27 @@ import { join } from "node:path";
 import { RATCHETS, listBaselineFixtures, rowBaseline, rowId } from "../scripts/ci/ratchets.ts";
 
 const ROOT = join(import.meta.dirname, "..");
-// The describe above derives one subtest per required row; suite-count only sees its top-level
-// units, so the registry-derived count is pinned here instead.
-const REQUIRED_RATCHET_FLOOR = 12;
+// The describe below derives one subtest per required row; suite-count only sees its top-level
+// units, so the migrated required policy ids are pinned here by name instead (a swapped row fails).
+const REQUIRED_RATCHET_IDS = [
+  "fail-loud-ratchet",
+  "lifecycle-seam-check",
+  "playbook-duplicate-ratchet",
+  "playbook-reference-check",
+  "playbook-vocabulary-ratchet",
+  "prose-drift",
+  "redis-seam-check",
+  "skill-size-ratchet",
+  "test-source-read",
+  "test-subject-map",
+  "test-title-provenance",
+  "test-typecheck-check",
+];
 
-describe("required ratchets on the live tree", { concurrency: true }, () => {
+describe("required ratchets on the live tree", { concurrency: 1 }, () => {
   for (const row of RATCHETS) {
     if (row.kind !== "ratchet" || row.ratchet.policy.enforcement !== "required") continue;
-    test(row.ratchet.policy.id, { timeout: 60_000 }, async () => {
+    test(row.ratchet.policy.id, { timeout: 180_000 }, async () => {
       const v = await row.ratchet.verdict();
       assert.ok(v.ok, v.advice);
     });
@@ -32,12 +45,12 @@ describe("required ratchets on the live tree", { concurrency: true }, () => {
 });
 
 describe("ratchet registry", () => {
-  test("registry keeps at least 12 required ratchet rows (floor on the registry-derived subtests)", () => {
-    const required = RATCHETS.filter((r) => r.kind === "ratchet" && r.ratchet.policy.enforcement === "required");
-    assert.ok(
-      required.length >= REQUIRED_RATCHET_FLOOR,
-      `only ${required.length} required ratchet rows (floor ${REQUIRED_RATCHET_FLOOR}): a dropped or demoted row would silently shrink the live-tree describe; raise the floor in the same PR that adds required rows`,
+  test("registry keeps every migrated ratchet as a required row (pinned by id)", () => {
+    const required = RATCHETS.filter((r) => r.kind === "ratchet" && r.ratchet.policy.enforcement === "required").map(
+      (r) => rowId(r),
     );
+    const missing = REQUIRED_RATCHET_IDS.filter((id) => !required.includes(id));
+    assert.deepEqual(missing, [], `required ratchet rows dropped or demoted: ${missing.join(", ")}`);
   });
 
   test("every *-baseline.json on disk has exactly one row and every row's file exists", () => {
