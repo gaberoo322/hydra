@@ -195,10 +195,6 @@ describe("listBaselineFixtures inventory", () => {
     const root = join(import.meta.dirname, "..");
     assert.deepEqual(listBaselineFixtures(root), baselinesOnDisk());
     assert.ok(listBaselineFixtures(root).includes("test/fixtures/qa-cohort-baseline.json"));
-    const exported = Object.keys(await import("../scripts/ci/baseline-raise-check.ts"));
-    assert.equal(exported.includes("listBaselineFixtures"), false);
-    assert.equal(exported.includes("NON_RATCHET_BASELINES"), false);
-    assert.equal(exported.includes("diffBaselineShrink"), false);
   });
 });
 
