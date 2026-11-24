@@ -17,6 +17,9 @@ import { join } from "node:path";
 import { RATCHETS, listBaselineFixtures, rowBaseline, rowId } from "../scripts/ci/ratchets.ts";
 
 const ROOT = join(import.meta.dirname, "..");
+// The describe above derives one subtest per required row; suite-count only sees its top-level
+// units, so the registry-derived count is pinned here instead.
+const REQUIRED_RATCHET_FLOOR = 12;
 
 describe("required ratchets on the live tree", { concurrency: true }, () => {
   for (const row of RATCHETS) {
@@ -29,9 +32,12 @@ describe("required ratchets on the live tree", { concurrency: true }, () => {
 });
 
 describe("ratchet registry", () => {
-  test("registry exercises at least one required ratchet", () => {
+  test("registry keeps at least 12 required ratchet rows (floor on the registry-derived subtests)", () => {
     const required = RATCHETS.filter((r) => r.kind === "ratchet" && r.ratchet.policy.enforcement === "required");
-    assert.ok(required.length > 0, "no required ratchet row: the live-tree describe would run nothing");
+    assert.ok(
+      required.length >= REQUIRED_RATCHET_FLOOR,
+      `only ${required.length} required ratchet rows (floor ${REQUIRED_RATCHET_FLOOR}): a dropped or demoted row would silently shrink the live-tree describe; raise the floor in the same PR that adds required rows`,
+    );
   });
 
   test("every *-baseline.json on disk has exactly one row and every row's file exists", () => {
