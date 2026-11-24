@@ -1,0 +1,375 @@
+{"file":"test/admission.test.mts","name":"isFutureInstant","ok":true,"duration_ms":3.114057}
+{"file":"test/admission.test.mts","name":"decideAdmission ladder arms","ok":true,"duration_ms":6.349185}
+{"file":"test/admission.test.mts","name":"decideAdmission arm ordering","ok":true,"duration_ms":0.675971}
+{"file":"test/admission.test.mts","name":"OAuth refresh nudge decision (#5103, #4843)","ok":true,"duration_ms":1.621117}
+{"file":"test/admission.test.mts","name":"launch model decision (#5103, #4585)","ok":true,"duration_ms":0.953496}
+{"file":"test/admission.test.mts","name":"reason vocabulary","ok":true,"duration_ms":2.266126}
+{"file":"test/agent-dispatch-prompt-guard.test.mts","name":"agent-dispatch-prompt-guard — in scope, rendered prompts pass","ok":true,"duration_ms":7077.106218}
+{"file":"test/agent-dispatch-prompt-guard.test.mts","name":"agent-dispatch-prompt-guard — in scope, unrendered prompts are denied","ok":true,"duration_ms":812.856341}
+{"file":"test/agent-dispatch-prompt-guard.test.mts","name":"agent-dispatch-prompt-guard — out of scope is never blocked","ok":true,"duration_ms":97.02567}
+{"file":"test/aggregator-active-dispatches.test.mts","name":"projectOperatorRow — pure helper","ok":true,"duration_ms":1.33676}
+{"file":"test/aggregator-active-dispatches.test.mts","name":"projectAutopilotRow — pure helper","ok":true,"duration_ms":1.170456}
+{"file":"test/aggregator-active-dispatches.test.mts","name":"mergeDispatches — pure helper","ok":true,"duration_ms":1.216623}
+{"file":"test/aggregator-active-dispatches.test.mts","name":"getActiveDispatches — autopilot-only","ok":true,"duration_ms":21.174453}
+{"file":"test/aggregator-active-dispatches.test.mts","name":"getActiveDispatches — autopilot liveness (#888, post-#2189)","ok":true,"duration_ms":3.663604}
+{"file":"test/aggregator-active-dispatches.test.mts","name":"getActiveDispatches — operator-only","ok":true,"duration_ms":0.630645}
+{"file":"test/aggregator-active-dispatches.test.mts","name":"getActiveDispatches — mixed scenario","ok":true,"duration_ms":0.842041}
+{"file":"test/aggregator-active-dispatches.test.mts","name":"getActiveDispatches — sub-source failure isolation","ok":true,"duration_ms":4.890794}
+{"file":"test/aggregator-architecture-graph.test.mts","name":"architecture-graph aggregator","ok":true,"duration_ms":12.980325}
+{"file":"test/aggregator-architecture-graph.test.mts","name":"computeGroupLayout (pure layout algorithm)","ok":true,"duration_ms":1.9321}
+{"file":"test/aggregator-behavior-gallery.test.mts","name":"classifyOutcome","ok":true,"duration_ms":4.501524}
+{"file":"test/aggregator-behavior-gallery.test.mts","name":"runMatchesFilters","ok":true,"duration_ms":1.901425}
+{"file":"test/aggregator-behavior-gallery.test.mts","name":"clampLimit","ok":true,"duration_ms":0.611248}
+{"file":"test/aggregator-behavior-gallery.test.mts","name":"getBehaviorGallery — happy path","ok":true,"duration_ms":1.580923}
+{"file":"test/aggregator-cost-burn.test.mts","name":"tokensPerHour — pure helper","ok":true,"duration_ms":1.263412}
+{"file":"test/aggregator-cost-burn.test.mts","name":"computeBurnRates — pure helper","ok":true,"duration_ms":1.653675}
+{"file":"test/aggregator-cost-burn.test.mts","name":"getCostBurn — happy path","ok":true,"duration_ms":0.468941}
+{"file":"test/aggregator-cost-burn.test.mts","name":"getCostBurn — bucket boundary","ok":true,"duration_ms":0.291831}
+{"file":"test/aggregator-cost-burn.test.mts","name":"getCostBurn — empty state","ok":true,"duration_ms":0.28482}
+{"file":"test/aggregator-cost-burn.test.mts","name":"getCostBurn — sub-source failure isolation","ok":true,"duration_ms":1.199368}
+{"file":"test/aggregator-friction-patterns.test.mts","name":"liftFrictionPatterns — pure helper","ok":true,"duration_ms":3.070733}
+{"file":"test/aggregator-friction-patterns.test.mts","name":"normalizeLastEscalation — pure helper (issue #843)","ok":true,"duration_ms":0.517749}
+{"file":"test/aggregator-friction-patterns.test.mts","name":"meta-friction read (via seam) — windowing through getFrictionPatterns","ok":true,"duration_ms":0.853442}
+{"file":"test/aggregator-friction-patterns.test.mts","name":"getFrictionPatterns — happy path","ok":true,"duration_ms":0.29633}
+{"file":"test/aggregator-friction-patterns.test.mts","name":"getFrictionPatterns — sub-source failure isolation","ok":true,"duration_ms":1.312533}
+{"file":"test/aggregator-friction-source.test.mts","name":"readMetaFrictionIssues — seam query","ok":true,"duration_ms":1.403856}
+{"file":"test/aggregator-friction-source.test.mts","name":"readMetaFrictionIssues — window / sort","ok":true,"duration_ms":1.193769}
+{"file":"test/aggregator-friction-source.test.mts","name":"readMetaFrictionIssues — never throws","ok":true,"duration_ms":0.204067}
+{"file":"test/aggregator-friction-source.test.mts","name":"readPatternGroups — namespace fan-out","ok":true,"duration_ms":0.873233}
+{"file":"test/aggregator-friction-source.test.mts","name":"readPatternGroups — parse isolation (never throws)","ok":true,"duration_ms":0.654373}
+{"file":"test/aggregator-friction-source.test.mts","name":"readFrictionPatterns — thin friction wrapper","ok":true,"duration_ms":0.381184}
+{"file":"test/aggregator-issues-waiting-projections.test.mts","name":"projections — structure","ok":true,"duration_ms":3.911796}
+{"file":"test/aggregator-issues-waiting-projections.test.mts","name":"projectStuckIssues — classified expectations","ok":true,"duration_ms":416.99816}
+{"file":"test/aggregator-issues-waiting-projections.test.mts","name":"readWaitingIssues — concurrent reads single-flight (#5093 INV-7)","ok":true,"duration_ms":1.91613}
+{"file":"test/aggregator-issues-waiting-projections.test.mts","name":"projectPickupSet — golden + composition identity with getReviewPickupSet","ok":true,"duration_ms":1026.917966}
+{"file":"test/aggregator-issues-waiting.test.mts","name":"classifyWaiting — one line per issue, by precedence","ok":true,"duration_ms":3.407611}
+{"file":"test/aggregator-issues-waiting.test.mts","name":"classifyWaiting — blocker liveness uses the strict predicate","ok":true,"duration_ms":1.691744}
+{"file":"test/aggregator-issues-waiting.test.mts","name":"classifyWaiting — needs-info and presence lines","ok":true,"duration_ms":0.585973}
+{"file":"test/aggregator-issues-waiting.test.mts","name":"getIssuesWaiting — source evidence","ok":true,"duration_ms":2.563906}
+{"file":"test/aggregator-issues-waiting.test.mts","name":"getIssuesWaiting — machine-owned suppression (#4805)","ok":true,"duration_ms":2.861747}
+{"file":"test/aggregator-issues-waiting.test.mts","name":"getIssuesWaiting — Epic exclusion (#4805)","ok":true,"duration_ms":1.026879}
+{"file":"test/aggregator-issues-waiting.test.mts","name":"getIssuesWaiting — lookup failures never hide rows (#4805)","ok":true,"duration_ms":2.034463}
+{"file":"test/aggregator-issues-waiting.test.mts","name":"getIssuesWaiting — 2026-09-30 snapshot fixture (#4805)","ok":true,"duration_ms":1.386669}
+{"file":"test/aggregator-issues-waiting.test.mts","name":"parseArchived (github/repo.ts pure parser)","ok":true,"duration_ms":1.134056}
+{"file":"test/aggregator-lessons-explorer.test.mts","name":"liftPromotedLessons","ok":true,"duration_ms":2.131618}
+{"file":"test/aggregator-lessons-explorer.test.mts","name":"skillMatches","ok":true,"duration_ms":0.493413}
+{"file":"test/aggregator-lessons-explorer.test.mts","name":"getLessonsExplorer — happy path","ok":true,"duration_ms":1.558176}
+{"file":"test/aggregator-lessons-overnight.test.mts","name":"filterNearPromotion — pure helper","ok":true,"duration_ms":1.806479}
+{"file":"test/aggregator-lessons-overnight.test.mts","name":"meta-friction read (via seam) — windowing through getOvernightLessons","ok":true,"duration_ms":0.888521}
+{"file":"test/aggregator-lessons-overnight.test.mts","name":"getOvernightLessons — happy path","ok":true,"duration_ms":0.42679}
+{"file":"test/aggregator-lessons-overnight.test.mts","name":"getOvernightLessons — empty state","ok":true,"duration_ms":0.265427}
+{"file":"test/aggregator-lessons-overnight.test.mts","name":"getOvernightLessons — sub-source failure isolation","ok":true,"duration_ms":1.570679}
+{"file":"test/aggregator-lessons-trend.test.mts","name":"collectPromoted — pure helper","ok":true,"duration_ms":2.257506}
+{"file":"test/aggregator-lessons-trend.test.mts","name":"promotionsByDay — pure helper","ok":true,"duration_ms":0.574102}
+{"file":"test/aggregator-lessons-trend.test.mts","name":"pickTopFriction — pure helper","ok":true,"duration_ms":0.772483}
+{"file":"test/aggregator-lessons-trend.test.mts","name":"metaFrictionOpened — derived from seam reader length","ok":true,"duration_ms":0.734307}
+{"file":"test/aggregator-lessons-trend.test.mts","name":"getLessonsTrend — happy path","ok":true,"duration_ms":0.26649}
+{"file":"test/aggregator-lessons-trend.test.mts","name":"getLessonsTrend — empty state","ok":true,"duration_ms":0.154679}
+{"file":"test/aggregator-lessons-trend.test.mts","name":"getLessonsTrend — failure isolation","ok":true,"duration_ms":1.418107}
+{"file":"test/aggregator-outcome-trends.test.mts","name":"bucketPoints — pure helper (current-only)","ok":true,"duration_ms":2.167734}
+{"file":"test/aggregator-outcome-trends.test.mts","name":"computeDeltaPct — pure helper","ok":true,"duration_ms":1.099871}
+{"file":"test/aggregator-outcome-trends.test.mts","name":"getOutcomeTrends — happy path","ok":true,"duration_ms":0.839632}
+{"file":"test/aggregator-outcome-trends.test.mts","name":"getOutcomeTrends — empty state","ok":true,"duration_ms":0.324806}
+{"file":"test/aggregator-outcome-trends.test.mts","name":"getOutcomeTrends — window boundary (current reading only)","ok":true,"duration_ms":0.381415}
+{"file":"test/aggregator-outcome-trends.test.mts","name":"getOutcomeTrends — failure isolation","ok":true,"duration_ms":1.584348}
+{"file":"test/aggregator-overnight-summary.test.mts","name":"countNonEmptyLines — pure helper","ok":true,"duration_ms":1.340892}
+{"file":"test/aggregator-overnight-summary.test.mts","name":"countIssuesInWindow — pure helper","ok":true,"duration_ms":0.600302}
+{"file":"test/aggregator-overnight-summary.test.mts","name":"projectHeadroom — pure helper","ok":true,"duration_ms":0.910274}
+{"file":"test/aggregator-overnight-summary.test.mts","name":"getOvernightSummary — happy path","ok":true,"duration_ms":1.0693}
+{"file":"test/aggregator-overnight-summary.test.mts","name":"getOvernightSummary — empty state","ok":true,"duration_ms":0.234433}
+{"file":"test/aggregator-overnight-summary.test.mts","name":"getOvernightSummary — window boundary","ok":true,"duration_ms":0.234226}
+{"file":"test/aggregator-overnight-summary.test.mts","name":"getOvernightSummary — sub-source failure isolation","ok":true,"duration_ms":2.111214}
+{"file":"test/aggregator-recent-merges.test.mts","name":"clampLimit — pure helper","ok":true,"duration_ms":1.326357}
+{"file":"test/aggregator-recent-merges.test.mts","name":"extractPrNumbersFromGitLog — pure helper","ok":true,"duration_ms":1.44938}
+{"file":"test/aggregator-recent-merges.test.mts","name":"extractMergeCommitsFromGitLog — pure helper (issue #2177)","ok":true,"duration_ms":1.109428}
+{"file":"test/aggregator-recent-merges.test.mts","name":"listRecentMergeCommits — cheap git-log primitive (issue #2177)","ok":true,"duration_ms":1.227208}
+{"file":"test/aggregator-recent-merges.test.mts","name":"tierFromLabels — pure helper","ok":true,"duration_ms":0.380672}
+{"file":"test/aggregator-recent-merges.test.mts","name":"prMetaFromView — pure helper","ok":true,"duration_ms":0.2499}
+{"file":"test/aggregator-recent-merges.test.mts","name":"getRecentMerges — happy path","ok":true,"duration_ms":0.41918}
+{"file":"test/aggregator-recent-merges.test.mts","name":"getRecentMerges — empty state","ok":true,"duration_ms":0.418326}
+{"file":"test/aggregator-recent-merges.test.mts","name":"getRecentMerges — origin/master ref freshness (#1757)","ok":true,"duration_ms":1.034559}
+{"file":"test/aggregator-recent-merges.test.mts","name":"getRecentMerges — per-PR meta failure isolation","ok":true,"duration_ms":0.400614}
+{"file":"test/aggregator-recent-merges.test.mts","name":"listRecentMergeCommits — wrong origin remote stays fail-open and loud (#4939)","ok":true,"duration_ms":3.398028}
+{"file":"test/aggregator-service-strip.test.mts","name":"classifyBoolean — pure helper","ok":true,"duration_ms":1.59411}
+{"file":"test/aggregator-service-strip.test.mts","name":"classifyProbe — pure helper","ok":true,"duration_ms":0.912995}
+{"file":"test/aggregator-service-strip.test.mts","name":"getServiceStrip — integration","ok":true,"duration_ms":2.760548}
+{"file":"test/aggregator-stalled-prs.test.mts","name":"classifyStalledPrs — admission lines","ok":true,"duration_ms":3.526535}
+{"file":"test/aggregator-stalled-prs.test.mts","name":"rollup fold wiring","ok":true,"duration_ms":0.658579}
+{"file":"test/aggregator-stalled-prs.test.mts","name":"github/prs.ts additive fields (#4624)","ok":true,"duration_ms":0.422104}
+{"file":"test/aggregator-stalled-prs.test.mts","name":"getStalledPrs — sources + asserted emptiness","ok":true,"duration_ms":2.109231}
+{"file":"test/aggregator-stalled-prs.test.mts","name":"getAttentionFeed — rank-1 stalled-PRs wiring","ok":true,"duration_ms":35.171437}
+{"file":"test/aggregator-stuck-items.test.mts","name":"selectPrsWithFailedCi — pure helper","ok":true,"duration_ms":2.825495}
+{"file":"test/aggregator-stuck-items.test.mts","name":"selectPrsWithFailedCi — shared latest-wins collapse semantics (#4624)","ok":true,"duration_ms":1.0214}
+{"file":"test/aggregator-stuck-items.test.mts","name":"getStuckItems — required-context wiring (#4569)","ok":true,"duration_ms":1.183465}
+{"file":"test/aggregator-stuck-items.test.mts","name":"getStuckItems — happy path","ok":true,"duration_ms":0.640522}
+{"file":"test/aggregator-stuck-items.test.mts","name":"getStuckItems — empty state","ok":true,"duration_ms":0.259138}
+{"file":"test/aggregator-stuck-items.test.mts","name":"getStuckItems — custom thresholds","ok":true,"duration_ms":0.687311}
+{"file":"test/aggregator-stuck-items.test.mts","name":"getStuckItems — sub-source failure isolation","ok":true,"duration_ms":1.292148}
+{"file":"test/aggregator-stuck-items.test.mts","name":"getStuckItems — issue half is the classified waiting read (#5093)","ok":true,"duration_ms":5.93483}
+{"file":"test/aggregator-subscription-quota-trend.test.mts","name":"computeQuotaPoints — pure helper (current-only)","ok":true,"duration_ms":2.25703}
+{"file":"test/aggregator-subscription-quota-trend.test.mts","name":"getQuotaTrend — happy path","ok":true,"duration_ms":0.609256}
+{"file":"test/aggregator-subscription-quota-trend.test.mts","name":"getQuotaTrend — empty state","ok":true,"duration_ms":0.896907}
+{"file":"test/aggregator-subscription-quota-trend.test.mts","name":"getQuotaTrend — window boundary (current snapshot only)","ok":true,"duration_ms":0.611891}
+{"file":"test/aggregator-subscription-quota-trend.test.mts","name":"getQuotaTrend — headroom clamping","ok":true,"duration_ms":0.25888}
+{"file":"test/aggregator-target-backlog-findings.test.mts","name":"excerptOf — pure helper","ok":true,"duration_ms":2.516208}
+{"file":"test/aggregator-target-backlog-findings.test.mts","name":"filterUnroutedFindings — pure helper","ok":true,"duration_ms":1.143731}
+{"file":"test/aggregator-target-backlog-findings.test.mts","name":"getNewTargetFindings — happy path","ok":true,"duration_ms":0.871807}
+{"file":"test/aggregator-target-backlog-findings.test.mts","name":"getNewTargetFindings — empty state","ok":true,"duration_ms":0.473799}
+{"file":"test/aggregator-target-backlog-findings.test.mts","name":"getNewTargetFindings — window boundary","ok":true,"duration_ms":0.280862}
+{"file":"test/aggregator-usage-eligibility.test.mts","name":"getEligibilityView — pure composition (issue #3182)","ok":true,"duration_ms":4.922226}
+{"file":"test/aggregator-usage-eligibility.test.mts","name":"getEligibilityView — fail-safe overlay-input reads (issue #3182)","ok":true,"duration_ms":1.441619}
+{"file":"test/aggregator-usage-eligibility.test.mts","name":"meter-unavailable blocks dispatch (2026-07-30, replaces #1124 fail-open)","ok":true,"duration_ms":0.569622}
+{"file":"test/aggregator-usage-eligibility.test.mts","name":"getEligibilityView — model-exhaustion advisory overlay (issue #4585)","ok":true,"duration_ms":0.928257}
+{"file":"test/anchor-classification-inference-3390.test.mts","name":"inferAnchorTypeFromCycleId — decodes suffix-less + trailing-suffix slots (#3390)","ok":true,"duration_ms":8.970817}
+{"file":"test/anchor-classification-inference-3390.test.mts","name":"getMetricsTrend — re-infers a stored `unclassified` record from its cycleId (#3390)","ok":true,"duration_ms":38.001462}
+{"file":"test/anchor-type-classification.test.mts","name":"anchor-type policy leaf — pure classification (#2858)","ok":true,"duration_ms":2.657013}
+{"file":"test/anchor-type-classification.test.mts","name":"anchor-type policy leaf — cycle-close.ts relay retired (#3225)","ok":true,"duration_ms":0.414614}
+{"file":"test/anchor-type-classification.test.mts","name":"classifyAnchorType — bare-UUID unclassified invariant (#2822)","ok":true,"duration_ms":3.029983}
+{"file":"test/anchor-type-classification.test.mts","name":"classifyAnchorType — prefix-less relay cycleId inference (#3138)","ok":true,"duration_ms":3.364783}
+{"file":"test/anchor-type-classification.test.mts","name":"classifyAnchorType — widened regex preserves #2822/harness negatives (#3138)","ok":true,"duration_ms":1.601593}
+{"file":"test/anchor-type-classification.test.mts","name":"inferAnchorTypeFromCycleId — skill-name + class-prefix legs (#3403)","ok":true,"duration_ms":1.245807}
+{"file":"test/anchor-type-classification.test.mts","name":"PREFIX_ANCHOR_TYPE — ambiguous prefixes never guess (#3403)","ok":true,"duration_ms":0.471153}
+{"file":"test/anchor-type-classification.test.mts","name":"inferAnchorTypeFromCycleId — structurally undecodable ids stay the sentinel (#3403)","ok":true,"duration_ms":1.682839}
+{"file":"test/anchor-type-classification.test.mts","name":"SLOT_ANCHOR_TYPE is derived from the taxonomy — no drift (#3253)","ok":true,"duration_ms":2.143335}
+{"file":"test/anchor-type-classification.test.mts","name":"cycleId inference decodes signal-class slots post-#3253","ok":true,"duration_ms":0.807898}
+{"file":"test/anchor-type-classification.test.mts","name":"inferAnchorTypeFromCycleId — hydra-target-build cycleId leg (#3486)","ok":true,"duration_ms":1.044339}
+{"file":"test/anchor-type-classification.test.mts","name":"inferAnchorTypeFromCycleId — target-build leg never guesses (#3486 / #2822)","ok":true,"duration_ms":1.496876}
+{"file":"test/anchor-type-classification.test.mts","name":"classifyAnchorType — merge-watch branch-fallback decode (#3579)","ok":true,"duration_ms":2.023921}
+{"file":"test/anchor-type-classification.test.mts","name":"classifyNoAttributionShape — names the undecodable structural shape (#3623)","ok":true,"duration_ms":1.621311}
+{"file":"test/anthropic-seam-check.test.mts","name":"anthropic-seam-check: Anthropic fetch grammar","ok":true,"duration_ms":2.171856}
+{"file":"test/anthropic-seam-check.test.mts","name":"anthropic-seam-check: carve-out","ok":true,"duration_ms":0.186351}
+{"file":"test/api-500-catch-ratchet.test.mts","name":"src/api/*.ts hand-rolled 500-catch ratchet (issue #4402)","ok":true,"duration_ms":3.721653}
+{"file":"test/api-alerts.test.mts","name":"GET /alerts — unparseable-entry guard (issue #3744)","ok":true,"duration_ms":66.471828}
+{"file":"test/api-alerts.test.mts","name":"POST /alerts/:id/dismiss — unparseable-entry guard (issue #3793)","ok":true,"duration_ms":33.002757}
+{"file":"test/api-anchor-retirement-collateral.test.mts","name":"metrics router — ADR-0036 vacuous-read removal","ok":true,"duration_ms":198.454029}
+{"file":"test/api-anchor-retirement-collateral.test.mts","name":"health router — ADR-0036 vacuous-read removal","ok":true,"duration_ms":101.96225}
+{"file":"test/api-architecture.test.mts","name":"GET /api/architecture — closure cache (issue #1489)","ok":true,"duration_ms":23.164457}
+{"file":"test/api-attribution.test.mts","name":"GET /api/attribution — read-only marginal-effect view (#2631)","ok":true,"duration_ms":6.740055}
+{"file":"test/api-attribution.test.mts","name":"GET /api/attribution/impact — reverse-loop impact ranking (#3283)","ok":true,"duration_ms":5.267746}
+{"file":"test/api-class-stats.test.mts","name":"GET /api/autopilot/class-stats (issue #2943)","ok":true,"duration_ms":6.106429}
+{"file":"test/api-class-stats.test.mts","name":"GET /api/autopilot/class-stats — 10-minute memo (issue #4637)","ok":true,"duration_ms":6.852916}
+{"file":"test/api-cors-allowlist.test.mts","name":"parseAllowedOrigins — env parsing (issue #4047)","ok":true,"duration_ms":1.664218}
+{"file":"test/api-cors-allowlist.test.mts","name":"CORS exact-match allowlist — mounted app (issue #4047)","ok":true,"duration_ms":56.811569}
+{"file":"test/api-design-concepts-schema.test.mts","name":"design-concepts schema migration — ADR-0011 slice 1","ok":true,"duration_ms":121.367259}
+{"file":"test/api-explore-page.test.mts","name":"explore-page router — route registration (issue #3652)","ok":true,"duration_ms":2.618106}
+{"file":"test/api-explore-page.test.mts","name":"explore-page router — aggregator delegation (issue #3652)","ok":true,"duration_ms":3.895304}
+{"file":"test/api-explore-page.test.mts","name":"explore-page router — schema validation (issue #3652)","ok":true,"duration_ms":0.82194}
+{"file":"test/api-explore-page.test.mts","name":"explore-page router — never-throw-500 (issue #3652)","ok":true,"duration_ms":1.246079}
+{"file":"test/api-health.test.mts","name":"GET /health — basic health check (issue #164)","ok":true,"duration_ms":945.557991}
+{"file":"test/api-maintenance.test.mts","name":"Maintenance housekeeping endpoint (issue #723)","ok":true,"duration_ms":1539.788958}
+{"file":"test/api-maintenance.test.mts","name":"runChore guarded-chore runner (issue #1864)","ok":true,"duration_ms":3.221646}
+{"file":"test/api-maintenance.test.mts","name":"cleanup chores folded into housekeeping (issue #1876)","ok":true,"duration_ms":7.899737}
+{"file":"test/api-merge-lock.test.mts","name":"merge-lock router — route registration (issue #3652)","ok":true,"duration_ms":3.191173}
+{"file":"test/api-metrics-cost.test.mts","name":"metrics-cost router — route registration (issue #3652)","ok":true,"duration_ms":3.328963}
+{"file":"test/api-metrics.test.mts","name":"GET /metrics/unclassified (issue #3443)","ok":true,"duration_ms":62.91565}
+{"file":"test/api-metrics.test.mts","name":"GET /metrics — coverage.classesNotRecorded (issue #4392)","ok":true,"duration_ms":316.378746}
+{"file":"test/api-now-endpoints.test.mts","name":"Response schemas — aggregator shape pins","ok":true,"duration_ms":5.92154}
+{"file":"test/api-now-endpoints.test.mts","name":"GET /now/service-strip","ok":true,"duration_ms":2.487332}
+{"file":"test/api-now-endpoints.test.mts","name":"GET /now/autopilot-tick","ok":true,"duration_ms":2.378052}
+{"file":"test/api-now-endpoints.test.mts","name":"GET /now/active-dispatches","ok":true,"duration_ms":0.502606}
+{"file":"test/api-now-endpoints.test.mts","name":"GET /now/cost-burn","ok":true,"duration_ms":0.325377}
+{"file":"test/api-outcomes-page.test.mts","name":"outcomes-page router — route registration (issue #3652)","ok":true,"duration_ms":3.126888}
+{"file":"test/api-outcomes-page.test.mts","name":"outcomes-page router — aggregator delegation (issue #3652)","ok":true,"duration_ms":3.61817}
+{"file":"test/api-outcomes-page.test.mts","name":"outcomes-page router — schema validation (issue #3652)","ok":true,"duration_ms":1.246075}
+{"file":"test/api-outcomes-page.test.mts","name":"outcomes-page router — never-throw-500 (issue #3652)","ok":true,"duration_ms":1.393547}
+{"file":"test/api-quality-gates.test.mts","name":"quality-gate trend aggregation (issue #212)","ok":true,"duration_ms":65.088741}
+{"file":"test/api-scheduler.test.mts","name":"Scheduler API routes (issue #164)","ok":true,"duration_ms":229.79467}
+{"file":"test/api-tier-router.test.mts","name":"GET /tier route (issue #2183 — moved out of misc.ts)","ok":true,"duration_ms":5.27918}
+{"file":"test/api-tier-router.test.mts","name":"issue #4563 — schemaValidationError() adoption across all six sibling 400 sites","ok":true,"duration_ms":6.30766}
+{"file":"test/api-today-summary.test.mts","name":"OvernightSummaryQuerySchema — happy path","ok":true,"duration_ms":2.665246}
+{"file":"test/api-today-summary.test.mts","name":"OvernightSummaryQuerySchema — rejection cases","ok":true,"duration_ms":1.853732}
+{"file":"test/api-today-summary.test.mts","name":"OvernightSummaryResponseSchema — aggregator shape pin","ok":true,"duration_ms":1.126763}
+{"file":"test/api-today-summary.test.mts","name":"GET /today/summary — route handler","ok":true,"duration_ms":6.167779}
+{"file":"test/api-usage-dispatch-cost.test.mts","name":"POST /api/usage/dispatch-cost + GET /api/usage/by-issue (issue #4126)","ok":true,"duration_ms":36.082441}
+{"file":"test/api-usage-eligibility-admission.test.mts","name":"GET /api/usage/eligibility admission field (issue #5101)","ok":true,"duration_ms":281.224438}
+{"file":"test/api-versions.test.mts","name":"GET /api/versions — the tagless path: orch empty, target commit identity (#3680, #4172)","ok":true,"duration_ms":7.721089}
+{"file":"test/api-versions.test.mts","name":"versions read — never uses git describe (#3680)","ok":true,"duration_ms":1.270867}
+{"file":"test/api-versions.test.mts","name":"versions read — tag enumeration format and ordering (#3680)","ok":true,"duration_ms":1.142886}
+{"file":"test/api-versions.test.mts","name":"versions read — changelog fragment fold (#3680)","ok":true,"duration_ms":1.718612}
+{"file":"test/api-versions.test.mts","name":"versions read — never-throw degradation (#3680)","ok":true,"duration_ms":2.515335}
+{"file":"test/api-versions.test.mts","name":"versions read — 60s per-root cache (#3680)","ok":true,"duration_ms":1.221719}
+{"file":"test/api-versions.test.mts","name":"versions read — pure helpers (#3680)","ok":true,"duration_ms":0.660475}
+{"file":"test/api-versions.test.mts","name":"versions — project roster and module boundary (#3680)","ok":true,"duration_ms":1.016469}
+{"file":"test/api.test.mts","name":"createApi — HTTP mount layer (issue #3097)","ok":true,"duration_ms":81.038624}
+{"file":"test/ast-search.test.mts","name":"ast-search: parseArgs","ok":true,"duration_ms":2.731997}
+{"file":"test/ast-search.test.mts","name":"ast-search: rule mode (issue #4732)","ok":true,"duration_ms":2.419375}
+{"file":"test/ast-search.test.mts","name":"ast-search: normaliseMatches","ok":true,"duration_ms":0.52834}
+{"file":"test/attention-buckets.test.mts","name":"drain order (INV-1)","ok":true,"duration_ms":23.591501}
+{"file":"test/attention-buckets.test.mts","name":"bucket summaries (INV-2, INV-4)","ok":true,"duration_ms":11.025155}
+{"file":"test/attention-buckets.test.mts","name":"legacy signal -> admission line (INV-5)","ok":true,"duration_ms":1.500576}
+{"file":"test/attention-buckets.test.mts","name":"machine-stopped aggregate (INV-6, INV-3)","ok":true,"duration_ms":29.208585}
+{"file":"test/attention-buckets.test.mts","name":"deploy-drift memo (INV-7)","ok":true,"duration_ms":1.327585}
+{"file":"test/attention-buckets.test.mts","name":"resolved registry actions (INV-9, INV-10)","ok":true,"duration_ms":5.049571}
+{"file":"test/attention-buckets.test.mts","name":"blocker-aware waiting rows (#4805)","ok":true,"duration_ms":3.461538}
+{"file":"test/attention-calibration.test.mts","name":"attention-calibration — verdict policy (pure)","ok":true,"duration_ms":3.585745}
+{"file":"test/attention-calibration.test.mts","name":"redis/attention — per-line episode ledger + calibration counters","ok":true,"duration_ms":133.332269}
+{"file":"test/attention-repetition-parked.test.mts","name":"rank 5 parked-over-cap:cap","ok":true,"duration_ms":24.499361}
+{"file":"test/attention-repetition-parked.test.mts","name":"rank 4 repetition:hits (pinned, already wired)","ok":true,"duration_ms":2.598022}
+{"file":"test/attention-target-bucket.test.mts","name":"rank 3 target-items — wired and parameterised","ok":true,"duration_ms":23.738207}
+{"file":"test/attention-target-bucket.test.mts","name":"rank 3 target-items — archived Target","ok":true,"duration_ms":14.159822}
+{"file":"test/attention-target-bucket.test.mts","name":"rank 3 target-items — reframe rows carry the attempt count","ok":true,"duration_ms":4.485942}
+{"file":"test/attention-target-bucket.test.mts","name":"rank 2 — new admission lines","ok":true,"duration_ms":7.140199}
+{"file":"test/attention-target-bucket.test.mts","name":"rank 2 — blocked rows render the live blocker state; stale-blocked has its own id","ok":true,"duration_ms":1.514072}
+{"file":"test/attention.test.mts","name":"AttentionFeedResponseSchema — trust fields","ok":true,"duration_ms":5.110026}
+{"file":"test/attention.test.mts","name":"DismissAttentionRequestSchema — typed dismiss body (INV-8)","ok":true,"duration_ms":1.556554}
+{"file":"test/attention.test.mts","name":"getAttentionFeed — signal wiring onto the common item shape","ok":true,"duration_ms":47.593584}
+{"file":"test/attention.test.mts","name":"getAttentionFeed — asserted-emptiness evidence (ADR-0034 §5.2)","ok":true,"duration_ms":8.333435}
+{"file":"test/attention.test.mts","name":"getAttentionFeed — INV-2: no deviation/spend/quota anywhere in the shape","ok":true,"duration_ms":5.021171}
+{"file":"test/attention.test.mts","name":"getAttentionFeed — dismissal + calibration wiring","ok":true,"duration_ms":7.360781}
+{"file":"test/attention.test.mts","name":"getAttentionFeed — waiting-on-you:hold-exit (ADR-0047 D3, issue #5313)","ok":true,"duration_ms":2.940967}
+{"file":"test/attention.test.mts","name":"crossedAtFrom — pure helper","ok":true,"duration_ms":0.151166}
+{"file":"test/attention.test.mts","name":"GET /attention/feed — route","ok":true,"duration_ms":4.688011}
+{"file":"test/attention.test.mts","name":"POST /attention/:id/dismiss — route","ok":true,"duration_ms":2.745455}
+{"file":"test/attention.test.mts","name":"GET /attention/counts — route","ok":true,"duration_ms":0.308066}
+{"file":"test/attention.test.mts","name":"redis/attention — typed dismiss + dismissal ledger","ok":true,"duration_ms":25.678756}
+{"file":"test/attention.test.mts","name":"getAttentionFeed - waiting-on-you:invalid-state line","ok":true,"duration_ms":1.90266}
+{"file":"test/attribution-self-arm.test.mts","name":"attribution-self-arm — selfArmConfirmedMergedPr (#3639 extraction)","ok":true,"duration_ms":3.975572}
+{"file":"test/attribution-self-arm.test.mts","name":"attribution-self-arm — isSentinelReconcileAnchorType","ok":true,"duration_ms":0.240067}
+{"file":"test/autonomy-rate.test.mts","name":"computeAutonomyRate — fan-out","ok":true,"duration_ms":2.929543}
+{"file":"test/autonomy-rate.test.mts","name":"percentile — pure helper (re-exported from autonomy-rate)","ok":true,"duration_ms":0.916476}
+{"file":"test/autopilot-args.test.mts","name":"scripts/autopilot/args-parse.sh — slash-arg parsing","ok":true,"duration_ms":4955.193046}
+{"file":"test/autopilot-args.test.mts","name":"scripts/autopilot/args-parse.sh — executable hygiene","ok":true,"duration_ms":6.619451}
+{"file":"test/autopilot-board.test.mts","name":"deriveBoardState — counts + stale lists (issue #934)","ok":true,"duration_ms":3.130635}
+{"file":"test/autopilot-board.test.mts","name":"deriveBoardState — dependency-aware ready_for_agent (issue #3059)","ok":true,"duration_ms":1.772033}
+{"file":"test/autopilot-board.test.mts","name":"deriveBoardState + blockerExcludedIssueNumbers — declared-Epic subtraction (issue #4823)","ok":true,"duration_ms":0.802905}
+{"file":"test/autopilot-board.test.mts","name":"GET /autopilot/board-state — route (issue #934)","ok":true,"duration_ms":9.032743}
+{"file":"test/autopilot-board.test.mts","name":"board-state query scope param (issue #3434)","ok":true,"duration_ms":0.478686}
+{"file":"test/autopilot-board.test.mts","name":"deriveBoardState reused BYTE-FOR-BYTE for the Target board (issue #3434)","ok":true,"duration_ms":0.270011}
+{"file":"test/autopilot-board.test.mts","name":"GET /autopilot/board-state?scope=target — route (issue #3434)","ok":true,"duration_ms":2.071415}
+{"file":"test/autopilot-board.test.mts","name":"Target board-label leaf — single definition (issue #3434)","ok":true,"duration_ms":0.268118}
+{"file":"test/autopilot-board.test.mts","name":"deriveBoardState — GLM liveness gates the glm-eligible partition (#3754)","ok":true,"duration_ms":2.751094}
+{"file":"test/autopilot-board.test.mts","name":"src/redis/autopilot.ts — GLM drainer heartbeat liveness (#3754)","ok":true,"duration_ms":51.354002}
+{"file":"test/autopilot-board.test.mts","name":"src/redis/autopilot.ts — GLM A/B assignment log (issue #4125)","ok":true,"duration_ms":14.297593}
+{"file":"test/autopilot-board.test.mts","name":"GET /autopilot/board-state — GLM liveness wires the partition (#3754)","ok":true,"duration_ms":2.699301}
+{"file":"test/autopilot-board.test.mts","name":"GET /autopilot/board-state — glm_withheld derived verdict list (issue #4254)","ok":true,"duration_ms":3.826627}
+{"file":"test/autopilot-brain-smoke.test.mts","name":"decide.py — smoke (always runs)","ok":true,"duration_ms":93.84033}
+{"file":"test/autopilot-brain-smoke.test.mts","name":"decide.py — live orchestrator smoke (INTEGRATION=true)","ok":true,"duration_ms":0.881341}
+{"file":"test/autopilot-cooldown-redis-mirror.test.mts","name":"issue #2715 — reap.py mirrors the cross-run subset to Redis on completion","ok":true,"duration_ms":1888.92769}
+{"file":"test/autopilot-cooldown-redis-mirror.test.mts","name":"issue #5073 — decide.py no longer mirrors research_force_counter (one writer: the Run Ledger via reap)","ok":true,"duration_ms":1583.176683}
+{"file":"test/autopilot-cycle-record-branch-cycleid.test.mts","name":"reap.py completion → cycle-record keyed on the worktree branch (issue #3391)","ok":true,"duration_ms":1112.57479}
+{"file":"test/autopilot-cycle-record-branch-cycleid.test.mts","name":"reap.py terminal-failure write sites → cycle-record keyed on the worktree branch (issue #3970)","ok":true,"duration_ms":100.667856}
+{"file":"test/autopilot-cycle-record-branch-cycleid.test.mts","name":"reap.py exits 0 on a type-invalid state document (QA rounds 1-2, #5293)","ok":true,"duration_ms":101.286869}
+{"file":"test/autopilot-cycle-record-task-title.test.mts","name":"reap.py completion → cycle-record task_title from slot anchor (issue #2012)","ok":true,"duration_ms":509.199581}
+{"file":"test/autopilot-cycle-records.test.mts","name":"POST /api/autopilot/cycle-record (issue #430)","ok":true,"duration_ms":275.013153}
+{"file":"test/autopilot-decide-dev-target-resume.test.mts","name":"decide.py — Target dev resume pick (issue #4739)","ok":true,"duration_ms":1074.645173}
+{"file":"test/autopilot-decide-events-shape.test.mts","name":"decide.py events shape — typed list vs {events: [...]} wrapper (#4213)","ok":true,"duration_ms":204.644779}
+{"file":"test/autopilot-decide-events-shape.test.mts","name":"decide.py events shape — stream entries re-homed onto state.slot_events (#4213)","ok":true,"duration_ms":338.172823}
+{"file":"test/autopilot-decide-events-shape.test.mts","name":"decide.py events shape — unparseable events.json degrades, never crashes (#4213)","ok":true,"duration_ms":404.026369}
+{"file":"test/autopilot-decide-events-shape.test.mts","name":"decide.py events shape — non-dict entries skipped, not fatal (#4213)","ok":true,"duration_ms":129.3433}
+{"file":"test/autopilot-decide-events-shape.test.mts","name":"decide.py events shape — stale slot_events from a prior run are dropped (#4441)","ok":true,"duration_ms":471.370841}
+{"file":"test/autopilot-decide-events-shape.test.mts","name":"decide.py events shape — signal events inside the wrapper are honoured (#4213)","ok":true,"duration_ms":127.210453}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — pipeline dispatch (issue #426 AC: 6-slot pipeline)","ok":true,"duration_ms":665.137998}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — design_concept_orch anchor-only trigger (#3870)","ok":true,"duration_ms":334.213842}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — retired candidate-feed no longer forces research_target (#3832)","ok":true,"duration_ms":493.317008}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — policy collapse merge policy (#742)","ok":true,"duration_ms":735.560117}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — emergency brake (#744)","ok":true,"duration_ms":545.502773}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — scope filter exclusion mask (INV-008)","ok":true,"duration_ms":276.758351}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — completion reap ordering (INV-006)","ok":true,"duration_ms":798.068206}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — termination paths","ok":true,"duration_ms":519.062941}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — signal classes with cooldowns","ok":true,"duration_ms":1317.939164}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — orch-realm weekly-share guard (issue #4161)","ok":true,"duration_ms":704.031784}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — architecture_orch signal class (issue #790, #959)","ok":true,"duration_ms":615.750575}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — board-idle backfill set (issue #959)","ok":true,"duration_ms":407.79162}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — backfill starvation floor (issue #2428)","ok":true,"duration_ms":568.035271}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — cleanup_orch signal class (issue #960)","ok":true,"duration_ms":570.050482}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — retro_orch signal class (issue #3871)","ok":true,"duration_ms":379.484963}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — idle fallback / heartbeat","ok":true,"duration_ms":254.048893}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — degraded orch board read (issue #4130)","ok":true,"duration_ms":529.474819}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — usage hard-stop withholds the idle conclusion (issue #4699)","ok":true,"duration_ms":576.663834}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — terminate run-end POST (#1352)","ok":true,"duration_ms":303.355425}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — plan shape contract","ok":true,"duration_ms":672.985362}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — single-writer turn counter (#1769)","ok":true,"duration_ms":338.694569}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — should_auto_merge() policy table","ok":true,"duration_ms":190.752651}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — ISSUE #458 dev_orch / dev_target routing","ok":true,"duration_ms":876.978628}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — worktreeBranch stamping (issue #527)","ok":true,"duration_ms":476.187637}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — wire_or_retire_target signal class (issue #2722)","ok":true,"duration_ms":809.916412}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — wayfinder_orch signal class (issue #3351)","ok":true,"duration_ms":714.722829}
+{"file":"test/autopilot-decide.test.mts","name":"Turn Snapshot — wayfinder staleness sweep removed (issue #4181)","ok":true,"duration_ms":0.93265}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — wayfinder_orch global-cap saturation guard (issue #3354)","ok":true,"duration_ms":655.35845}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — sweep_orch per-item verdict-stability guard (issue #3939)","ok":true,"duration_ms":761.135706}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — PR gate: absent check-runs made readable (issue #4240)","ok":true,"duration_ms":1115.191}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — red-CI forward-fix arm of the unified resume pick (issues #4460, #5058)","ok":true,"duration_ms":1317.581299}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — durable dev resume pick (issues #4518, #5058)","ok":true,"duration_ms":973.98963}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — QA merge guard: stale-SHA PASS holds (issue #4737)","ok":true,"duration_ms":451.90665}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — research_target re-fire interval (issue #4611)","ok":true,"duration_ms":544.6006}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — dirty PR conflict fix-forward pin (issue #4807)","ok":true,"duration_ms":767.23165}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — no-PR durable resume pin (issue #4808)","ok":true,"duration_ms":574.302548}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — discover_target zero-yield back-off (issue #4999)","ok":true,"duration_ms":1040.728274}
+{"file":"test/autopilot-decide.test.mts","name":"decide.py — cleanup_target zero-yield back-off (issue #5051)","ok":true,"duration_ms":525.670869}
+{"file":"test/autopilot-dedup-reap.test.mts","name":"scripts/autopilot/bootstrap.sh initializes reaped_task_ids (issue #411)","ok":true,"duration_ms":436.649264}
+{"file":"test/autopilot-dedup-reap.test.mts","name":"scripts/autopilot/reap.py completion — dedup by task_id (issue #411)","ok":true,"duration_ms":1622.152168}
+{"file":"test/autopilot-dedup-reap.test.mts","name":"scripts/autopilot/reap.py completion — snapshot-before-mutate boundary (issue #4304)","ok":true,"duration_ms":977.902036}
+{"file":"test/autopilot-dedup-reap.test.mts","name":"scripts/autopilot/bootstrap.sh --reap-post-run-end — bounded run-end POST retry (issue #2954)","ok":true,"duration_ms":320.323299}
+{"file":"test/autopilot-dedup-reap.test.mts","name":"run_termination.py run-tally writers (issue #4551)","ok":true,"duration_ms":459.838539}
+{"file":"test/autopilot-dedup-reap.test.mts","name":"scripts/autopilot/reap.py completion — ends the dispatch ledger row (issue #5142)","ok":true,"duration_ms":402.796972}
+{"file":"test/autopilot-deposit-key-resolution.test.mts","name":"deposit key resolution — WRITE end (scripts/reflection-deposit.sh, issue #3675)","ok":true,"duration_ms":16.171082}
+{"file":"test/autopilot-deposit-key-resolution.test.mts","name":"deposit key resolution — READ end (scripts/autopilot/reap.py, issue #3675)","ok":true,"duration_ms":4507.076534}
+{"file":"test/autopilot-design-concept-sequencing.test.mts","name":"decide.py — design_concept_orch sequencing (issue #466, Phase B)","ok":true,"duration_ms":532.056608}
+{"file":"test/autopilot-design-concept-sequencing.test.mts","name":"decide.py — pipeline_slots contract includes design_concept_orch (#466)","ok":true,"duration_ms":94.257076}
+{"file":"test/autopilot-design-concept-sequencing.test.mts","name":"decide.py — orch_pending_grill_anchor signal path (issue #628)","ok":true,"duration_ms":390.922527}
+{"file":"test/autopilot-design-concept-sequencing.test.mts","name":"decide.py — the #628 grill gate is PER-ANCHOR, not global (issue #3711)","ok":true,"duration_ms":390.878636}
+{"file":"test/autopilot-design-concept-sequencing.test.mts","name":"decide.py — design_concept_orch never grills a target candidate under orch scope (issue #751)","ok":true,"duration_ms":122.817449}
+{"file":"test/autopilot-dev-orch-gate.test.mts","name":"hydra-autopilot dev_orch rule (issue #412)","ok":true,"duration_ms":1.478686}
+{"file":"test/autopilot-dev-orch-gate.test.mts","name":"decide.py — first-attempt dev_orch dispatches carry no frontier routing hint (issue #4821)","ok":true,"duration_ms":474.287311}
+{"file":"test/autopilot-dev-orch-needs-qa-promotion.test.mts","name":"reap.py completion → dev_orch ready-for-agent/in-progress → needs-qa promotion (issue #4045, #4271)","ok":true,"duration_ms":1275.717668}
+{"file":"test/autopilot-dev-orch-needs-qa-promotion.test.mts","name":"reap.py reconcile-seeded → promote an uncollected dev_orch anchor (issue #5149)","ok":true,"duration_ms":695.624367}
+{"file":"test/autopilot-dev-resume-stall.test.mts","name":"reap.py completion → dev_orch no-PR stall detection (issue #3866)","ok":true,"duration_ms":956.171858}
+{"file":"test/autopilot-dev-resume-stall.test.mts","name":"reap.py completion → closed-anchor short-circuit (issue #4057)","ok":true,"duration_ms":431.269564}
+{"file":"test/autopilot-dev-resume-stall.test.mts","name":"scripts/autopilot/reap.py _gh_run — exception-branch contract (issue #4377)","ok":true,"duration_ms":327.391097}
+{"file":"test/autopilot-dev-resume-stall.test.mts","name":"reap.py completion → no-PR stall hands the cap to the seam (issue #5318)","ok":true,"duration_ms":450.371982}
+{"file":"test/autopilot-dev-resume-stall.test.mts","name":"reap.py completion → forward-fix whose PR lost its closing ref (issue #5638)","ok":true,"duration_ms":803.83831}
+{"file":"test/autopilot-dev-target-resume-stall.test.mts","name":"reap.py completion → dev_target no-PR stall detection (issue #4195)","ok":true,"duration_ms":1642.699413}
+{"file":"test/autopilot-dev-target-resume-stall.test.mts","name":"reap.py completion → dev_orch path unchanged by the #4195 extraction (INV-6)","ok":true,"duration_ms":162.053417}
+{"file":"test/autopilot-dispatch-cost-join-reap.test.mts","name":"reap.py completion -> dispatch cost-join best-effort posture (issue #4126)","ok":true,"duration_ms":1079.619555}
+{"file":"test/autopilot-escalation-deposit-roundtrip.test.mts","name":"cascade-routing escalation deposit — write→read round-trip (issue #3284)","ok":true,"duration_ms":474.729727}
+{"file":"test/autopilot-escalation-deposit-roundtrip.test.mts","name":"reap.py — hydra-qa completion is cycle-recorded (issue #4730)","ok":true,"duration_ms":1065.922535}
+{"file":"test/autopilot-escalation-deposit-roundtrip.test.mts","name":"reap.py — hydra-target-qa completion is cycle-recorded (issue #5474)","ok":true,"duration_ms":121.8027}
+{"file":"test/autopilot-health.test.mts","name":"detectStalledDispatch (issue #890)","ok":true,"duration_ms":4.857198}
+{"file":"test/autopilot-health.test.mts","name":"detectUnproductiveLoops (issue #890)","ok":true,"duration_ms":0.833269}
+{"file":"test/autopilot-health.test.mts","name":"oldestRunStartEpochS (issue #924)","ok":true,"duration_ms":0.244927}
+{"file":"test/autopilot-health.test.mts","name":"detectIdleStreak (issue #890)","ok":true,"duration_ms":0.32773}
+{"file":"test/autopilot-health.test.mts","name":"detectIssuePrChurn (issue #890)","ok":true,"duration_ms":0.617337}
+{"file":"test/autopilot-health.test.mts","name":"rankSignals (issue #890)","ok":true,"duration_ms":5.648469}
+{"file":"test/autopilot-health.test.mts","name":"getAutopilotHealth — never-throw + composition (issue #890)","ok":true,"duration_ms":40.982843}
+{"file":"test/autopilot-health.test.mts","name":"GET /now/autopilot-health route (issue #890)","ok":true,"duration_ms":3.943748}
+{"file":"test/autopilot-heartbeat.test.mts","name":"scripts/autopilot/heartbeat.py","ok":true,"duration_ms":705.720245}
+{"file":"test/autopilot-heartbeat.test.mts","name":"scripts/autopilot/heartbeat.py — stale-plan freshness check (issue #1732)","ok":true,"duration_ms":910.632811}
+{"file":"test/autopilot-heartbeat.test.mts","name":"scripts/autopilot/bootstrap.sh — heartbeat integration (issue #435)","ok":true,"duration_ms":1278.736624}
+{"file":"test/autopilot-heartbeat.test.mts","name":"scripts/autopilot/status.sh","ok":true,"duration_ms":1052.769971}
+{"file":"test/autopilot-heartbeat.test.mts","name":"scripts/autopilot/heartbeat.py — taxonomy-derived denominators (issue #4637)","ok":true,"duration_ms":258.201225}
+{"file":"test/autopilot-heartbeat.test.mts","name":"scripts/autopilot/heartbeat.py — denominators against a fixture taxonomy (issue #5202)","ok":true,"duration_ms":219.046134}
+{"file":"test/autopilot-heartbeat.test.mts","name":"scripts/autopilot/heartbeat.py — prior-turn back-fill (issue #5488)","ok":true,"duration_ms":308.107299}
+{"file":"test/autopilot-history.test.mts","name":"autopilot history API (issue #500)","ok":true,"duration_ms":316.474563}
+{"file":"test/autopilot-hooks.test.mts","name":"scripts/autopilot/hooks/on-subagent-stop.sh","ok":true,"duration_ms":983.076731}
+{"file":"test/autopilot-hooks.test.mts","name":"scripts/autopilot/hooks/on-subagent-stop.sh — deposit re-key (#3477)","ok":true,"duration_ms":233.532567}
+{"file":"test/autopilot-hooks.test.mts","name":"scripts/autopilot/hooks/on-subagent-permission-wait.sh","ok":true,"duration_ms":378.245569}
+{"file":"test/autopilot-hooks.test.mts","name":"decide.py — slot_events consumption (issue #509)","ok":true,"duration_ms":476.412161}
+{"file":"test/autopilot-hooks.test.mts","name":"scripts/autopilot/hooks/* executable bit","ok":true,"duration_ms":9.983744}
+{"file":"test/autopilot-idle.test.mts","name":"deriveBlockedBy — verdict precedence (issue #889)","ok":true,"duration_ms":1.459665}
+{"file":"test/autopilot-idle.test.mts","name":"estimateNextPaceGateCheck (issue #889)","ok":true,"duration_ms":0.682895}
+{"file":"test/autopilot-idle.test.mts","name":"GET /autopilot/idle-diagnostics — verdicts (issue #889)","ok":true,"duration_ms":7.769613}
+{"file":"test/autopilot-idle.test.mts","name":"GET /autopilot/idle-diagnostics — never-throw + validation (issue #889)","ok":true,"duration_ms":3.53739}
+{"file":"test/autopilot-invariants.test.mts","name":"autopilot invariants — assert_invariants.py (issue #426)","ok":true,"duration_ms":2217.025132}
+{"file":"test/autopilot-invariants.test.mts","name":"decide.py INV-label namespaces (issue #4520)","ok":true,"duration_ms":10.717552}
+{"file":"test/autopilot-invariants.test.mts","name":"assert_invariants.py loads the state document strictly (#5075)","ok":true,"duration_ms":100.018419}
+{"file":"test/autopilot-invariants.test.mts","name":"AC1 guard: only run_ledger.py json-loads the state document (#5075, #5293)","ok":true,"duration_ms":1.497433}
+{"file":"test/autopilot-lifecycle-compose.test.mts","name":"readLifecycleState / sweepLoadedRow — sweep→derive composition (#2549)","ok":true,"duration_ms":33.558047}
+{"file":"test/autopilot-logs.test.mts","name":"autopilot logs API (issue #499, slice 3)","ok":true,"duration_ms":512.220819}
+{"file":"test/autopilot-os-heartbeat.test.mts","name":"parseHeartbeatEpoch (#1091)","ok":true,"duration_ms":1.913294}
+{"file":"test/autopilot-os-heartbeat.test.mts","name":"osHeartbeatAgeS (#1091)","ok":true,"duration_ms":1.543607}
+{"file":"test/autopilot-os-heartbeat.test.mts","name":"isOsHeartbeatStale (#1091)","ok":true,"duration_ms":0.310543}
+{"file":"test/autopilot-os-heartbeat.test.mts","name":"readOsHeartbeatEpoch — real file reader (#1091)","ok":true,"duration_ms":1.1714}
+{"file":"test/autopilot-parent-exception.test.mts","name":"decide.py - Fable instant-death replay (#5323)","ok":true,"duration_ms":1661.208386}
+{"file":"test/autopilot-parent-exception.test.mts","name":"decide.py - route-prs-to-review carries pr_numbers (#5323)","ok":true,"duration_ms":135.740847}
+{"file":"test/autopilot-parent-exception.test.mts","name":"reap.py post_instant_death_notice best-effort (#5323 INV-7)","ok":true,"duration_ms":186.154112}
+{"file":"test/autopilot-parent-exception.test.mts","name":"run_ledger.py parent-exception (#5323)","ok":true,"duration_ms":351.887272}
+{"file":"test/autopilot-parent-exception.test.mts","name":"turn.sh journals its own exceptions, best-effort (#5323)","ok":true,"duration_ms":937.889107}
+{"file":"test/autopilot-parent-exception.test.mts","name":"reap.py reports the instant-death notice (#5323)","ok":true,"duration_ms":8555.210715}
+{"file":"test/autopilot-pause.test.mts","name":"autopilot pause flag (issue #988)","ok":true,"duration_ms":48.914044}
+{"file":"test/autopilot-pause.test.mts","name":"overlayPauseEligibility (issue #988)","ok":true,"duration_ms":1.364789}
+{"file":"test/autopilot-pause.test.mts","name":"AutopilotPauseBodySchema (issue #988)","ok":true,"duration_ms":0.565575}
+{"file":"test/autopilot-pause.test.mts","name":"pace-gate.sh launch-skip on pause (issue #988, AC2)","ok":true,"duration_ms":303.598438}
+{"file":"test/autopilot-quota-budget-3867.test.mts","name":"decide.py TERM:quota verdict (issue #3867)","ok":true,"duration_ms":923.076005}
+{"file":"test/autopilot-quota-budget-3867.test.mts","name":"decide.py quota-percent termination (issue #3867)","ok":true,"duration_ms":650.023391}
+{"file":"test/autopilot-quota-budget-3867.test.mts","name":"--quota-week-max plumbing (issue #3867)","ok":true,"duration_ms":4102.177908}
+{"file":"test/autopilot-read-and-sweep.test.mts","name":"readAndSweepAutopilotRun — read + sweep composition (#2189)","ok":true,"duration_ms":23.549064}

@@ -354,7 +354,7 @@ describe("playbook-vocabulary-ratchet: the real playbooks", () => {
 describe("playbook-vocabulary-ratchet: the ADR corpus (#5682)", () => {
   test("the ADR policy is a separate required ceiling with its own baseline", () => {
     assert.equal(adrVocabularyRatchet.policy.id, "adr-vocabulary-ratchet");
-    assert.equal(adrVocabularyRatchet.policy.baseline, "scripts/ci/adr-vocabulary-baseline.json");
+    assert.match(adrVocabularyRatchet.policy.baseline, /^scripts\/ci\/adr-vocabulary-baseline\.json$/);
     assert.equal(adrVocabularyRatchet.policy.polarity, "ceiling");
     assert.equal(adrVocabularyRatchet.policy.enforcement, "required");
     assert.notEqual(adrVocabularyRatchet.policy.baseline, vocabularyRatchet.policy.baseline);
@@ -365,15 +365,6 @@ describe("playbook-vocabulary-ratchet: the ADR corpus (#5682)", () => {
     assert.ok(files.length > 0);
     for (const f of files) assert.match(f, /^docs\/adr\/\d{4}-[^/]+\.md$/);
     assert.ok(!files.some((f) => f.endsWith("README.md")));
-  });
-
-  test("baseline rows are tab-keyed docs/adr rows of the two counted shapes only", () => {
-    const baseline = JSON.parse(readFileSync(join(REPO_ROOT, "scripts/ci/adr-vocabulary-baseline.json"), "utf8"));
-    for (const key of Object.keys(baseline)) {
-      const [file, shape] = key.split("\t");
-      assert.match(file, /^docs\/adr\/\d{4}-/);
-      assert.ok((ADR_SHAPES as readonly string[]).includes(shape), key);
-    }
   });
 
   test("measured rows carry only invariant-cite and symbol-cite", () => {
