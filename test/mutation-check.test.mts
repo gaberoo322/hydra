@@ -230,7 +230,7 @@ describe("filterMutationCandidates — diff scoping (issue #653)", () => {
 
 describe("selectKillFloor — per-tier mutation floor (issue #778)", () => {
   const BASE = 30; // MUTATION_KILL_RATE_FLOOR default
-  const T3 = 50; // MUTATION_KILL_RATE_FLOOR_T3 default (issue #5273)
+  const T3 = DEFAULT_T3_KILL_FLOOR; // pinned to 50 in the INV-2 drift-guard test below
 
   test("T1 diffs use the base floor (no behavior change — AC#2)", () => {
     assert.equal(selectKillFloor(1, BASE, T3), 30);
@@ -241,14 +241,14 @@ describe("selectKillFloor — per-tier mutation floor (issue #778)", () => {
   });
 
   test("T3 diffs use the raised T3 floor (AC#1)", () => {
-    assert.equal(selectKillFloor(3, BASE, T3), 50);
+    assert.equal(selectKillFloor(3, BASE, T3), T3);
   });
 
   test("T4 inherits the T3 floor — never below it (tier>=3 predicate)", () => {
     // ADR-0015 monotonic ladder: T4 inherits T3's verification depth.
     // A tier===3 predicate would wrongly relax the floor for Verifier-Core
     // diffs; the predicate must be tier>=3.
-    assert.equal(selectKillFloor(4, BASE, T3), 50);
+    assert.equal(selectKillFloor(4, BASE, T3), T3);
   });
 
   test("selection is pure + deterministic from the tier integer (AC#3)", () => {
@@ -266,13 +266,13 @@ describe("selectKillFloor — per-tier mutation floor (issue #778)", () => {
 
   test("missing / non-finite tier falls back to the conservative T3 band", () => {
     // A garbled or absent PR_TIER must NOT silently relax the floor.
-    assert.equal(selectKillFloor(NaN, BASE, T3), 50);
-    assert.equal(selectKillFloor(Number.POSITIVE_INFINITY, BASE, T3), 50);
+    assert.equal(selectKillFloor(NaN, BASE, T3), T3);
+    assert.equal(selectKillFloor(Number.POSITIVE_INFINITY, BASE, T3), T3);
   });
 
   test("tiers above 4 still resolve to the T3 band (defensive >= )", () => {
     // Should never happen (Tier is 1|2|3|4) but the predicate stays safe.
-    assert.equal(selectKillFloor(5, BASE, T3), 50);
+    assert.equal(selectKillFloor(5, BASE, T3), T3);
   });
 });
 
