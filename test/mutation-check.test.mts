@@ -26,6 +26,7 @@ import {
   buildRelatedTestCommand,
   isGateBlocking,
   resolveKillRateVerdict,
+  DEFAULT_T3_KILL_FLOOR,
   resolveMaxMutants,
   resolveSampleSeed,
   buildSampleMeta,
@@ -590,6 +591,16 @@ describe("non-blocking rollout switch + conclusive kill rate (issue #4504)", () 
     const live = step.slice(envAt, runAt).split("\n").filter((l) => !l.trim().startsWith("#"));
     assert.ok(live.some((l) => /^\s*MUTATION_GATE_BLOCKING: \$\{\{ vars\.MUTATION_GATE_BLOCKING \|\| '1' \}\}\s*$/.test(l)));
     assert.ok(live.some((l) => /^\s*MUTATION_KILL_RATE_FLOOR_T3: \$\{\{ vars\.MUTATION_KILL_RATE_FLOOR_T3 \|\| '50' \}\}\s*$/.test(l)));
+  });
+
+  test("DEFAULT_T3_KILL_FLOOR is 50 and equals the ci.yml fallback (issue #5273 INV-2)", () => {
+    assert.equal(DEFAULT_T3_KILL_FLOOR, 50);
+    const yml = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+    const m = /MUTATION_KILL_RATE_FLOOR_T3: \$\{\{ vars\.MUTATION_KILL_RATE_FLOOR_T3 \|\| '(\d+)' \}\}/.exec(yml);
+    assert.ok(m, "ci.yml T3 floor fallback missing");
+    assert.equal(Number(m[1]), DEFAULT_T3_KILL_FLOOR);
+    // sibling shape: the tier-1/2 default floor is unchanged and distinct
+    assert.notEqual(DEFAULT_T3_KILL_FLOOR, 30);
   });
 
   test("blocking on at tier>=3: timed-out and no-signal verdicts stay warn, never fail (issue #5273)", () => {

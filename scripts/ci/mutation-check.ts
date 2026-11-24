@@ -366,7 +366,7 @@ function listTestFiles(projectDir: string): string[] {
 const DEFAULT_KILL_FLOOR = 30;
 const DEFAULT_TEST_TIMEOUT_MS = 45_000;
 const DEFAULT_MAX_RELATED_TESTS = 8;
-const DEFAULT_T3_KILL_FLOOR = 50;
+export const DEFAULT_T3_KILL_FLOOR = 50;
 const DEFAULT_TIME_BUDGET_MS = 540_000;
 
 /**
