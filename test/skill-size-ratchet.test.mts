@@ -158,10 +158,3 @@ describe("skill-size-ratchet: flattened counted rows", () => {
     }
   });
 });
-
-describe("skill-size-ratchet: the real playbooks", () => {
-  test("no playbook or fragment grows past its baselined row, and every description is within cap", async () => {
-    const v = await skillSizeRatchet.verdict();
-    assert.ok(v.ok, v.advice);
-  });
-});

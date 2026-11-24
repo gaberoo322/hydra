@@ -12,11 +12,10 @@ import { join } from "node:path";
 import {
   evaluateBaselineRaise,
   buildFixturePairs,
-  listBaselineFixtures,
   parseBaselineRaiseLines,
 } from "../scripts/ci/baseline-raise-check.ts";
 import { diffBaselineJson, type RatchetPolarity } from "../scripts/ci/ratchet.ts";
-import { RATCHETS, registryRowFor, rowBaseline, rowEnforcement, rowId, rowPolarity } from "../scripts/ci/ratchets.ts";
+import { listBaselineFixtures, registryRowFor, rowEnforcement, rowPolarity } from "../scripts/ci/ratchets.ts";
 
 const FX = "scripts/ci/skill-size-baseline.json";
 const FLOOR = "test/fixtures/suite-count-baseline.json";
@@ -196,22 +195,10 @@ describe("listBaselineFixtures inventory", () => {
     const root = join(import.meta.dirname, "..");
     assert.deepEqual(listBaselineFixtures(root), baselinesOnDisk());
     assert.ok(listBaselineFixtures(root).includes("test/fixtures/qa-cohort-baseline.json"));
-    const exported = Object.keys(await import("../scripts/ci/baseline-raise-check.ts"));
-    assert.equal(exported.includes("NON_RATCHET_BASELINES"), false);
-    assert.equal(exported.includes("diffBaselineShrink"), false);
   });
 });
 
 describe("Ratchet registry", () => {
-  test("every *-baseline.json on disk has exactly one row and every row's file exists", () => {
-    const disk = baselinesOnDisk();
-    const rows = RATCHETS.map(rowBaseline);
-    assert.deepEqual([...rows].sort(), disk);
-    assert.equal(new Set(rows).size, rows.length, "baseline paths are unique");
-    const ids = RATCHETS.map(rowId);
-    assert.equal(new Set(ids).size, ids.length, "ids are unique");
-  });
-
   test("registryRowFor finds each kind and nothing else", () => {
     assert.equal(registryRowFor("scripts/ci/skill-size-baseline.json")?.kind, "ratchet");
     assert.equal(registryRowFor(FLOOR)?.kind, "external");

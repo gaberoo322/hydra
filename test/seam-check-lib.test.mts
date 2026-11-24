@@ -103,14 +103,6 @@ describe("seam-check-lib: the nine Seam checks run on the Ratchet module (issue 
     });
   }
 
-  test("the required redis seam passes on the live tree (zero added, zero stale)", async () => {
-    const { redisSeamRatchet } = await import("../scripts/ci/redis-seam-check.ts");
-    const v = await redisSeamRatchet.verdict();
-    assert.equal(v.ok, true, v.advice);
-    assert.deepEqual(v.added, []);
-    assert.deepEqual(v.stale, []);
-  });
-
   test("a fixture tree with a new violation fails the verdict and prints the seam's fix wording", async () => {
     const { redisSeamRatchet } = await import("../scripts/ci/redis-seam-check.ts");
     const { execFileSync } = await import("node:child_process");

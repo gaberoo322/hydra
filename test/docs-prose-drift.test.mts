@@ -61,14 +61,7 @@ async function withFixture(files: Record<string, string>, fn: (root: string) => 
 }
 
 describe("docs-prose-drift", () => {
-  // -- the baseline guard (the required drift arm) ---------------------------
-
-  test("no NEW prose offenders and no STALE baseline rows — identifier existence, retired terms, counts, links all backed", async () => {
-    const v = await proseDriftRatchet.verdict();
-    strictEqual(v.ok, true, v.advice);
-    deepStrictEqual(v.added, []);
-    deepStrictEqual(v.stale, []);
-  });
+  // The live-tree verdict runs once, in test/ratchets-live.test.mts.
 
   test("the baseline fixture is sorted and deduped (one row per file:kind:token)", () => {
     const baseline = JSON.parse(readFileSync(join(REPO_ROOT, BASELINE_FILE), "utf8")) as string[];

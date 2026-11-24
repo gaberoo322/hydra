@@ -2,8 +2,8 @@
  * test/lifecycle-seam-check.test.mts — blocking shrink-only ratchet against
  * direct lifecycle state-label writes (ADR-0047 D3/D7, issue #5311).
  *
- * The live describe is the gate (runs in the REQUIRED `test` job). This file
- * does no fs read itself — it calls the script's exported functions.
+ * The live-tree verdict runs in test/ratchets-live.test.mts (REQUIRED `test`
+ * job). This file does no fs read itself — it calls the script's exported functions.
  */
 
 import { test, describe } from "node:test";
@@ -23,17 +23,10 @@ const {
   scanLifecycleSeam,
 } = await import("../scripts/ci/lifecycle-seam-check.ts");
 
-describe("lifecycle-seam-check: live tree vs committed baseline", () => {
+describe("lifecycle-seam-check: scanner vocabulary", () => {
   test("scanner vocabulary is exactly OPEN_STATES", () => {
     assert.deepEqual([...LIFECYCLE_STATE_NAMES], [...OPEN_STATES]);
     assert.equal(LIFECYCLE_STATE_NAMES.includes("closed"), false);
-  });
-
-  test("no new direct state-label write sites and the baseline is not stale", async () => {
-    const v = await lifecycleSeamRatchet.verdict();
-    assert.equal(v.ok, true, v.advice);
-    assert.deepEqual(v.added, []);
-    assert.deepEqual(v.stale, []);
   });
 });
 
