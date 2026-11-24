@@ -34,7 +34,7 @@ const REQUIRED_RATCHET_IDS = [
   "test-typecheck-check",
 ];
 
-describe("required ratchets on the live tree", { concurrency: 1 }, () => {
+describe("required ratchets on the live tree", { concurrency: true }, () => {
   for (const row of RATCHETS) {
     if (row.kind !== "ratchet" || row.ratchet.policy.enforcement !== "required") continue;
     test(row.ratchet.policy.id, { timeout: 180_000 }, async () => {
