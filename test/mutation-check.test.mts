@@ -576,12 +576,20 @@ describe("non-blocking rollout switch + conclusive kill rate (issue #4504)", () 
     const yml = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
     // Slice to the mutation-test job, then the `Run mutation gate` step, then its
     // `env:` block (up to `run:`) so a match in a comment or another job cannot pass.
-    const job = yml.slice(yml.indexOf("\n  mutation-test:\n"));
-    const step = job.slice(job.indexOf("- name: Run mutation gate"));
-    const env = step.slice(step.indexOf("env:"), step.indexOf("run: |"));
-    const live = env.split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
-    assert.ok(live.includes("MUTATION_GATE_BLOCKING: ${{ vars.MUTATION_GATE_BLOCKING || '1' }}"));
-    assert.ok(live.includes("MUTATION_KILL_RATE_FLOOR_T3: ${{ vars.MUTATION_KILL_RATE_FLOOR_T3 || '50' }}"));
+    const jobAt = yml.indexOf("\n  mutation-test:\n");
+    assert.notEqual(jobAt, -1, "mutation-test job anchor missing");
+    const job = yml.slice(jobAt);
+    const stepAt = job.indexOf("- name: Run mutation gate");
+    assert.notEqual(stepAt, -1, "Run mutation gate step anchor missing");
+    const step = job.slice(stepAt);
+    const envAt = step.indexOf("env:");
+    const runAt = step.indexOf("run: |");
+    assert.ok(envAt !== -1 && runAt > envAt, "env block anchors missing");
+    // A step-level `if:` before `env:` could silently skip the gate.
+    assert.doesNotMatch(step.slice(0, envAt), /^\s*if:/m);
+    const live = step.slice(envAt, runAt).split("\n").filter((l) => !l.trim().startsWith("#"));
+    assert.ok(live.some((l) => /^\s*MUTATION_GATE_BLOCKING: \$\{\{ vars\.MUTATION_GATE_BLOCKING \|\| '1' \}\}\s*$/.test(l)));
+    assert.ok(live.some((l) => /^\s*MUTATION_KILL_RATE_FLOOR_T3: \$\{\{ vars\.MUTATION_KILL_RATE_FLOOR_T3 \|\| '50' \}\}\s*$/.test(l)));
   });
 
   test("blocking on at tier>=3: timed-out and no-signal verdicts stay warn, never fail (issue #5273)", () => {
