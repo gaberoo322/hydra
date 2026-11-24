@@ -72,7 +72,7 @@ Two different readings, and only the first is usable for design.
 | 24-48 h | +52.3 | +81.9 | +29.9 |
 | 48 h+ | +75.9 | +169.0 | +79.9 |
 
-This is conditioned on the outcome: short holds are mostly stop-outs (77-85% of trades under one hour exit at the stop), long holds are the survivors. It is not a tradable signal and does not show that holding longer creates edge. What it does show is the shape of the loss: about 62% of trades stop out at -83 to -122 bps gross, 26-30% hit the take-profit at +154 to +239, and 10% time out at +40 to +64. The 2:1 reward multiple with a 27-30% hit rate nets to zero before costs.
+This is conditioned on the outcome: short holds are mostly stop-outs (71-85% of trades under one hour exit at the stop), long holds are the survivors. It is not a tradable signal and does not show that holding longer creates edge. What it does show is the shape of the loss: about 62% of trades stop out at -83 to -122 bps gross, 26-30% hit the take-profit at +154 to +239, and 10% time out at +40 to +64. The 2:1 reward multiple with a 26-30% hit rate nets to zero before costs.
 
 ## What round-trip cost would rescue the best point?
 
