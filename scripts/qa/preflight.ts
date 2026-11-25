@@ -32,6 +32,7 @@ import {
 } from "./_lib.ts";
 import { PreflightResultSchema, type PreflightResult } from "../../src/schemas/qa-plumbing-cli.ts";
 import { ensurePrHead } from "../../src/qa/pr-head.ts";
+import { bodyClosesIssue, closingIssuesInBody, referencedIssuesInBody } from "../../src/github/pr-refs.ts";
 
 export interface PreflightOptions {
   issue?: number;
@@ -75,10 +76,14 @@ function stopResult(
   };
 }
 
-/** The first `Closes|Fixes|Refs #N` issue number in a PR body (the step-4 grep). */
+/**
+ * The issue a PR body's spec belongs to (step 4): the first issue the body
+ * CLOSES, else the first it merely references (`Refs #N`), else null. Both
+ * answers are the PR refs module's — closing first, so a companion sentence
+ * ("Does not close #26 … Closes #63") resolves to the issue really closed.
+ */
 export function parentIssueOf(body: string): number | null {
-  const m = /(?:closes|fixes|refs)\s*#(\d+)/i.exec(body);
-  return m ? Number(m[1]) : null;
+  return closingIssuesInBody(body)[0] ?? referencedIssuesInBody(body)[0] ?? null;
 }
 
 async function ghJson(ports: PlumbingPorts, args: string[]): Promise<unknown | undefined> {
@@ -137,10 +142,9 @@ export async function runPreflight(opts: PreflightOptions, ports: PlumbingPorts)
     const open = await ghList(ports, [
       "pr", "list", "--repo", repo, "--state", "open", "--json", "number,body", "--limit", "200",
     ]);
-    const re = new RegExp(`(?:closes|fixes) #${issue}(?!\\d)`, "i");
     if (Array.isArray(open)) {
       for (const p of open) {
-        if (isRecord(p) && typeof p.number === "number" && typeof p.body === "string" && re.test(p.body)) {
+        if (isRecord(p) && typeof p.number === "number" && typeof p.body === "string" && bodyClosesIssue(p.body, issue)) {
           prNumber = p.number;
           break;
         }

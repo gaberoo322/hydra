@@ -289,6 +289,24 @@ describe("preflight (steps 1-6.7 in one read-only call)", () => {
     assert.match(enforce.stop?.body ?? "", /`k`/);
   });
 
+  test("preflight: the spec parent is the PR refs module's answer — a real closing ref first, else the first plain reference", async () => {
+    const parentFor = async (body: string): Promise<string[]> => {
+      const asked: string[] = [];
+      const http: PlumbingPorts["http"] = async (path) => {
+        if (path.includes("/resolve")) asked.push(path);
+        return httpFound(2)(path);
+      };
+      await runPreflight(PRE_OPTS, harness({ ghHandler: preflightGh({ ...PR_VIEW, body }), gitHandler: preflightGit(), http }).ports);
+      return asked;
+    };
+    assert.deepEqual(await parentFor("Closes #5269"), ["/api/design-concepts/5269/resolve"]);
+    assert.deepEqual(await parentFor("Refs #41"), ["/api/design-concepts/41/resolve"]);
+    assert.deepEqual(await parentFor("Does not close #26 — the sibling does.\n\nCloses #63"), ["/api/design-concepts/63/resolve"]);
+    assert.deepEqual(await parentFor("Refs #30. Closes #10."), ["/api/design-concepts/10/resolve"]);
+    assert.deepEqual(await parentFor("Resolved #8"), ["/api/design-concepts/8/resolve"]);
+    assert.deepEqual(await parentFor("Closes#5 and encloses #6"), [], "no ref the module recognises means no parent and no resolve call");
+  });
+
   test("preflight: the exempt labels skip the Spec axis (PR label, then cleanup-scan on the parent issue)", async () => {
     const miss: PlumbingPorts["http"] = async (path) =>
       path.includes("/resolve") ? { status: 404, body: JSON.stringify({ found: false }) } : { status: 200, body: JSON.stringify({ tier: 2 }) };
@@ -319,6 +337,29 @@ describe("preflight (steps 1-6.7 in one read-only call)", () => {
     );
     assert.equal(noPr.stage, "no-pr");
     assert.equal(noPr.stop?.target, "issue");
+
+    // #5767: "linked" is the PR refs module's closing predicate, not a private verb list. A verb embedded in a
+    // longer word and a negated ref are NOT links; any-tense closing verbs and the colon form ARE.
+    const listing = (prs: Array<{ number: number; body: string }>) => (a: string[]) =>
+      a[0] === "pr" && a[1] === "list" ? ok(JSON.stringify(prs)) : preflightGh()(a);
+    const notLinked = await runPreflight(
+      { ...PRE_OPTS, pr: undefined },
+      harness({
+        ghHandler: listing([
+          { number: 78, body: "encloses #5269 and prefixes #5269" },
+          { number: 79, body: "Never closes #5269" },
+          { number: 80, body: "Closes #5269a" },
+        ]),
+      }).ports,
+    );
+    assert.equal(notLinked.stage, "no-pr");
+    for (const body of ["Resolves #5269", "Fixed #5269", "Closes: #5269", "Closes  #5269"]) {
+      const linked = await runPreflight(
+        { ...PRE_OPTS, pr: undefined },
+        harness({ ghHandler: listing([{ number: 78, body: "Refs #5269" }, { number: 77, body }]), gitHandler: preflightGit(), http: httpFound(2) }).ports,
+      );
+      assert.equal(linked.pr?.number, 77, `a PR whose body is ${JSON.stringify(body)} is the linked PR`);
+    }
   });
 
   test("preflight: a failed gh list is a pre-stage exit, never read as 'nothing found' (no false no-pr / no-issue)", async () => {
