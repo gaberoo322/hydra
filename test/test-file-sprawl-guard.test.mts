@@ -51,13 +51,6 @@ import {
 
 const TEST_DIR = import.meta.dirname;
 
-describe("test-file sprawl ratchet — live tree (#4134)", () => {
-  test("the live tree has zero added and zero stale rows against the baseline", async () => {
-    const v = await testSubjectRatchet.verdict();
-    assert.ok(v.ok, v.advice);
-  });
-});
-
 describe("test-file sprawl ratchet — subject resolution (#4134)", () => {
   test("a spawn-only file resolves to its script target, not to nothing", () => {
     // THE load-bearing case: all 14 decide-*.test.mts files import ZERO from

@@ -90,7 +90,8 @@ function pre(over: Partial<PreflightResult> = {}, glm = false): PreflightResult 
 
 interface Canned {
   verdict: string;
-  deepQa?: { action: string; failNumber?: number } | null;
+  /** A T4 round: `fail` carries the deep-QA fail marker, `pass` the PASS marker. */
+  t4?: "pass" | "fail";
 }
 
 function phase(c: Canned): PlumbingPorts["phase"] {
@@ -106,9 +107,8 @@ function phase(c: Canned): PlumbingPorts["phase"] {
     }
     if (p === "trailer") return { trailer: TRAILER, round: 1 };
     return {
-      deepQa: c.deepQa ?? null,
-      passMarker: c.deepQa?.action === "proceed" ? "M" : null,
-      failMarker: c.deepQa ? "F" : null,
+      passMarker: c.t4 === "pass" ? "M" : null,
+      failMarker: c.t4 === "fail" ? "F" : null,
     };
   };
 }
@@ -179,8 +179,8 @@ describe("hydra-qa clears needs-qa on every verdict (issue #638)", () => {
     ["FAIL on a GLM-authored PR", { verdict: "FAIL" }, { pre: pre({}, true) }],
     ["FAIL on a closed PR (not-open fallback)", { verdict: "FAIL" }, { state: "CLOSED" }],
     ["FAIL escalated (round cap, enforce park)", { verdict: "FAIL" }, { advance: (a) => (a[1] === "needs-dev-resume" ? { rc: 1, code: "parked:qa-fail-rounds" } : undefined) }],
-    ["T4 1st deep-QA FAIL (bounce)", { verdict: "FAIL", deepQa: { action: "bounce", failNumber: 1 } }, { pre: pre({ tier: { num: 4, adversarial: true } }) }],
-    ["T4 2nd deep-QA FAIL (block-and-escalate)", { verdict: "FAIL", deepQa: { action: "block-and-escalate", failNumber: 2 } }, { pre: pre({ tier: { num: 4, adversarial: true } }) }],
+    ["T4 1st deep-QA FAIL (bounce)", { verdict: "FAIL", t4: "fail" }, { pre: pre({ tier: { num: 4, adversarial: true } }) }],
+    ["T4 2nd deep-QA FAIL (the seam escalated)", { verdict: "FAIL", t4: "fail" }, { pre: pre({ tier: { num: 4, adversarial: true } }), advance: (a) => (a[1] === "needs-dev-resume" ? { rc: 1, code: "escalated:deep-qa-fails" } : undefined) }],
     ["step-6.6 defer", { verdict: "PASS" }, { pre: pre({ gate: { action: "defer", reason: "d", redRequired: [], skipVerdict: null, skipCiSummary: null } }), defer: true }],
   ];
   for (const [name, canned, o] of arms) {
@@ -210,7 +210,7 @@ describe("hydra-qa clears needs-qa on every verdict (issue #638)", () => {
   });
 
   test("T4 first deep-QA FAIL bounces through the seam's one read: the lane follows the PR state, the route never names it", async () => {
-    const t4 = { verdict: "FAIL", deepQa: { action: "bounce", failNumber: 1 } } as const;
+    const t4 = { verdict: "FAIL", t4: "fail" } as const;
     const t4pre = pre({ tier: { num: 4, adversarial: true } });
     const open = await route(t4, { pre: t4pre, state: "OPEN" });
     const closed = await route(t4, { pre: t4pre, state: "CLOSED" });

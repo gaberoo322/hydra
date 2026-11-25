@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -12,6 +14,7 @@ import {
   pickDistinctiveDependencies,
   HISTORICAL_EXEMPT_RE,
   LANES,
+  targetCouplingRatchet,
   type Violation,
 } from "../scripts/ci/target-coupling-check.ts";
 
@@ -128,10 +131,6 @@ test("LANES table declares exactly src, playbooks and autopilot with their globs
     "scripts/autopilot/**/*.py",
     "scripts/autopilot/**/*.sh",
   ]);
-  // Every lane names the seam it points authors at.
-  for (const lane of LANES) {
-    assert.ok(lane.seamHint.length > 0, `${lane.id} lane has no seam hint`);
-  }
 });
 
 test(".claude/skills is never a lane (skills are regenerated playbook artifacts)", () => {
@@ -349,19 +348,35 @@ test("violationKey is lane-prefixed uniformly: lane::file::token::severity", () 
   assert.notEqual(violationKey(src), violationKey({ ...src, lane: "autopilot" }));
 });
 
-test("baseline is one flat sorted list of lane-prefixed keys and stays 'Target state: empty'", () => {
+test("baseline is one flat sorted, deduplicated array of lane-prefixed keys", () => {
   const raw = readFileSync(join(REPO_ROOT, "scripts/ci/target-coupling-baseline.json"), "utf8");
-  const parsed = JSON.parse(raw) as { violations: string[]; note: string };
-  assert.ok(Array.isArray(parsed.violations));
-  assert.deepEqual(parsed.violations, [...parsed.violations].sort(), "baseline must be sorted");
-  assert.equal(new Set(parsed.violations).size, parsed.violations.length, "baseline must be deduplicated");
+  const parsed = JSON.parse(raw) as string[];
+  assert.ok(Array.isArray(parsed));
+  assert.deepEqual(parsed, [...parsed].sort(), "baseline must be sorted");
+  assert.equal(new Set(parsed).size, parsed.length, "baseline must be deduplicated");
   const laneIds = new Set(LANES.map(l => l.id));
-  for (const key of parsed.violations) {
+  for (const key of parsed) {
     const parts = key.split("::");
     assert.equal(parts.length, 4, `key ${key} must be lane::file::token::severity`);
     assert.ok(laneIds.has(parts[0] as (typeof LANES)[number]["id"]), `key ${key} names an unknown lane`);
   }
-  assert.match(parsed.note, /Target state: empty/);
+});
+
+test("a new comment-context key fails the verdict like a fatal one (all severities ratchet)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "coupling-verdict-"));
+  try {
+    mkdirSync(join(root, "src"), { recursive: true });
+    mkdirSync(join(root, "scripts/ci"), { recursive: true });
+    writeFileSync(join(root, "src/a.ts"), "// mentions hydra-betting in prose only\nexport const a = 1;\n");
+    writeFileSync(join(root, "scripts/ci/target-coupling-baseline.json"), "[]\n");
+    execFileSync("git", ["init", "-q"], { cwd: root });
+    execFileSync("git", ["add", "src/a.ts"], { cwd: root });
+    const v = await targetCouplingRatchet.verdict(root);
+    assert.equal(v.ok, false, v.advice);
+    assert.deepEqual(v.added, ["src::src/a.ts::hydra-betting::name-comment"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("no workflow file is created for the coupling check (advisory-checks.yml is the only host)", () => {

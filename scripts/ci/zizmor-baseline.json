@@ -1,73 +1,36 @@
 {
-  "note": "Shrink-only per-workflow zizmor finding counts by ident (issue #5640). Never raise a count: fix the finding. Lower with npx tsx scripts/ci/zizmor-ratchet.ts --input <json> --write-baseline.",
-  "files": {
-    ".github/workflows/advisory-checks.yml": {
-      "artipacked": 1
-    },
-    ".github/workflows/allow-scripts.yml": {
-      "artipacked": 2,
-      "unpinned-uses": 2
-    },
-    ".github/workflows/audit-nightly.yml": {
-      "artipacked": 1,
-      "unpinned-uses": 1
-    },
-    ".github/workflows/changelog-check.yml": {
-      "artipacked": 1,
-      "unpinned-uses": 1
-    },
-    ".github/workflows/ci.yml": {
-      "artipacked": 5,
-      "unpinned-uses": 5
-    },
-    ".github/workflows/deep-qa-gate.yml": {
-      "artipacked": 1,
-      "dangerous-triggers": 1,
-      "unpinned-uses": 1
-    },
-    ".github/workflows/deps-check.yml": {
-      "artipacked": 1,
-      "unpinned-uses": 2
-    },
-    ".github/workflows/design-concept-comment.yml": {
-      "excessive-permissions": 1
-    },
-    ".github/workflows/design-concept-reconcile.yml": {
-      "artipacked": 1,
-      "unpinned-uses": 1
-    },
-    ".github/workflows/issue-label-validation.yml": {
-      "artipacked": 2,
-      "excessive-permissions": 1,
-      "unpinned-uses": 2
-    },
-    ".github/workflows/osv-scan.yml": {
-      "artipacked": 1,
-      "unpinned-uses": 2
-    },
-    ".github/workflows/protected-paths.yml": {
-      "artipacked": 1,
-      "unpinned-uses": 1
-    },
-    ".github/workflows/qa-fix-proof.yml": {
-      "artipacked": 2,
-      "unpinned-uses": 2
-    },
-    ".github/workflows/secret-scan.yml": {
-      "artipacked": 1,
-      "unpinned-uses": 1
-    },
-    ".github/workflows/stryker-check.yml": {
-      "artipacked": 1,
-      "unpinned-uses": 2
-    },
-    ".github/workflows/test-typecheck.yml": {
-      "artipacked": 1,
-      "unpinned-uses": 1
-    },
-    ".github/workflows/vendor-drift.yml": {
-      "artipacked": 1,
-      "unpinned-uses": 2
-    }
-  }
+  ".github/workflows/advisory-checks.yml\tartipacked": 1,
+  ".github/workflows/allow-scripts.yml\tartipacked": 2,
+  ".github/workflows/allow-scripts.yml\tunpinned-uses": 2,
+  ".github/workflows/audit-nightly.yml\tartipacked": 1,
+  ".github/workflows/audit-nightly.yml\tunpinned-uses": 1,
+  ".github/workflows/changelog-check.yml\tartipacked": 1,
+  ".github/workflows/changelog-check.yml\tunpinned-uses": 1,
+  ".github/workflows/ci.yml\tartipacked": 5,
+  ".github/workflows/ci.yml\tunpinned-uses": 5,
+  ".github/workflows/deep-qa-gate.yml\tartipacked": 1,
+  ".github/workflows/deep-qa-gate.yml\tdangerous-triggers": 1,
+  ".github/workflows/deep-qa-gate.yml\tunpinned-uses": 1,
+  ".github/workflows/deps-check.yml\tartipacked": 1,
+  ".github/workflows/deps-check.yml\tunpinned-uses": 2,
+  ".github/workflows/design-concept-comment.yml\texcessive-permissions": 1,
+  ".github/workflows/design-concept-reconcile.yml\tartipacked": 1,
+  ".github/workflows/design-concept-reconcile.yml\tunpinned-uses": 1,
+  ".github/workflows/issue-label-validation.yml\tartipacked": 2,
+  ".github/workflows/issue-label-validation.yml\texcessive-permissions": 1,
+  ".github/workflows/issue-label-validation.yml\tunpinned-uses": 2,
+  ".github/workflows/osv-scan.yml\tartipacked": 1,
+  ".github/workflows/osv-scan.yml\tunpinned-uses": 2,
+  ".github/workflows/protected-paths.yml\tartipacked": 1,
+  ".github/workflows/protected-paths.yml\tunpinned-uses": 1,
+  ".github/workflows/qa-fix-proof.yml\tartipacked": 2,
+  ".github/workflows/qa-fix-proof.yml\tunpinned-uses": 2,
+  ".github/workflows/secret-scan.yml\tartipacked": 1,
+  ".github/workflows/secret-scan.yml\tunpinned-uses": 1,
+  ".github/workflows/stryker-check.yml\tartipacked": 1,
+  ".github/workflows/stryker-check.yml\tunpinned-uses": 2,
+  ".github/workflows/test-typecheck.yml\tartipacked": 1,
+  ".github/workflows/test-typecheck.yml\tunpinned-uses": 1,
+  ".github/workflows/vendor-drift.yml\tartipacked": 1,
+  ".github/workflows/vendor-drift.yml\tunpinned-uses": 2
 }

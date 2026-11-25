@@ -13,6 +13,7 @@ import {
   buildSeedEvidence,
   capEnvName,
   classRole,
+  countDeepQaFailsAfterReset,
   countReviewedFailRoundsAfterReset,
   evaluateCaps,
   latestResetMs,
@@ -66,6 +67,7 @@ describe("cap table (INV-1)", () => {
         "stale-requeue:issue:2",
         "needs-dev-resume-claims:issue:4",
         "total-claims:issue:10",
+        "deep-qa-fails:pr:2",
       ],
     );
   });
@@ -79,6 +81,60 @@ describe("cap table (INV-1)", () => {
       assert.equal(r.limits["total-claims"], 10);
       assert.equal(r.warnings.length, 1);
     }
+  });
+
+  test("the exit column: every row parks except deep-qa-fails, which escalates", () => {
+    assert.deepEqual(
+      Object.fromEntries(CAP_TABLE.map((r) => [r.arm, r.exit])),
+      {
+        "qa-fail-rounds": "park",
+        "dev-nopr-resume": "park",
+        "qa-stall": "park",
+        "red-ci-forward-fix": "park",
+        "stale-requeue": "park",
+        "needs-dev-resume-claims": "park",
+        "total-claims": "park",
+        "deep-qa-fails": "escalate",
+      },
+    );
+  });
+
+  test("deep-qa-fails is NOT env-overridable (ADR-0015: a second failed deep-QA pass)", () => {
+    const r = resolveCapLimits({ HYDRA_LIFECYCLE_CAP_DEEP_QA_FAILS: "5" });
+    assert.equal(r.limits["deep-qa-fails"], 2);
+    assert.deepEqual(r.warnings, []);
+  });
+
+  test("deep-qa-fails counts markers after the latest reset only, and applies only to a qa-fail attempt", () => {
+    const M = "Verifier-Core deep-QA: FAIL";
+    const t = (n: number) => Date.parse("2026-11-04T09:00:00Z") + n * 1000;
+    const real = (sha: string) => `REPORT\n\n${M}\n\nQA-Verdict: FAIL pr=7 round=1 sha=${sha} blockers=1 max_severity=high`;
+    const bodies: TimedBody[] = [
+      { body: real("aaaaaaaaaaaa"), tsMs: t(1) },
+      { body: `Hydra-Cap-Reset: by=op ts=${new Date(t(2)).toISOString()}`, tsMs: t(2) },
+      { body: real("bbbbbbbbbbbb"), tsMs: t(3) },
+      { body: real("cccccccccccc"), tsMs: null },
+      { body: "unrelated", tsMs: t(4) },
+    ];
+    assert.equal(countDeepQaFailsAfterReset(bodies, 0), 2);
+    assert.equal(countDeepQaFailsAfterReset(bodies, t(3)), 1, "an issue-side reset newer than a marker hides it");
+    // sibling shape that must keep its verdict: a retry on a NEW head is a second FAIL
+    // (covered above by distinct shas), while the same head counts once and prose quotes never count.
+    const retry = [
+      { body: real("dddddddddddd"), tsMs: t(1) },
+      { body: real("dddddddddddd"), tsMs: t(2) },
+    ];
+    assert.equal(countDeepQaFailsAfterReset(retry, 0), 1, "a retry on the same head sha is one FAIL");
+    const quoted = [
+      { body: `we quote ${M} here`, tsMs: t(1) },
+      { body: `we quote ${M} again`, tsMs: t(2) },
+      { body: `${M}\n(no verdict trailer)`, tsMs: t(3) },
+    ];
+    assert.equal(countDeepQaFailsAfterReset(quoted, 0), 0, "a T1-T3 PR quoting the literal never reaches the arm");
+    const ev = evalArms([], { kind: "qa-fail", pr: 7 }, { deepQaFails: 2 });
+    assert.equal(ev.over?.arm, "deep-qa-fails");
+    const claim = evalArms([], claimAttempt({ class: "qa_orch", pr: 7 }), { deepQaFails: 9 });
+    assert.equal(claim.over, null, "markers never park a dispatch claim");
   });
 
   test("qa-fail-rounds is NOT env-overridable", () => {
@@ -628,6 +684,7 @@ describe("caps as data (#5421)", () => {
       "stale-requeue": false,
       "needs-dev-resume-claims": false,
       "total-claims": false,
+      "deep-qa-fails": true,
     });
     for (const r of CAP_TABLE) assert.equal(typeof r.liveInShadow, "boolean", r.arm);
   });
@@ -720,6 +777,49 @@ describe("caps as data (#5421)", () => {
     const res = (await advance({ issue: 42, to: "needs-dev-resume", evidence: { pr: "5" } }, w.deps)) as any;
     assert.equal(res.ok, false);
     assert.equal(res.code, "parked:qa-fail-rounds");
+  });
+});
+
+describe("qa-fail edge with unreadable PR bodies", () => {
+  const FAIL_TRAILER = "QA-Verdict: FAIL pr=5 round=1 sha=0123456789ab blockers=1 max_severity=high";
+  const liveWith = (extra: string[]) => async () => ({
+    ok: true as const,
+    value: {
+      number: 5, state: "OPEN", isDraft: false, mergeStateStatus: "CLEAN", headSha: "0123456789abcdef0123456789abcdef01234567", checks: "green" as const,
+      bodies: extra,
+      timedBodies: [{ body: FAIL_TRAILER, createdAtMs: NOW + 1 }, ...extra.map((body) => ({ body, createdAtMs: NOW + 2 }))],
+    },
+  });
+
+  for (const mode of ["enforce", "shadow"] as const) {
+    test(`${mode}: a T4 FAIL bounce (deep-QA marker on the live record) with unreadable PR bodies fails closed: refused fetch-failed, nothing written`, async () => {
+      const w = world(mode, ["needs-qa"]);
+      w.deps.fetch.qaLive = liveWith(["Verifier-Core deep-QA: FAIL"]);
+      w.deps.fetch.stateEntry = async () => ({ ok: true, value: { enteredAtMs: NOW - 60_000 } });
+      w.fetchFail.add("prBodies");
+      const res = (await advance({ issue: 42, to: "needs-dev-resume", evidence: { pr: "5" } }, w.deps)) as any;
+      assert.equal(res.ok, false);
+      assert.equal(res.code, "fetch-failed");
+      assert.deepEqual(w.edits, []);
+    });
+  }
+
+  test("sibling shape: a non-T4 FAIL bounce with unreadable PR bodies still bounces", async () => {
+    const w = world("enforce", ["needs-qa"]);
+    w.deps.fetch.qaLive = liveWith([]);
+    w.deps.fetch.stateEntry = async () => ({ ok: true, value: { enteredAtMs: NOW - 60_000 } });
+    w.fetchFail.add("prBodies");
+    const res = (await advance({ issue: 42, to: "needs-dev-resume", evidence: { pr: "5" } }, w.deps)) as any;
+    assert.equal(res.ok, true);
+  });
+
+  test("sibling shape: with the bodies readable the second deep-QA FAIL marker still escalates", async () => {
+    const w = world("enforce", ["needs-qa"]);
+    const real = (sha: string) => `Verifier-Core deep-QA: FAIL\n\nQA-Verdict: FAIL pr=5 round=1 sha=${sha} blockers=1 max_severity=high`;
+    w.prBodies = [real("aaaaaaaaaaaa"), real("bbbbbbbbbbbb")];
+    const res = (await advance({ issue: 42, to: "needs-dev-resume", evidence: { pr: "5" } }, w.deps)) as any;
+    assert.equal(res.ok, false);
+    assert.equal(res.code, "escalated:deep-qa-fails");
   });
 });
 

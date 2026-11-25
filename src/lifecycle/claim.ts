@@ -9,7 +9,7 @@
  */
 import { logger } from "../logger.ts";
 import { CLAIM_OWNER_MISMATCH, type DispatchClaim, type LifecycleJournalEntry } from "../redis/lifecycle-journal.ts";
-import { classRole } from "./caps.ts";
+import { classRole, type CapExitCode } from "./caps.ts";
 import { advance, guardCaps, journalEntry as journal, shadowParkEntry, type AdvanceResult } from "./seam.ts";
 import type { SeamDeps } from "./seam-deps.ts";
 import { stateLabelsOf } from "./transitions.ts";
@@ -53,7 +53,7 @@ export type ClaimResult =
       wouldPark?: string;
     }
   | { ok: false; code: "claim-held" | "redis-failed"; existing?: DispatchClaim | null }
-  | { ok: false; code: `parked:${string}`; written: boolean };
+  | { ok: false; code: CapExitCode; written: boolean };
 
 function claimEntry(
   deps: SeamDeps,
@@ -254,7 +254,7 @@ export type DispatchResult =
       wouldPark?: string;
     }
   | { ok: false; code: "claim-held" | "redis-failed"; existing?: DispatchClaim | null }
-  | { ok: false; code: `parked:${string}`; written: boolean }
+  | { ok: false; code: CapExitCode; written: boolean }
   | { ok: false; code: "advance-refused"; reason: string; released: boolean };
 
 /**

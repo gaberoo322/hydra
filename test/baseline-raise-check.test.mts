@@ -2,7 +2,8 @@
  * test/baseline-raise-check.test.mts — unit test of the pure baseline-raise
  * guard (issue #5553). Synthetic base/head pairs only: the required `test` job
  * has no PR body and no origin/master, so the live reader is the advisory
- * workflow step, never this file.
+ * workflow step, never this file. Polarity comes from the Ratchet registry
+ * (scripts/ci/ratchets.ts): a ceiling loosens by growing, a floor by shrinking.
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
@@ -11,19 +12,55 @@ import { join } from "node:path";
 import {
   evaluateBaselineRaise,
   buildFixturePairs,
-  listBaselineFixtures,
   parseBaselineRaiseLines,
-  NON_RATCHET_BASELINES,
 } from "../scripts/ci/baseline-raise-check.ts";
+import { diffBaselineJson, type RatchetPolarity } from "../scripts/ci/ratchet.ts";
+import { listBaselineFixtures, registryRowFor, rowEnforcement, rowPolarity } from "../scripts/ci/ratchets.ts";
 
 const FX = "scripts/ci/skill-size-baseline.json";
-const pair = (base: unknown, head: unknown, path = FX) => ({
+const FLOOR = "test/fixtures/suite-count-baseline.json";
+const pair = (base: unknown, head: unknown, path = FX, polarity: RatchetPolarity | "none" = "ceiling") => ({
   path,
   base: base === null ? null : JSON.stringify(base),
   head: head === null ? null : JSON.stringify(head),
+  ...(polarity === "none" ? {} : { polarity }),
 });
 const run = (base: unknown, head: unknown, changedFiles: string[] = [], prBody = "") =>
   evaluateBaselineRaise({ fixtures: [pair(base, head)], changedFiles, prBody });
+const runFloor = (base: unknown, head: unknown, changedFiles: string[] = [], prBody = "") =>
+  evaluateBaselineRaise({ fixtures: [pair(base, head, FLOOR, "floor")], changedFiles, prBody });
+
+describe("tab-keyed counted rows (zizmor <workflow>\\t<ident>)", () => {
+  const WF = ".github/workflows/ci.yml";
+  const ZZ = "scripts/ci/zizmor-baseline.json";
+  const zz = (base: unknown, head: unknown, changedFiles: string[] = [], prBody = "") =>
+    evaluateBaselineRaise({ fixtures: [pair(base, head, ZZ, "ceiling")], changedFiles, prBody });
+  const base = { [`${WF}\tartipacked`]: 1 };
+  const raised = { [`${WF}\tartipacked`]: 2 };
+
+  test("a raise with no Baseline-raise line is a finding, and an out-of-diff workflow is detected", () => {
+    const r = zz(base, raised, ["scripts/ci/zizmor-baseline.json"]);
+    assert.equal(r.ok, false);
+    assert.equal(r.findings.length, 1);
+    assert.equal(r.findings[0].outOfDiff, true);
+    assert.equal(zz(base, raised, [WF]).findings[0].outOfDiff, false);
+  });
+
+  test("a tab-free <path>:<ident> Baseline-raise line clears it", () => {
+    const r = zz(base, raised, [WF], `Baseline-raise: ${ZZ} ${WF}:artipacked - reviewed`);
+    assert.equal(r.ok, true);
+    assert.equal(r.cleared.length, 1);
+  });
+
+  test("sibling: a line naming a different ident does not clear it", () => {
+    const r = zz(base, raised, [WF], `Baseline-raise: ${ZZ} ${WF}:unpinned-uses - reviewed`);
+    assert.equal(r.ok, false);
+  });
+
+  test("sibling: an in-diff shrink of a tab-keyed row passes silently", () => {
+    assert.equal(zz(raised, base, [WF]).ok, true);
+  });
+});
 
 describe("evaluateBaselineRaise", () => {
   test("unaccompanied raise is reported with fixture and row", () => {
@@ -122,7 +159,7 @@ describe("evaluateBaselineRaise", () => {
     assert.equal(run(null, { a: 1 }).ok, true);
     assert.equal(run({ a: 1 }, null).ok, true);
     const r = evaluateBaselineRaise({
-      fixtures: [{ path: FX, base: "{", head: "{}" }],
+      fixtures: [{ path: FX, base: "{", head: "{}", polarity: "ceiling" }],
       changedFiles: [],
       prBody: "",
     });
@@ -131,7 +168,7 @@ describe("evaluateBaselineRaise", () => {
 
   test("never throws on junk input", () => {
     const r = evaluateBaselineRaise({
-      fixtures: [{ path: FX, base: "1", head: "[1]" }],
+      fixtures: [{ path: FX, base: "1", head: "[1]", polarity: "ceiling" }],
       changedFiles: [],
       prBody: undefined as unknown as string,
     });
@@ -139,22 +176,98 @@ describe("evaluateBaselineRaise", () => {
   });
 });
 
+function baselinesOnDisk(): string[] {
+  const root = join(import.meta.dirname, "..");
+  const disk: string[] = [];
+  for (const f of readdirSync(join(root, "scripts/ci"))) if (f.endsWith("-baseline.json")) disk.push(`scripts/ci/${f}`);
+  const walk = (rel: string): void => {
+    for (const e of readdirSync(join(root, rel), { withFileTypes: true })) {
+      if (e.isDirectory()) walk(`${rel}/${e.name}`);
+      else if (e.name.endsWith("-baseline.json")) disk.push(`${rel}/${e.name}`);
+    }
+  };
+  walk("test/fixtures");
+  return disk.sort();
+}
+
 describe("listBaselineFixtures inventory", () => {
-  test("on-disk *-baseline.json tree matches the inventory rule", () => {
+  test("lists every on-disk *-baseline.json, with no hand-kept exclusion list", async () => {
     const root = join(import.meta.dirname, "..");
-    const disk: string[] = [];
-    for (const f of readdirSync(join(root, "scripts/ci"))) if (f.endsWith("-baseline.json")) disk.push(`scripts/ci/${f}`);
-    const walk = (rel: string): void => {
-      for (const e of readdirSync(join(root, rel), { withFileTypes: true })) {
-        if (e.isDirectory()) walk(`${rel}/${e.name}`);
-        else if (e.name.endsWith("-baseline.json")) disk.push(`${rel}/${e.name}`);
-      }
-    };
-    walk("test/fixtures");
-    const expected = disk.filter((p) => !NON_RATCHET_BASELINES.includes(p)).sort();
-    assert.deepEqual(listBaselineFixtures(root), expected);
-    assert.ok(expected.includes("test/fixtures/suite-count-baseline.json"));
-    assert.ok(!expected.includes("test/fixtures/qa-cohort-baseline.json"));
+    assert.deepEqual(listBaselineFixtures(root), baselinesOnDisk());
+    assert.ok(listBaselineFixtures(root).includes("test/fixtures/qa-cohort-baseline.json"));
+  });
+});
+
+describe("Ratchet registry", () => {
+  test("registryRowFor finds each kind and nothing else", () => {
+    assert.equal(registryRowFor("scripts/ci/skill-size-baseline.json")?.kind, "ratchet");
+    assert.equal(registryRowFor(FLOOR)?.kind, "external");
+    assert.equal(registryRowFor("test/fixtures/qa-cohort-baseline.json")?.kind, "fixture");
+    assert.equal(registryRowFor("scripts/ci/nope-baseline.json"), undefined);
+  });
+
+  test("polarity and enforcement are recorded per row: suite-count is a required floor, fixtures have neither", () => {
+    const suite = registryRowFor(FLOOR)!;
+    assert.equal(rowPolarity(suite), "floor");
+    assert.equal(rowEnforcement(suite), "required");
+    assert.equal(rowPolarity(registryRowFor("scripts/ci/skill-size-baseline.json")!), "ceiling");
+    assert.equal(rowEnforcement(registryRowFor("scripts/ci/never-throw-baseline.json")!), "advisory");
+    const fixture = registryRowFor("test/fixtures/turn-snapshot/pr-gate-baseline.json")!;
+    assert.equal(rowPolarity(fixture), undefined);
+    assert.equal(rowEnforcement(fixture), undefined);
+  });
+});
+
+describe("polarity-aware guard", () => {
+  test("a floor: an added test row or a raised count is not a finding", () => {
+    const base = { "test/a.test.mts": 4 };
+    assert.equal(runFloor(base, { ...base, "test/b.test.mts": 2 }, ["test/b.test.mts"]).ok, true);
+    assert.equal(runFloor(base, { "test/a.test.mts": 6 }, ["test/a.test.mts"]).ok, true);
+  });
+
+  test("a floor: a lowered count or a removed row is a finding, cleared by a Baseline-raise line", () => {
+    const base = { "test/a.test.mts": 4, "test/b.test.mts": 2 };
+    const lowered = runFloor(base, { ...base, "test/a.test.mts": 3 }, ["test/a.test.mts"]);
+    assert.equal(lowered.ok, false);
+    assert.equal(lowered.findings[0].kind, "lowered");
+    const removed = runFloor(base, { "test/a.test.mts": 4 }, ["test/b.test.mts"]);
+    assert.equal(removed.findings[0].kind, "removed-key");
+    const cleared = runFloor(base, { "test/a.test.mts": 4 }, [], `Baseline-raise: ${FLOOR} test/b.test.mts - file deleted`);
+    assert.equal(cleared.ok, true);
+    assert.equal(cleared.cleared.length, 1);
+  });
+
+  test("a floor: a tightened row for a file outside the diff is still reported", () => {
+    const r = runFloor({ "test/a.test.mts": 4 }, { "test/a.test.mts": 5 }, ["src/other.ts"]);
+    assert.equal(r.ok, false);
+    assert.equal(r.findings[0].outOfDiff, true);
+  });
+
+  test("a shape change is a finding under either polarity", () => {
+    assert.equal(runFloor({ a: 1 }, ["a"]).findings[0].kind, "shape-changed");
+    assert.equal(run({ a: 1 }, ["a"]).findings[0].kind, "shape-changed");
+  });
+
+  test("a pair with no polarity produces no finding", () => {
+    const r = evaluateBaselineRaise({
+      fixtures: [pair({ a: 1 }, { a: 9, b: 1 }, "test/fixtures/qa-cohort-baseline.json", "none")],
+      changedFiles: [],
+      prBody: "",
+    });
+    assert.deepEqual(r.findings, []);
+  });
+});
+
+describe("diffBaselineJson", () => {
+  test("reports both directions in one pass", () => {
+    const d = diffBaselineJson({ a: 1, b: 5, gone: 1, hits: ["x", "y"] }, { a: 2, b: 3, new: 1, hits: ["x", "z"] });
+    assert.deepEqual(d.grown.map((r) => `${r.path}:${r.kind}`).sort(), ["a:raised", "hits:added-element", "new:added-key"]);
+    assert.deepEqual(d.shrunk.map((r) => `${r.path}:${r.kind}`).sort(), ["b:lowered", "gone:removed-key", "hits:removed-element"]);
+  });
+
+  test("strings are neither grown nor shrunk and a duplicate element counts", () => {
+    assert.deepEqual(diffBaselineJson({ note: "a" }, { note: "b" }), { grown: [], shrunk: [] });
+    assert.deepEqual(diffBaselineJson(["a"], ["a", "a"]).grown.map((r) => r.kind), ["added-element"]);
   });
 });
 

@@ -75,7 +75,6 @@ export {
 } from "../../src/qa/prior-round.ts";
 export {
   DEEP_QA_FAIL_MARKER,
-  decideDeepQaAction,
   hasFreshDeepQaPass,
   renderDeepQaPassMarker,
 } from "../../src/qa/round-action.ts";

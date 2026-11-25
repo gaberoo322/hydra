@@ -226,9 +226,11 @@ success outcome for the experiment, not a failure.
 
 **What it does.** `scripts/ci/zizmor-ratchet.ts` reads the scan step's json-v1
 output (`--input zizmor-results.json`) and caps the findings per workflow file per
-ident at `scripts/ci/zizmor-baseline.json` (shrink-only: a count above its cell
-fails, a count below it prints a lower-the-row nudge). It never runs the scanner
-or touches the network.
+ident at `scripts/ci/zizmor-baseline.json`, a counted Ratchet (`ratchet.ts`)
+whose rows are `<workflow path>\t<ident>` (shrink-only: a count above its row
+fails, a count below it prints a lower-the-row hint). `--input <path>` narrows a
+check run to another findings file. It never runs the scanner or touches the
+network.
 
 **Where it runs.** An `if: always()` step right after the zizmor scan step in
 `advisory-checks.yml`. It is not in `ci.yml`, `npm test` or any required context:
@@ -244,17 +246,21 @@ failure (`::error`, red step). No step in the workflow swallows an exit with
 annotates any that appear (skip one with a `# intentional: <reason>` trailer).
 
 **Reseeding.** `bash scripts/zizmor-scan.sh > /tmp/z.json` (exit 14 is normal),
-then `npx tsx scripts/ci/zizmor-ratchet.ts --input /tmp/z.json --write-baseline
-[--files <workflow paths>]`. Growth is refused without `--allow-grow`.
+then `npx tsx scripts/ci/zizmor-ratchet.ts --input /tmp/z.json` to check; to
+tighten, save the scan as `zizmor-results.json` and run
+`npx tsx scripts/ci/zizmor-ratchet.ts --write-baseline` (or edit only the changed
+rows by hand). `--files` is retired. Growth is refused without `--allow-grow`.
 
 ### skill-size ratchet (required — via the `test` job)
 
 **What it does.** `scripts/ci/skill-size-ratchet.ts` counts the words in every
 skill source — each frontmattered `docs/operator-playbooks/*.md` body and each
 `docs/operator-playbooks/_fragments/*.md` file — and compares them to
-`scripts/ci/skill-size-baseline.json`. It fails when a body grows past its row,
-when a skill source has no row, when a row's file is gone, or when a frontmatter
-`description` is longer than max(50, its baselined count).
+`scripts/ci/skill-size-baseline.json`, a counted Ratchet (`ratchet.ts`) whose
+rows are `<path>` (body words) and `<path>/description` (description words, a
+row only when it exceeds 50). It fails when a body grows past its row, when a
+skill source has no row, or when a description is over 50 words (a new row). A
+row that can drop, or whose file is gone, is a tightening hint, never a failure.
 
 **Where it is enforced.** The required `test` job: the "the real playbooks" case
 in `test/skill-size-ratchet.test.mts` runs the ratchet over the real playbooks
@@ -264,9 +270,9 @@ The `advisory-checks.yml` step still runs the CLI as a readable per-PR report.
 **Reviewed growth.** In the same PR that grows a playbook, raise exactly that
 file's row to the measured count (hand-edit — never commit a blanket
 `--write-baseline`) and add a PR-body line
-`Baseline-raise: scripts/ci/skill-size-baseline.json files/<path>/body - <reason>`
+`Baseline-raise: scripts/ci/skill-size-baseline.json <path> - <reason>`
 (`<path>` is the playbook path, e.g. `docs/operator-playbooks/hydra-dev.md`; STD-BASELINE-EDIT-ROWS).
-A new playbook or fragment adds its row the same way, with the key `files/<path>`.
+A new playbook or fragment adds its row the same way, with the key `<path>`.
 A description over the cap is shortened, never raised.
 
 ### `scope-check`

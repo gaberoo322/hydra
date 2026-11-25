@@ -1,6 +1,6 @@
 # Coding Standards
 
-The Standards reviewer's rule catalog (ADR-0046). Each rule has a stable ID and one `enforced-by:` line: a repo-relative check path, or `reviewer`. A path marked `(advisory)` blocks nothing. Findings cite the rule ID. Severity defaults to low unless a rule says otherwise. Integrity (grammar, 2,000-word ceiling, dangling references) is enforced by `test/coding-standards-integrity.test.mts`.
+The Standards reviewer's rule catalog (ADR-0046). Each rule has a stable ID and one `enforced-by:` line: a repo-relative check path, or `reviewer`. A path marked `(advisory)` blocks nothing. Findings cite the rule ID. Severity defaults to low unless a rule says otherwise. `test/coding-standards-integrity.test.mts` enforces integrity (grammar, word ceiling, dangling references).
 
 ## Code
 
@@ -80,9 +80,9 @@ enforced-by: src/ast-grep-rules/test-restates-module-literal.yml (advisory), rev
 
 ### STD-TEST-CAN-FAIL
 
-Every case goes red if the behaviour its title names breaks: no early return before the decisive assertion, and no asserting only stub-supplied values. A fake exposes the failure modes the code handles.
+Every case goes red if the behaviour its title names breaks: one behaviour per case, every branch asserted, no early return, stub-only assertion or scan-nothing fallback, and no floor or window an unrelated change satisfies. A fake exposes the failure modes the code handles.
 
-enforced-by: reviewer
+enforced-by: scripts/ci/qa-fix-proof.ts (advisory), reviewer
 
 ### STD-TEST-OWN-FEATURE
 
@@ -104,9 +104,9 @@ enforced-by: reviewer
 
 ## Design
 
-Diff-level deep-module checking uses the vendored Fowler smell battery (Middle Man, Shotgun Surgery, Duplicated Code and the rest); do not restate its smells as repo rules. Whole-codebase design questions belong to `architecture_orch`, not the reviewer.
+Diff-level deep-module checking uses the vendored Fowler smell battery; do not restate its smells as repo rules. Whole-codebase design questions belong to `architecture_orch`, not the reviewer.
 
-Design findings default to low, non-blocking follow-ups. The one medium case is STD-DESIGN-NO-REIMPLEMENT where drift would make two parts of the system decide the same question differently (a gate, a label predicate, a path rule). Pass-through, a one-adapter seam, Speculative Generality and STD-DESIGN-DEEPEN stay low. Cite a `STD-DESIGN-*` ID or an exact Fowler smell name.
+Design findings default to low, non-blocking follow-ups. The one medium case is STD-DESIGN-NO-REIMPLEMENT where drift lets two parts of the system decide one question differently (a gate, a label predicate, a path rule). Pass-through, a one-adapter seam, Speculative Generality and STD-DESIGN-DEEPEN stay low. Cite a `STD-DESIGN-*` ID or an exact Fowler smell name.
 
 ### STD-DESIGN-TWO-ADAPTERS
 
@@ -132,7 +132,7 @@ Authoring standard for `docs/operator-playbooks/` and its fragments, the source 
 
 ### STD-PLAYBOOK-POINT-DONT-RESTATE
 
-Name where a fact lives (the dispatch-class taxonomy, a script's help output, the tier endpoint) and read it at run time. Do not copy numbers, enums, key shapes, symbol names or line-number cites into prose.
+Name where a fact lives (the dispatch-class taxonomy, a script's help output, the tier endpoint) and read it at run time. Do not copy numbers, enums, key shapes, symbol names, step or gate numbers or line-number cites into prose.
 
 enforced-by: reviewer, scripts/ci/playbook-vocabulary-ratchet.ts
 
@@ -150,7 +150,7 @@ enforced-by: reviewer, scripts/ci/playbook-vocabulary-ratchet.ts
 
 ### STD-PLAYBOOK-ONE-HOME
 
-A rule two playbooks share lives in one fragment.
+A rule two playbooks share lives in one fragment; a rule one playbook states twice lives once in it.
 
 enforced-by: reviewer, scripts/ci/playbook-duplicate-ratchet.ts
 

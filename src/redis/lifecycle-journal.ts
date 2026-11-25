@@ -158,7 +158,7 @@ export interface CapEventRecord {
 
 /**
  * Pure: classify one journal entry as a cap event, or `null` when it is not
- * one. A cap park (`to=parked`, reason `cap:<arm>`) is a `park`; a shadow
+ * one. A cap exit (`to=parked` or `ready-for-human`, reason `cap:<arm>`) is a `park`; a shadow
  * refusal (`result` `shadow-would-park:<arm>`) is a `would-park`; a
  * `claim-opened` entry is a `claim` (the park-rate denominator).
  */
@@ -178,7 +178,7 @@ export function capEventRecord(issue: number, entry: LifecycleJournalEntry): Cap
       actor: entry.actor,
     };
   }
-  if (entry.to === "parked" && entry.written === true && typeof entry.reason === "string" && entry.reason.startsWith("cap:")) {
+  if ((entry.to === "parked" || entry.to === "ready-for-human") && entry.written === true && typeof entry.reason === "string" && entry.reason.startsWith("cap:")) {
     return { kind: "park", issue, ts: entry.ts, arm: entry.reason.slice("cap:".length), ...prPart, actor: entry.actor };
   }
   return null;

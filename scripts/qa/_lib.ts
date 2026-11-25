@@ -50,6 +50,11 @@ export interface PlumbingPorts {
   advance(input: SeamMoveInput): Promise<SeamMoveResult>;
   /** A QA FAIL / defer exit off `needs-qa`: the seam picks the target from one live PR read. */
   qaBounce(input: QaBounceInput): Promise<QaBounceResult>;
+  /**
+   * Whether the PR's comment history (the deep-qa-fails ledger) is readable. Optional: absent = no preflight.
+   * Read BEFORE any T4 FAIL side effect so an unreadable read refuses with nothing posted (ADR-0047 D6).
+   */
+  prBodiesReadable?(pr: number): Promise<boolean>;
   /** `gh <args>` (no leading `gh`). */
   gh(args: string[]): Promise<CmdResult>;
   /** `git <args>` (no leading `git`), run in the process cwd. */
@@ -126,6 +131,7 @@ export async function createProductionPorts(repo: string, apiBase: string): Prom
   return {
     advance: (input) => guardedSeamMove(() => advance(input, seamDeps)),
     qaBounce: (input) => qaBounce(input, seamDeps),
+    prBodiesReadable: async (pr) => (await seamDeps.fetch.prBodies(pr)).ok,
     async gh(args) {
       return toCmd(await ghExec(args));
     },

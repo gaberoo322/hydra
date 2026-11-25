@@ -11,7 +11,11 @@
  * STD-PLAYBOOK-CURRENT-BEHAVIOUR, STD-PLAYBOOK-TARGET-SEAM and
  * STD-PLAYBOOK-LOGIC-IN-SCRIPTS.
  *
- * Ten banned shapes:
+ * The same detector also backs the ADR-corpus ratchet (`adrVocabularyRatchet`,
+ * ADR-0037 Decision 7), exported below with its own baseline; the CLI entry
+ * runs the playbook ratchet.
+ *
+ * Eleven banned shapes:
  *
  *   status      a status or history phrase: "not yet", "currently", "formerly",
  *               "no longer", "used to", "until #N", a rollout label
@@ -36,6 +40,10 @@
  *   process-meta PR-process meta-commentary: a closed list of phrases such as
  *               "tracked as a follow-up" or "out of scope for this PR" (not in
  *               a fenced block)
+ *   step-cite   a step or gate number copied into prose: `Step 0.6`,
+ *               `child-step 7a`, `Gate 1`. Scanned on every line, fenced or
+ *               not; the label that opens a heading or definition bullet is
+ *               exempt by token and the rest of that line is still scanned
  *
  * A line that starts with `Historical:` (the existing playbook provenance
  * convention, HISTORICAL_EXEMPT_RE) is exempt from every shape. The exemption
@@ -52,7 +60,7 @@
  * test/playbook-vocabulary-ratchet.test.mts in the required suite.
  */
 
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { attributedSymbols, listPlaybooks } from "./playbook-reference-check.ts";
 import { defineRatchet, runIfCli } from "./ratchet.ts";
@@ -61,7 +69,7 @@ import { HISTORICAL_EXEMPT_RE, classifyFile } from "./target-coupling-check.ts";
 
 export const STANDARD_REL = "CODING_STANDARDS.md";
 
-export const SHAPES = ["status", "line-cite", "target", "avoid-term", "issue-cite", "back-compat", "shell-lines", "symbol-cite", "invariant-cite", "process-meta"] as const;
+export const SHAPES = ["status", "line-cite", "target", "avoid-term", "issue-cite", "back-compat", "shell-lines", "symbol-cite", "invariant-cite", "process-meta", "step-cite"] as const;
 export type Shape = (typeof SHAPES)[number];
 
 /** One banned-shape occurrence. `line` is 1-based. */
@@ -139,6 +147,14 @@ const PROCESS_META_RE = new RegExp(
     "\\bthis PR['\u2019]s scope\\b",
   ].join("|"),
   "gi",
+);
+
+/** A step or gate number: `Step 0.6`, `child-step 7a`, `parent-Step 2`, `Gate 1`. */
+const STEP_LABEL = "(?:(?:child-|parent-)?[Ss]tep \\d+(?:\\.\\d+)*[a-z]?|Gate \\d+)";
+const STEP_CITE_RE = new RegExp(`\\b${STEP_LABEL}\\b`, "g");
+/** The step or gate label that opens a heading or definition bullet; removed by token before the scan. */
+const STEP_DEFINITION_RE = new RegExp(
+  `^(\\s*(?:>\\s*)*(?:#{1,6}\\s+|(?:[-*+]|\\d+\\.)\\s+)?\\**)${STEP_LABEL}(?=\\**\\s*(?:[:.\\u2014\\u2013-]|'s|$))`,
 );
 
 const SHELL_INFO = new Set(["bash", "sh", "zsh", "shell"]);
@@ -237,6 +253,7 @@ export function findHits(file: string, text: string, avoidTerms: readonly string
     scan("status", STATUS_RE);
     scan("line-cite", LINE_CITE_RE);
     scan("avoid-term", avoid);
+    scan("step-cite", STEP_CITE_RE, line.replace(STEP_DEFINITION_RE, "$1"));
     if (!inFence) {
       scan("issue-cite", ISSUE_CITE_RE, line.replace(TEMPLATE_TOKEN_RE, ""));
       scan("back-compat", BACK_COMPAT_RE);
@@ -306,7 +323,53 @@ export const vocabularyRatchet = defineRatchet({
     `Rewrite the sentence so it states current behaviour and points at the fact's home (${STANDARD_REL}, STD-PLAYBOOK-*). A provenance note kept on one line may start it with \`Historical:\`; a wrapped continuation line is counted.`,
     "symbol-cite: attribute the symbol to its file with an attribution phrase (so playbook-reference-check resolves it), or name the fact's home without copying the symbol.",
     "invariant-cite: name the invariant's home (the design-concept artifact, or the assert_invariants.py docstring) instead of copying the invariant id.",
+    "step-cite: name the step by what it does, or link its heading, instead of copying its number (a step number drifts on every insertion or retitle).",
     "To find the hit, diff the named playbook against master; findHits(file, text, avoidTerms) lists every hit with its line.",
+  ],
+});
+
+// ---------------------------------------------------------------------------
+// ADR corpus (issue #5682): the same detector over docs/adr, two shapes only
+// ---------------------------------------------------------------------------
+
+/** The shapes counted over an ADR; status / back-compat prose is legitimate in Status and Consequences, issue-cite is provenance. */
+export const ADR_SHAPES = ["invariant-cite", "symbol-cite"] as const satisfies readonly Shape[];
+
+/** The numbered ADR files, `docs/adr/<4 digits>-*.md` (never README.md), sorted. */
+export function listAdrs(root: string = REPO_ROOT): string[] {
+  return readdirSync(join(root, "docs/adr"))
+    .filter((f) => /^\d{4}-.*\.md$/.test(f))
+    .sort()
+    .map((f) => `docs/adr/${f}`);
+}
+
+/** One `<adr>\t<shape>` row per ADR per counted shape, valued at the count; zero-count rows absent. */
+export function measureAdrRows(root: string = REPO_ROOT): Record<string, number> {
+  const avoidTerms = parseAvoidTerms(readFileSync(join(root, "CONTEXT.md"), "utf8"));
+  const rows: Record<string, number> = {};
+  for (const file of listAdrs(root)) {
+    const hits = findHits(file, readFileSync(join(root, file), "utf8"), avoidTerms).filter((h) =>
+      (ADR_SHAPES as readonly string[]).includes(h.shape),
+    );
+    for (const [shape, n] of Object.entries(countByShape(hits))) {
+      if (n > 0) rows[`${file}\t${shape}`] = n;
+    }
+  }
+  return rows;
+}
+
+export const adrVocabularyRatchet = defineRatchet({
+  id: "adr-vocabulary-ratchet",
+  baseline: "scripts/ci/adr-vocabulary-baseline.json",
+  shape: "counted",
+  polarity: "ceiling",
+  stale: "fail",
+  enforcement: "required",
+  measure: async (root) => measureAdrRows(root),
+  help: [
+    "An ADR points at the home of an invariant or symbol instead of copying it (ADR-0037 Decision 7): name the artifact or file that owns it, not its INV id, constant or field path.",
+    "An in-file definition bullet (`- **INV-A** \u2014 ...`) is exempt; a count below its baseline row must be lowered in the same PR.",
+    "To find the hit, run findHits(file, text, avoidTerms) over the named ADR and keep invariant-cite / symbol-cite.",
   ],
 });
 

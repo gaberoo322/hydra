@@ -104,6 +104,10 @@ interface HarnessOptions {
   advanceHandler?: (args: string[]) => Partial<SeamOutcome> | undefined;
   /** The counts a `parked:<arm>` bounce refusal carries (default: none). */
   parkCounts?: CapCount[];
+  /** Whether an `escalated:<arm>` bounce refusal's exit write landed (default: omitted, as a pre-#5662 seam). */
+  exitWritten?: boolean;
+  /** Whether the PR-bodies preflight read succeeds (default: true). */
+  prBodiesReadable?: boolean;
   http?: PlumbingPorts["http"];
   fetchers?: QaVerdictFetchers;
   phase?: PlumbingPorts["phase"];
@@ -132,8 +136,12 @@ function harness(o: HarnessOptions = {}): Harness {
       log.push(["lifecycle", "advance", ...args]);
       const out = seamResult({ rc: 0, code: "", ...(o.advanceHandler?.(args) ?? {}) });
       if (out.ok === true) return { ok: true, to: lane.to };
-      return out.code.startsWith("parked:") ? { ok: false, code: out.code, counts: o.parkCounts ?? [] } : { ok: false, code: out.code };
+      if (out.code.startsWith("escalated:")) {
+        return { ok: false, code: out.code as `escalated:${string}`, counts: o.parkCounts ?? [], ...(o.exitWritten === undefined ? {} : { written: o.exitWritten }) };
+      }
+      return out.code.startsWith("parked:") ? { ok: false, code: out.code as `parked:${string}`, counts: o.parkCounts ?? [] } : { ok: false, code: out.code };
     },
+    prBodiesReadable: async () => o.prBodiesReadable !== false,
     async gh(argv) {
       gh.push(argv);
       if (isWrite(argv)) log.push(argv);
@@ -652,7 +660,6 @@ interface Canned {
   maxSeverity?: string;
   worst?: string;
   trailer?: string;
-  deepQa?: { action: string; failNumber?: number } | null;
   passMarker?: string | null;
   failMarker?: string | null;
   foldThrows?: boolean;
@@ -688,7 +695,6 @@ function cannedPhase(c: Canned): PlumbingPorts["phase"] {
     }
     if (c.roundThrows) throw new Error("round-action down");
     return {
-      deepQa: c.deepQa ?? null,
       passMarker: c.passMarker ?? null,
       failMarker: c.failMarker ?? null,
       degraded: [],
@@ -753,13 +759,13 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
 
   test("route PASS at T4 posts the engine's PASS marker comment only when it is non-empty", async () => {
     const pre = readyPre({ tier: { num: 4, adversarial: true } });
-    const withMarker = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "PASS", passMarker: "MARKER-LINE", deepQa: { action: "proceed" } }) });
+    const withMarker = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "PASS", passMarker: "MARKER-LINE" }) });
     await runRoute(ROUTE_OPTS, pre, withMarker.ports, realDeps());
     const bodies = withMarker.writes().filter((a) => a[1] === "comment").map((a) => argAfter(a, "--body"));
     assert.equal(bodies.length, 2);
     assert.match(bodies[1] ?? "", /^> \*T4 Verifier-Core deep-QA — PASS proof\*\n\nMARKER-LINE\n\n/);
 
-    const without = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "PASS", passMarker: null, deepQa: { action: "proceed" } }) });
+    const without = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "PASS", passMarker: null }) });
     const r = await runRoute(ROUTE_OPTS, pre, without.ports, realDeps());
     assert.equal(without.writes().filter((a) => a[1] === "comment").length, 1, "no marker comment on an empty .passMarker");
     assert.ok(r.degraded.includes("pass-marker"));
@@ -890,17 +896,47 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
     assert.equal(r.nextStep, "none");
   });
 
-  test("route T4 FAIL: disarm, then the PR comment carrying .failMarker, then block-and-escalate or the 1st-fail bounce through the seam", async () => {
+  test("route T4 FAIL: disarm, then the PR comment carrying .failMarker, then the same seam bounce as every FAIL; an escalated refusal posts nothing more", async () => {
     const pre = readyPre({ tier: { num: 4, adversarial: true } });
-    const block = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high", deepQa: { action: "block-and-escalate", failNumber: 2 }, failMarker: "FAIL-MARKER" }) });
-    await runRoute(ROUTE_OPTS, pre, block.ports, realDeps());
-    assert.deepEqual(block.writes().map((a) => `${a[0]} ${a[1]}`), ["pr merge", "pr comment", "lifecycle advance", "issue comment"]);
-    assert.deepEqual(block.advances[0]?.slice(0, 4), ["5269", "ready-for-human", "--reason", "t4-deep-qa-exhausted"]);
-    assert.match(argAfter(block.writes()[1] as string[], "--body") ?? "", /\n\nFAIL-MARKER \(fail #2 on this PR\)\n\n/);
-
-    const bounce = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high", deepQa: { action: "bounce", failNumber: 1 }, failMarker: "FAIL-MARKER" }) });
+    const t4Fail: Canned = { verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high", failMarker: "FAIL-MARKER" };
+    const bounce = harness({ ghHandler: withState("OPEN"), phase: cannedPhase(t4Fail) });
     await runRoute(ROUTE_OPTS, pre, bounce.ports, realDeps());
+    assert.deepEqual(bounce.writes().map((a) => `${a[0]} ${a[1]}`), ["pr merge", "pr comment", "lifecycle advance", "issue comment"]);
+    assert.match(argAfter(bounce.writes()[1] as string[], "--body") ?? "", /\n\nFAIL-MARKER\n\n/);
     assert.deepEqual(bounce.advances, [["5269", "needs-dev-resume", "--evidence", "pr=77", "--actor", "hydra-qa"]]);
+
+    // The seam's deep-qa-fails arm escalated: it wrote ready-for-human and posted the unified comment itself.
+    const escalated = harness({ ghHandler: withState("OPEN"), advanceHandler: refuse("needs-dev-resume", "escalated:deep-qa-fails"), phase: cannedPhase(t4Fail) });
+    await runRoute(ROUTE_OPTS, pre, escalated.ports, realDeps());
+    assert.deepEqual(escalated.writes().map((a) => `${a[0]} ${a[1]}`), ["pr merge", "pr comment", "lifecycle advance"]);
+    assert.deepEqual(escalated.advances.map(advTo), ["needs-dev-resume"], "the route names no ready-for-human advance of its own");
+
+    // Sibling shape: an escalation whose exit write landed stays a quiet success.
+    const landed = harness({ ghHandler: withState("OPEN"), advanceHandler: refuse("needs-dev-resume", "escalated:deep-qa-fails"), exitWritten: true, phase: cannedPhase(t4Fail) });
+    await runRoute(ROUTE_OPTS, pre, landed.ports, realDeps());
+  });
+
+  test("route T4 FAIL: an escalated refusal whose ready-for-human write did NOT land fails loudly, never a silent success", async () => {
+    const pre = readyPre({ tier: { num: 4, adversarial: true } });
+    const t4Fail: Canned = { verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high", failMarker: "FAIL-MARKER" };
+    const lost = harness({ ghHandler: withState("OPEN"), advanceHandler: refuse("needs-dev-resume", "escalated:deep-qa-fails"), exitWritten: false, phase: cannedPhase(t4Fail) });
+    await assert.rejects(runRoute(ROUTE_OPTS, pre, lost.ports, realDeps()), /escalation refused/);
+  });
+
+  test("route T4 FAIL with unreadable PR bodies refuses before ANY side effect: no disarm, no comment, no marker, no bounce", async () => {
+    const pre = readyPre({ tier: { num: 4, adversarial: true } });
+    const t4Fail: Canned = { verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high", failMarker: "FAIL-MARKER" };
+    const unreadable = harness({ ghHandler: withState("OPEN"), prBodiesReadable: false, phase: cannedPhase(t4Fail) });
+    await assert.rejects(runRoute(ROUTE_OPTS, pre, unreadable.ports, realDeps()), /fetch-failed/);
+    assert.deepEqual(unreadable.writes(), [], "nothing written: needs-qa retained, no marker to double-count on retry");
+    assert.deepEqual(unreadable.advances, []);
+  });
+
+  test("sibling shape: a T1-T3 FAIL does not preflight the PR bodies and still bounces", async () => {
+    const t3Fail: Canned = { verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high" };
+    const h = harness({ ghHandler: withState("OPEN"), prBodiesReadable: false, phase: cannedPhase(t3Fail) });
+    await runRoute(ROUTE_OPTS, readyPre(), h.ports, realDeps());
+    assert.equal(h.advances.length, 1);
   });
 
   test("route: PASS-pending-CI posts the pending comment then enters qa-passed through the seam", async () => {
@@ -932,9 +968,9 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
     assert.deepEqual(dry.writes(), []);
   });
 
-  test("route: a T4 FAIL without a deepQa decision still posts the QA-Verdict-Error comment (pre-verdict exit)", async () => {
-    const h = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high", deepQa: null }) });
-    await assert.rejects(runRoute(ROUTE_OPTS, readyPre({ tier: { num: 4, adversarial: true } }), h.ports, realDeps()), /deepQa decision/);
+  test("route: a T4 FAIL without a fail marker still posts the QA-Verdict-Error comment (pre-verdict exit)", async () => {
+    const h = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high", failMarker: null }) });
+    await assert.rejects(runRoute(ROUTE_OPTS, readyPre({ tier: { num: 4, adversarial: true } }), h.ports, realDeps()), /deep-QA fail marker/);
     assert.equal(h.writes().length, 1, "only the error comment; no disarm, no relabel");
     assert.equal(argAfter(h.writes()[0] as string[], "--body"), errorComment);
   });
@@ -1023,7 +1059,7 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
     let n = 0;
     const h = harness({
       ghHandler: (a) => (a[0] === "pr" && a[1] === "comment" && ++n === 2 ? fail("gh: 502") : undefined),
-      phase: cannedPhase({ verdict: "PASS", passMarker: "MARKER", deepQa: { action: "proceed" } }),
+      phase: cannedPhase({ verdict: "PASS", passMarker: "MARKER" }),
     });
     const r = await runRoute(ROUTE_OPTS, readyPre({ tier: { num: 4, adversarial: true } }), h.ports, realDeps());
     assert.equal(r.nextStep, "none");
@@ -1286,20 +1322,21 @@ describe("route golden bodies (posted bytes frozen, issue #5269 INV-7)", () => {
     {
       name: "T4 bounce",
       pre: readyPre({ tier: { num: 4, adversarial: true } }),
-      canned: { ...failCanned, deepQa: { action: "bounce", failNumber: 1 }, failMarker: "Verifier-Core deep-QA: FAIL" },
+      canned: { ...failCanned, failMarker: "Verifier-Core deep-QA: FAIL" },
       state: "OPEN",
       bodies: [
-        `> *Automated QA — T4 Verifier-Core deep review*\n\nREPORT\n\n---\n\n**Verdict:** \`FAIL\` — REASON\n\nVerifier-Core deep-QA: FAIL (fail #1 on this PR)\n\nCHECKS\n\n${TRAILER}`,
-        `> *T4 Deep-QA failed (1st) — bouncing to dev*\n\n\`FAIL\` on PR #77 — ${sum}. Full review on the PR.\n\nReturning to needs-dev-resume for remediation. A second consecutive deep-QA FAIL on this PR will block it and escalate to the operator.\n\n${TRAILER}`,
+        `> *Automated QA — T4 Verifier-Core deep review*\n\nREPORT\n\n---\n\n**Verdict:** \`FAIL\` — REASON\n\nVerifier-Core deep-QA: FAIL\n\nCHECKS\n\n${TRAILER}`,
+        `> *Automated QA failed (open PR)*\n\n\`FAIL\` on PR #77 — ${sum}. Full review on the PR.\n\nRelabelled \`needs-dev-resume\` (not \`ready-for-agent\`) — the PR is still open, so the autopilot's durable resume pin (issue #4518) owns the retry on this branch.\n\n${TRAILER}`,
       ],
     },
     {
-      name: "T4 block",
+      name: "T4 escalate (the seam wrote ready-for-human and commented)",
       pre: readyPre({ tier: { num: 4, adversarial: true } }),
-      canned: { ...failCanned, deepQa: { action: "block-and-escalate", failNumber: 2 }, failMarker: "Verifier-Core deep-QA: FAIL" },
+      advance: (a) => (a[1] === "needs-dev-resume" ? { rc: 1, code: "escalated:deep-qa-fails" } : undefined),
+      canned: { ...failCanned, failMarker: "Verifier-Core deep-QA: FAIL" },
+      state: "OPEN",
       bodies: [
-        `> *Automated QA — T4 Verifier-Core deep review*\n\nREPORT\n\n---\n\n**Verdict:** \`FAIL\` — REASON\n\nVerifier-Core deep-QA: FAIL (fail #2 on this PR)\n\nCHECKS\n\n${TRAILER}`,
-        `> *T4 Deep-QA blocked — operator decision needed*\n\nPR #77 failed the Verifier-Core deep-QA gate **twice consecutively** (fail #2). Per the Deep-QA Remediation Loop the PR is now **blocked** and routed to the operator instead of bouncing again.\n\n\`FAIL\` — ${sum}. Full findings on PR #77 (both passes).\n\nThis issue is now on the \`/hydra-review\` pickup set. Resolve by either fixing the Verifier-Core concern and re-running QA, or closing the PR.\n\n${TRAILER}`,
+        `> *Automated QA — T4 Verifier-Core deep review*\n\nREPORT\n\n---\n\n**Verdict:** \`FAIL\` — REASON\n\nVerifier-Core deep-QA: FAIL\n\nCHECKS\n\n${TRAILER}`,
       ],
     },
     {

@@ -1,9 +1,8 @@
 /**
  * test/test-title-provenance-ratchet.test.mts — blocking shrink-only
- * STD-TEST-OWN-FEATURE ratchet (issue #5511). The live describe is the gate
- * (runs in the REQUIRED `test` job); the pure describe pins the grammar and key
- * semantics over synthetic sources. Fails closed: an unreadable test file or an
- * unparseable fixture FAILS the live test, never skips it.
+ * STD-TEST-OWN-FEATURE ratchet (issue #5511). The live-tree verdict runs in
+ * test/ratchets-live.test.mts (REQUIRED `test` job); this file pins the grammar
+ * and key semantics over synthetic sources.
  *
  * Synthetic sources are assembled from helper calls so this file's own source
  * never contains a grammar match as a title or comment.
@@ -19,7 +18,6 @@ const {
   matchesProvenance,
   normaliseText,
   scanSource,
-  provenanceRatchet,
   scanTestFiles,
 } = await import("../scripts/ci/test-title-provenance-scan.ts");
 
@@ -115,13 +113,7 @@ describe("test-title-provenance: key and diff semantics", () => {
   });
 });
 
-describe("test-title-provenance: live tree vs committed baseline", () => {
-  test("no new QA-history title/comment hits (fails closed on read or fixture error)", async () => {
-    const v = await provenanceRatchet.verdict();
-    assert.equal(v.ok, true, v.advice);
-    assert.equal(v.added.length, 0, v.advice);
-  });
-
+describe("test-title-provenance: scan errors", () => {
   test("an unreadable file is a scan error, not a skip", async () => {
     const scan = await scanTestFiles(["test/definitely-missing.test.mts"]);
     assert.equal(scan.ok, false);
