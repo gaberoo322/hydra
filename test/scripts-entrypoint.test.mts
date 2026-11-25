@@ -68,6 +68,14 @@ test("isEntrypoint is false when argv[1] is undefined", () => {
   assert.equal(r.stdout.trim(), "false");
 });
 
+test("isEntrypoint returns false (logged, no throw) when argv[1] does not resolve", () => {
+  const code = `import { isEntrypoint } from ${JSON.stringify(MODULE_URL)};console.log(String(isEntrypoint("file:///x.mjs")));`;
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", code, "/nonexistent-dir-5728/x.mjs"], { encoding: "utf8" });
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout.trim(), "false");
+  assert.match(r.stderr, /cannot resolve argv\[1\]/);
+});
+
 test("scripts/qa/_lib.ts re-exports the same predicate semantics", () => {
   assert.equal(qaIsEntrypoint(MODULE_URL), false);
   assert.equal(qaIsEntrypoint(import.meta.url), isEntrypoint(import.meta.url));
