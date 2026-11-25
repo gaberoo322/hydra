@@ -6,6 +6,7 @@
  * scripts/ci/qa-verdict.ts re-exports the names its consumers import.
  */
 
+import { QA_OWNED_CONTEXTS } from "../github/check-rollup.ts";
 import { isPromptOnlyChange } from "./change-shape.ts";
 import type { FinalVerdict } from "./verdict-trailer.ts";
 
@@ -130,6 +131,10 @@ function isFailure(c: CheckState): boolean {
  * timed_out, action_required, startup_failure, stale, …). Returns the names
  * in input order.
  *
+ * QA-owned contexts (`QA_OWNED_CONTEXTS`, #5716) are excluded: a red
+ * `deep-qa-gate` is the absence of the Deep-QA PASS marker this review would
+ * post, not a CI failure, so counting it deadlocks every T4 PR.
+ *
  * Every consumer derives from this helper: `classifyVerdict`'s
  * `requiredFailed` count and FAIL reason, and the hydra-qa playbook's
  * `RED_REQUIRED_LIST` (the names quoted in bounce comments and the
@@ -139,7 +144,7 @@ function isFailure(c: CheckState): boolean {
  */
 export function redRequiredChecks(checks: readonly CheckState[]): string[] {
   return checks
-    .filter((c) => (c.required ?? false) && isFailure(c))
+    .filter((c) => (c.required ?? false) && isFailure(c) && !QA_OWNED_CONTEXTS.has(c.name))
     .map((c) => c.name);
 }
 
@@ -552,8 +557,11 @@ export function renderCiSummary(result: VerdictResult): string {
       redRequiredChecks([
         { name: c.name, status: c.status, conclusion: c.conclusion === "—" ? null : c.conclusion, required: true },
       ]).length > 0;
+    const qaOwnedRed = !isRed && QA_OWNED_CONTEXTS.has(c.name) && isFailure({ ...c, conclusion: c.conclusion === "—" ? null : c.conclusion });
     const entry = isRed
       ? { state: 2 as const, label: `\`${c.name}\` (${c.conclusion})` }
+      : qaOwnedRed
+        ? { state: 1 as const, label: `\`${c.name}\` (awaiting Deep-QA PASS marker)` }
       : PENDING_STATUSES.has(c.status)
         ? { state: 1 as const, label: `\`${c.name}\` (pending)` }
         : { state: 0 as const, label: "" };
