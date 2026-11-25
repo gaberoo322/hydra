@@ -245,11 +245,11 @@ double-file the same finding:
 # `architecture-scan`); cleanup_orch (label `cleanup-scan`) co-fires too. All
 # three plus generic `enhancement` belong in the baseline so discover sees what
 # architecture-scan / cleanup just filed THIS idle window.
-# Temp-file form (no process substitution): worktree guard
+# Temp-file form: worktree guard
 # refuses `mapfile -t X < <(...)`. See "Guard-compatible shell forms" in
 # _fragments/hydra-dev-parent-flow.md.
 BASELINE_TMP=$(mktemp)
-trap 'rm -f "$BASELINE_TMP"' EXIT
+trap 'rm -f $BASELINE_TMP' EXIT
 bash scripts/ci/backfill-dedup-baseline.sh > "$BASELINE_TMP" || exit
 mapfile -t BASELINE_TITLES < "$BASELINE_TMP"
 
