@@ -1,0 +1,1 @@
+- ci: count invariant and symbol copies in ADRs against a shrink-only baseline (#5682)

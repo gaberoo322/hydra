@@ -296,6 +296,16 @@ async function fetchBlockerRefs(repo: string, refs: number[]): Promise<Fetched<B
 }
 
 /**
+ * Fold a raw `statusCheckRollup` to the one verdict the `qa-passed` exit reads.
+ * The single home of that fold: `fetchQaLive` calls it and the tests exercise
+ * it directly, so a drift here fails them.
+ */
+export function foldQaLiveChecks(rawRollup: unknown, required: readonly string[]): QaLivePr["checks"] {
+  const fold = foldRollup(parseRollupEntries(rawRollup), { required });
+  return !isSettled(fold) ? "pending" : isRed(fold) ? "red" : "green";
+}
+
+/**
  * A PR read live at head for the `qa-passed` exit decision: state, draft,
  * `mergeStateStatus`, head sha, the REQUIRED checks folded to one verdict, and
  * the comment + review bodies (they carry the `QA-Verdict:` trailers). Required
@@ -314,8 +324,7 @@ async function fetchQaLive(repo: string, prNumber: number): Promise<Fetched<QaLi
     const required = await listRequiredStatusContextsOrNull("lifecycle", { repo });
     let checks: QaLivePr["checks"] = "unknown";
     if (required !== null) {
-      const fold = foldRollup(parseRollupEntries(d.statusCheckRollup), { required });
-      checks = !isSettled(fold) ? "pending" : isRed(fold) ? "red" : "green";
+      checks = foldQaLiveChecks(d.statusCheckRollup, required);
     }
     const bodies = (list: unknown): string[] =>
       Array.isArray(list) ? list.map((c) => String((c as { body?: unknown } | null)?.body ?? "")) : [];

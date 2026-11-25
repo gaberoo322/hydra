@@ -1,0 +1,1 @@
+- fix: remove hardcoded falseCompletionRate/anchoredRate/verifiedCompletionRate from the metrics stats payload (#5729)

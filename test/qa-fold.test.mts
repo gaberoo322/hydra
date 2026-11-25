@@ -426,7 +426,7 @@ describe("advisory hardening from PR #4752 QA r1", () => {
     ];
     assert.equal(
       renderCiSummary(classifyVerdict("PASS", checks)),
-      "**CI:** 1/3 required checks green. Not green: `deep-qa-gate` (failure), `tier-gate` (pending).",
+      "**CI:** 1/3 required checks green. Not green: `deep-qa-gate` (awaiting Deep-QA PASS marker), `tier-gate` (pending).",
     );
   });
 });

@@ -15,8 +15,8 @@
  * The closing-ref parser and the reconcile dry-run are the CI ones (imported,
  * never re-implemented).
  */
+import { isEntrypoint } from "./lib/entrypoint.mjs";
 import { readFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
 import { ghExec, ghJson } from "../src/github/gh.ts";
 import { extractAnchorRefFromPrBody } from "./ci/design-concept-reconcile-check.ts";
 import {
@@ -159,9 +159,8 @@ export async function main(argv: readonly string[]): Promise<number> {
   return result.ok ? 0 : 1;
 }
 
-const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
 
-if (isMain) {
+if (isEntrypoint(import.meta.url)) {
   const { closeRedisConnections } = await import("../src/redis/connection.ts");
   const code = await main(process.argv.slice(2));
   await closeRedisConnections();

@@ -47,6 +47,7 @@
  * `await import()`ed inside the guard so the static graph gains no
  * ioredis/pino edge.
  */
+import { isEntrypoint } from "../lib/entrypoint.mjs";
 
 export {
   compareMergeDanger,
@@ -107,22 +108,8 @@ export type {
 // CLI (issue #5080) — runs only when this file is the entrypoint.
 // ---------------------------------------------------------------------------
 
-const isMain = (() => {
-  try {
-    return (
-      typeof process !== "undefined" &&
-      Array.isArray(process.argv) &&
-      typeof import.meta.url === "string" &&
-      process.argv[1] !== undefined &&
-      import.meta.url === `file://${process.argv[1]}`
-    );
-  } catch {
-    /* intentional: import.meta may be unavailable under some loaders; treat as not-main */
-    return false;
-  }
-})();
 
-if (isMain) {
+if (isEntrypoint(import.meta.url)) {
   const code = await (async (): Promise<number> => {
     const { readFileSync } = await import("node:fs");
     const { QA_VERDICT_PHASES, QaVerdictCliSchemas } = await import(

@@ -56,6 +56,7 @@
 
 import { deriveBoardState } from "../board-state.ts";
 import { ORCH_BOARD_LABELS } from "../../board-labels.ts";
+import { isZeroStateExempt } from "../../github/blockers.ts";
 import { parseIssueRows } from "../../github/issues.ts";
 import { DEGRADE, type Classified, type DegradeReason, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import { parseJsonRead, type GhJsonRead, type TurnSnapshotGithub } from "./github-port.ts";
@@ -211,14 +212,13 @@ export const UNTRIAGED_ORPHAN_EXCLUDED_LABELS: readonly string[] = [
 ];
 
 /**
- * `wayfinder:*` tickets carry no lifecycle label BY DESIGN (they dispatch via
- * `wayfinder_orch_frontier`), so the family is dropped by PREFIX (#3728) — a
- * future ticket type is covered by construction; an issue with genuinely no
- * labels still matches neither test and stays counted.
+ * The untriaged-orphan count over `number,labels,body` rows, or `null` when the
+ * read failed. Besides the exclusion labels, an issue the zero-state backstop
+ * deliberately leaves stateless ({@link isZeroStateExempt}: `wayfinder:*` by
+ * PREFIX (#3728), `keep-open`, or a body declaring `## Sub-issues` children) is
+ * not an orphan — reconcile and the sweep never relabel it, so counting it
+ * would fire sweep_orch forever. A missing / non-string body reads as `""`.
  */
-const WAYFINDER_LABEL_PREFIX = "wayfinder:";
-
-/** The untriaged-orphan count over `number,labels` rows, or `null` when the read failed. */
 export function countUntriagedOrphans(read: GhJsonRead): number | null {
   if (read.kind !== "ok" || !Array.isArray(read.data)) return null;
   const excluded = new Set(UNTRIAGED_ORPHAN_EXCLUDED_LABELS);
@@ -229,7 +229,8 @@ export function countUntriagedOrphans(read: GhJsonRead): number | null {
       .map((l) => (l !== null && typeof l === "object" ? (l as { name?: unknown }).name : undefined))
       .filter((n): n is string => typeof n === "string");
     if (names.some((n) => excluded.has(n))) continue;
-    if (names.some((n) => n.startsWith(WAYFINDER_LABEL_PREFIX))) continue;
+    const rawBody = issue !== null && typeof issue === "object" ? (issue as { body?: unknown }).body : undefined;
+    if (isZeroStateExempt({ labels: names, body: typeof rawBody === "string" ? rawBody : "" })) continue;
     count++;
   }
   return count;
@@ -288,13 +289,13 @@ export async function collectOrchBoard(deps: OrchBoardDeps): Promise<CollectorOu
 }
 
 export interface OrchLaneDeps {
-  readonly github: Pick<TurnSnapshotGithub, "listOpenIssueLabelRows" | "openIssueNumbersByLabel">;
+  readonly github: Pick<TurnSnapshotGithub, "listOpenIssueLabelBodyRows" | "openIssueNumbersByLabel">;
   readonly ghListLimit: number;
 }
 
 /** The untriaged-orphan backstop count; a failed read is degraded (rendered `0`). */
 export async function collectUntriagedOrphans(deps: OrchLaneDeps): Promise<CollectorOutcome<Classified<number>>> {
-  const count = countUntriagedOrphans(await deps.github.listOpenIssueLabelRows(deps.ghListLimit));
+  const count = countUntriagedOrphans(await deps.github.listOpenIssueLabelBodyRows(deps.ghListLimit));
   const value: Classified<number> = count === null ? { ok: false, reason: DEGRADE.READ_FAILED } : { ok: true, value: count };
   return {
     collector: UNTRIAGED_ORPHANS_COLLECTOR,

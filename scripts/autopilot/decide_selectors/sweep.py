@@ -124,6 +124,9 @@ def _triage_item_eligible(stamp: int, now: int, backoff_sec: int) -> bool:
     drift risk if forked — while tuning independently (issue #3939 INV-10: the
     guard is shared, not forked). Pure (INV-13).
     """
+    # A stamp carried across a Pace Gate relaunch (run_ledger CARRY rows, #5717)
+    # is not age-pruned at seed: one older than the backoff lands here and reads
+    # as eligible, exactly like an absent stamp.
     if stamp <= 0:
         return True
     return (now - stamp) >= backoff_sec

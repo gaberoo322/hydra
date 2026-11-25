@@ -37,16 +37,20 @@
  * around elsewhere (`reference_npm_audit_required_check_ambient_poison_pill`).
  */
 
+import { isEntrypoint } from "../lib/entrypoint.mjs";
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { resolve, join, sep } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import {
   checkReconciliation,
   extractAnchorRefFromPrBody,
+  extractReconciliationSection,
+  findUntouchedModules,
   formatViolations,
   isSafeRepoRelativePath,
   resolveEnforceDecision,
   type FileReader,
+  type ModulesAdvisory,
 } from "./design-concept-reconcile-check.ts";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("../..", import.meta.url)));
@@ -70,7 +74,7 @@ export function makeRepoFileReader(repoRoot: string = REPO_ROOT): FileReader {
 export type ReconcileRunResult =
   /** Nothing to enforce — always exit 0. `why` is logged, never thrown. */
   | { outcome: "skip"; why: string }
-  | { outcome: "pass"; anchorRef: number }
+  | { outcome: "pass"; anchorRef: number; advisories?: ModulesAdvisory[] }
   | { outcome: "violation"; anchorRef: number; message: string };
 
 export type RunDeps = {
@@ -79,6 +83,11 @@ export type RunDeps = {
   /** Artifact fetch. Resolves `{status, body}`; rejects only on transport failure. */
   fetchArtifact: (anchorRef: number) => Promise<{ status: number; body: any }>;
   readFile: FileReader;
+  /**
+   * Optional (#5727): the PR's changed-file paths, or null on any failure. Absent
+   * or null skips the advisory modulesTouched arm; it never alters the verdict.
+   */
+  fetchChangedFiles?: (prNumber: number) => Promise<string[] | null>;
 };
 
 /**
@@ -138,8 +147,65 @@ export async function runReconcileCheck(deps: RunDeps): Promise<ReconcileRunResu
     artifactHash: artifact.artifactHash,
     readFile: deps.readFile,
   });
-  if (violations.length === 0) return { outcome: "pass", anchorRef };
+  if (violations.length === 0) {
+    const advisories = await collectAdvisories(deps, payload.pull_request.number, artifact, prBody);
+    return advisories.length > 0 ? { outcome: "pass", anchorRef, advisories } : { outcome: "pass", anchorRef };
+  }
   return { outcome: "violation", anchorRef, message: formatViolations(violations, anchorRef) };
+}
+
+/** Advisory modulesTouched arm (#5727). Fail-open: any failure yields no findings. */
+async function collectAdvisories(
+  deps: RunDeps,
+  prNumber: unknown,
+  artifact: any,
+  prBody: string,
+): Promise<ModulesAdvisory[]> {
+  if (!deps.fetchChangedFiles || typeof prNumber !== "number") return [];
+  try {
+    const files = await deps.fetchChangedFiles(prNumber);
+    if (files === null) return [];
+    return findUntouchedModules(artifact.modulesTouched, files, extractReconciliationSection(prBody));
+  } catch (err: any) {
+    console.error(`[dc-reconcile] advisory modulesTouched arm skipped: ${err?.message ?? err}`);
+    return [];
+  }
+}
+
+/** REST `pulls/:n/files` (paginated). Null on a missing token, non-2xx or transport failure. */
+export async function fetchPrChangedFiles(
+  prNumber: number,
+  env: NodeJS.ProcessEnv = process.env,
+  fetchImpl: typeof fetch = fetch,
+): Promise<string[] | null> {
+  const repo = env.GITHUB_REPOSITORY;
+  const token = env.GITHUB_TOKEN;
+  if (!repo || !token) {
+    console.error("[dc-reconcile] changed-file fetch skipped: no GITHUB_REPOSITORY/GITHUB_TOKEN");
+    return null;
+  }
+  const api = (env.GITHUB_API_URL ?? "https://api.github.com").replace(/\/$/, "");
+  const files: string[] = [];
+  try {
+    for (let page = 1; page <= 30; page++) {
+      const res = await fetchImpl(`${api}/repos/${repo}/pulls/${prNumber}/files?per_page=100&page=${page}`, {
+        headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" },
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!res.ok) {
+        console.error(`[dc-reconcile] changed-file fetch returned HTTP ${res.status}`);
+        return null;
+      }
+      const batch: any = await res.json();
+      if (!Array.isArray(batch)) return null;
+      for (const f of batch) if (typeof f?.filename === "string") files.push(f.filename);
+      if (batch.length < 100) return files;
+    }
+    return null; // over 3000 files: an incomplete list would false-positive
+  } catch (err: any) {
+    console.error(`[dc-reconcile] changed-file fetch failed: ${err?.message ?? err}`);
+    return null;
+  }
 }
 
 /** Default deps: real webhook payload + real orchestrator + real repo files. */
@@ -165,6 +231,7 @@ export function defaultDeps(env: NodeJS.ProcessEnv = process.env): RunDeps {
       return { status: res.status, body };
     },
     readFile: makeRepoFileReader(),
+    fetchChangedFiles: (prNumber) => fetchPrChangedFiles(prNumber, env),
   };
 }
 
@@ -256,6 +323,9 @@ function report(result: ReconcileRunResult, mode: "ci" | "local"): number {
     return 0;
   }
   if (result.outcome === "pass") {
+    for (const a of result.advisories ?? []) {
+      console.error(`::warning title=${a.code}::${a.message}`);
+    }
     console.error(`${tag} OK — issue #${result.anchorRef} reconciled`);
     return 0;
   }
@@ -263,10 +333,8 @@ function report(result: ReconcileRunResult, mode: "ci" | "local"): number {
   return 1;
 }
 
-const isMain =
-  process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
 
-if (isMain) {
+if (isEntrypoint(import.meta.url)) {
   const args = parseLocalArgs(process.argv.slice(2));
   if (args.kind === "error") {
     console.error(`[dc-reconcile:dry-run] ${args.message}`);

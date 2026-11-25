@@ -1061,6 +1061,57 @@ export function formatViolations(violations: Violation[], anchorRef?: number): s
   return head + body + tail;
 }
 
+/** Advisory finding: an approved artifact lists a module the PR never touches. */
+export type ModulesAdvisory = {
+  code: "modules-touched-untouched";
+  path: string;
+  message: string;
+};
+
+/** Collect the paths named by `Deviation: <path> - <reason>` lines (non-empty reason). */
+function declaredDeviationPaths(section: string | null): Set<string> {
+  const out = new Set<string>();
+  for (const line of (section ?? "").split(/\r?\n/)) {
+    const m = /^\s*(?:[-*]\s+)?Deviation:\s*`?([^\s`]+)`?\s+[-–—]\s+(\S.*)$/.exec(line);
+    if (m) out.add(m[1]);
+  }
+  return out;
+}
+
+/**
+ * Advisory arm (issue #5727): report every artifact `modulesTouched` path the PR
+ * does not change and does not declare a deviation for. Pure, never throws, and
+ * NEVER part of `checkReconciliation`'s Violation[] — it cannot change a verdict.
+ * A trailing-`/` entry prefix-matches the changed set; an entry whose last
+ * segment has no dot (and no trailing slash) is ambiguous and skipped.
+ */
+export function findUntouchedModules(
+  modulesTouched: ReadonlyArray<{ path?: unknown }> | null | undefined,
+  changedFiles: ReadonlyArray<string> | null | undefined,
+  section: string | null,
+): ModulesAdvisory[] {
+  if (!Array.isArray(modulesTouched) || !Array.isArray(changedFiles)) return [];
+  const deviations = declaredDeviationPaths(section);
+  const findings: ModulesAdvisory[] = [];
+  for (const m of modulesTouched) {
+    const path = typeof m?.path === "string" ? m.path.trim() : "";
+    if (path === "") continue;
+    const isDir = path.endsWith("/");
+    const last = path.split("/").pop() ?? "";
+    if (!isDir && !last.includes(".")) continue;
+    const touched = isDir ? changedFiles.some((f) => f.startsWith(path)) : changedFiles.includes(path);
+    if (touched || deviations.has(path)) continue;
+    findings.push({
+      code: "modules-touched-untouched",
+      path,
+      message:
+        `artifact modulesTouched lists ${path} but the PR does not change it; amend the artifact or add ` +
+        `"Deviation: ${path} - <reason>" to the reconciliation section.`,
+    });
+  }
+  return findings;
+}
+
 /**
  * Verdict from the live adapter's fail-OPEN skip ladder for a RESOLVED artifact
  * (HTTP 200, body parsed). `enforce: false` + a bare `reason` for every skip;

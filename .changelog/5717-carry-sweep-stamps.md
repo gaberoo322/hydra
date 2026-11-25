@@ -1,0 +1,1 @@
+- fix: carry the sweep per-item triage stamps across Pace Gate relaunches so an idle board stops re-dispatching sweep_orch every run (#5717)

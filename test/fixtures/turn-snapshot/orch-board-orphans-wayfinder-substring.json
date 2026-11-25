@@ -29,7 +29,7 @@
         "--limit",
         "100",
         "--json",
-        "number,labels",
+        "number,labels,body",
         "--jq",
         "\n  [ .[]\n    | select(\n        (.labels | map(.name)) as $n\n        | ([ \"ready-for-agent\", \"in-progress\", \"blocked\", \"needs-qa\",\n             \"needs-triage\", \"needs-research\", \"target-backlog\",\n             \"ready-for-human\", \"needs-info\", \"needs-tickets\",\n             \"hitl-grill\", \"needs-dev-resume\" ]\n           | any(. as $lbl | $n | index($lbl))) | not\n      )\n    | select((.labels | map(.name) | any(.[]; startswith(\"wayfinder:\"))) | not)\n  ] | length"
       ],

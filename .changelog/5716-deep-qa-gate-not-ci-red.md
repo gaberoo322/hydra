@@ -1,0 +1,1 @@
+- fix: stop counting a red deep-qa-gate as a CI failure so T4 PRs get reviewed and no longer burn forward-fix dispatches (#5716)

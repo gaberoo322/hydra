@@ -12,7 +12,8 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const {
@@ -24,6 +25,10 @@ const {
   measureRows,
   vocabularyRatchet,
   scanRepo,
+  ADR_SHAPES,
+  listAdrs,
+  measureAdrRows,
+  adrVocabularyRatchet,
 } = await import("../scripts/ci/playbook-vocabulary-ratchet.ts");
 const { REPO_ROOT } = await import("../scripts/ci/seam-check-lib.ts");
 
@@ -93,10 +98,10 @@ describe("playbook-vocabulary-ratchet: each banned shape is detected", () => {
 
 describe("playbook-vocabulary-ratchet: the Historical: exemption", () => {
   test("a line marked Historical: is exempt from every shape", () => {
-    const body = "not yet at src/gate.ts:42 in hydra-betting, the Untouchable Core, see #1945, kept for legacy, EMIT_CAP, INV-9, tracked as a follow-up";
+    const body = "not yet at src/gate.ts:42 in hydra-betting, the Untouchable Core, see #1945, kept for legacy, six EMIT_CAP, INV-9, tracked as a follow-up, Step 0.6";
     assert.deepEqual(
       new Set(findHits(PB, body, AVOID).map((h: { shape: string }) => h.shape)),
-      new Set(SHAPES.filter((s: string) => s !== "shell-lines")),
+      new Set(SHAPES.filter((s: string) => s !== "shell-lines" && s !== "mktemp-no-trap")),
     );
     assert.deepEqual(hits(`Historical: ${body}`), []);
   });
@@ -240,7 +245,7 @@ describe("playbook-vocabulary-ratchet: issue-cite, back-compat and shell-lines s
 
   test("new shapes sit after the original four so existing hit order is unchanged", () => {
     assert.deepEqual(SHAPES.slice(0, 4), ["status", "line-cite", "target", "avoid-term"]);
-    assert.deepEqual(SHAPES.slice(4), ["issue-cite", "back-compat", "shell-lines", "symbol-cite", "invariant-cite", "process-meta"]);
+    assert.deepEqual(SHAPES.slice(4), ["issue-cite", "back-compat", "shell-lines", "symbol-cite", "invariant-cite", "process-meta", "step-cite", "mktemp-no-trap", "count-before-const"]);
   });
 });
 
@@ -344,5 +349,145 @@ describe("playbook-vocabulary-ratchet: the real playbooks", () => {
   test("the standard the report points at defines the playbook rules", () => {
     const standard = readFileSync(join(REPO_ROOT, STANDARD_REL), "utf8");
     assert.match(standard, /^### STD-PLAYBOOK-CURRENT-BEHAVIOUR$/m);
+  });
+});
+
+describe("playbook-vocabulary-ratchet: the mktemp-no-trap shape", () => {
+  const mk = (text: string): string[] => hits(text, "mktemp-no-trap");
+
+  test("a mktemp call in a fenced shell block with no trap is one hit per call", () => {
+    assert.deepEqual(
+      mk(["```bash", 'A=$(mktemp)', 'run > "$A" || exit', 'rm -f "$A"', 'B=$(mktemp -d)', "```"].join("\n")),
+      ["2 mktemp-no-trap mktemp", "5 mktemp-no-trap mktemp"],
+    );
+  });
+
+  test("a trap anywhere in the same block discharges every mktemp, including mktemp -d", () => {
+    assert.deepEqual(mk(["```bash", 'A=$(mktemp -d)', "trap 'rm -rf \"$A\"' EXIT", "```"].join("\n")), []);
+    assert.deepEqual(mk(["```sh", "trap 'rm -f \"$A\"' EXIT", 'A=$(mktemp)', "```"].join("\n")), []);
+  });
+
+  test("a trap in another block does not discharge this block", () => {
+    assert.deepEqual(
+      mk(["```bash", "trap true EXIT", "```", "", "```bash", "A=$(mktemp)", "```"].join("\n")),
+      ["6 mktemp-no-trap mktemp"],
+    );
+  });
+
+  test("prose, non-shell fences and a Historical: line are silent", () => {
+    assert.deepEqual(mk("Use mktemp for scratch files."), []);
+    assert.deepEqual(mk(["```text", "A=$(mktemp)", "```"].join("\n")), []);
+    assert.deepEqual(mk(["```bash", "Historical: A=$(mktemp)", "```"].join("\n")), []);
+  });
+});
+
+describe("playbook-vocabulary-ratchet: the count-before-const shape", () => {
+  const cnt = (text: string): string[] => hits(text, "count-before-const");
+
+  test("a cardinal word or digit run before a constant, with or without a backtick, is a hit", () => {
+    assert.deepEqual(cnt("the six `VERIFIER_CORE_PATHS` files, Two EMIT_CAP rows and 12 `SOME_LIST`."), [
+      "1 count-before-const six `VERIFIER_CORE_PATHS",
+      "1 count-before-const Two EMIT_CAP",
+      "1 count-before-const 12 `SOME_LIST",
+    ]);
+  });
+
+  test("a filename stem, a one-segment constant and a #NNNN digit run are silent", () => {
+    assert.deepEqual(cnt("one CONTEXT.md, see 4729 E2BIG, per #4729 EMIT_CAP and one HTTP OK."), []);
+  });
+
+  test("a fenced block and a Historical: line are skipped", () => {
+    assert.deepEqual(cnt(["```text", "six EMIT_CAP", "```"].join("\n")), []);
+    assert.deepEqual(cnt("Historical: six EMIT_CAP"), []);
+  });
+});
+
+describe("playbook-vocabulary-ratchet: the step-cite shape", () => {
+  const step = (text: string): string[] => hits(text, "step-cite");
+
+  test("counts dotted, lettered, child- and parent- step cites and gate cites", () => {
+    assert.deepEqual(step("Run it as child-step 7a, then Step 0.6 and parent-step 2.\nSame body file as Gate 1."), [
+      "1 step-cite child-step 7a",
+      "1 step-cite Step 0.6",
+      "1 step-cite parent-step 2",
+      "2 step-cite Gate 1",
+    ]);
+  });
+
+  test("a heading or definition opener is exempt by token; the rest of the line still counts", () => {
+    assert.deepEqual(step("## Step 0.0: Resolve the Target seam\n### Gate 1 \u2014 reconcile\n- **Step 3.5**: scope\n2. Gate 4: the last"), []);
+    assert.deepEqual(step("**Step 3.5's scope and Step 4.5's artifact**"), ["1 step-cite Step 4.5"]);
+  });
+
+  test("fenced lines count, and a Historical: line is exempt", () => {
+    assert.deepEqual(step(["```bash", 'echo "ABORT: see Step 0.6"', "```"].join("\n")), ["2 step-cite Step 0.6"]);
+    assert.deepEqual(step("Historical: Step 4.5 used to run first"), []);
+  });
+
+  test("a bare word 'step' or 'Steps' is not a hit", () => {
+    assert.deepEqual(step("Take the next step. Steps 1 and 2 follow."), []);
+  });
+});
+
+describe("playbook-vocabulary-ratchet: the ADR corpus", () => {
+  test("the ADR policy is a separate required ceiling with its own baseline", () => {
+    assert.equal(adrVocabularyRatchet.policy.id, "adr-vocabulary-ratchet");
+    assert.match(adrVocabularyRatchet.policy.baseline, /^scripts\/ci\/adr-vocabulary-baseline\.json$/);
+    assert.equal(adrVocabularyRatchet.policy.polarity, "ceiling");
+    assert.equal(adrVocabularyRatchet.policy.enforcement, "required");
+    assert.notEqual(adrVocabularyRatchet.policy.baseline, vocabularyRatchet.policy.baseline);
+  });
+
+  test("the corpus is the numbered ADR files, never README.md", () => {
+    const files = listAdrs();
+    assert.ok(files.length > 0);
+    for (const f of files) assert.match(f, /^docs\/adr\/\d{4}-[^/]+\.md$/);
+    assert.ok(!files.some((f) => f.endsWith("README.md")));
+  });
+
+  test("measured rows are nonempty and carry only invariant-cite and symbol-cite", () => {
+    const keys = Object.keys(measureAdrRows());
+    assert.ok(keys.length > 0);
+    for (const key of keys) {
+      assert.ok((ADR_SHAPES as readonly string[]).includes(key.split("\t")[1]), key);
+    }
+  });
+
+  test("a synthetic ADR yields only invariant-cite and symbol-cite rows, README excluded", () => {
+    const root = mkdtempSync(join(tmpdir(), "adr-vocab-"));
+    try {
+      mkdirSync(join(root, "docs/adr"), { recursive: true });
+      writeFileSync(join(root, "CONTEXT.md"), "");
+      writeFileSync(
+        join(root, "docs/adr/0001-x.md"),
+        "# X\n\nSee INV-3 here. It uses `MAX_RETRY_LIMIT` and currently works. Fixed in #123.\n",
+      );
+      writeFileSync(join(root, "docs/adr/README.md"), "INV-4 and `OTHER_CONST_NAME`\n");
+      assert.deepEqual(listAdrs(root), ["docs/adr/0001-x.md"]);
+      const rows = measureAdrRows(root);
+      assert.deepEqual(Object.keys(rows).sort(), [
+        "docs/adr/0001-x.md\tinvariant-cite",
+        "docs/adr/0001-x.md\tsymbol-cite",
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the help text cites ADR-0037", () => {
+    assert.ok(adrVocabularyRatchet.policy.help.some((l: string) => l.includes("ADR-0037")));
+  });
+
+  test("baseline keys are <adr path>\\t<shape> with only the two ADR shapes", () => {
+    const base = JSON.parse(readFileSync(join(process.cwd(), adrVocabularyRatchet.policy.baseline), "utf8"));
+    const rows = base.rows ?? base;
+    const keys = Object.keys(rows);
+    assert.ok(keys.length > 0);
+    for (const k of keys) assert.match(k, /^docs\/adr\/\d{4}-[^\t]+\.md\t(invariant-cite|symbol-cite)$/);
+  });
+
+  test("the live ADR tree is within its baseline", async () => {
+    const v = await adrVocabularyRatchet.verdict();
+    assert.equal(v.ok, true, JSON.stringify(v));
   });
 });

@@ -25,6 +25,7 @@ import {
 } from "../src/lifecycle/reconcile.ts";
 import { externalMoves, lastKnownState, replayStateSnapshots } from "../src/lifecycle/timeline.ts";
 import { classifyQaPassedExit, type QaLivePr } from "../src/lifecycle/gates.ts";
+import { foldQaLiveChecks } from "../src/lifecycle/seam-deps.ts";
 import { findTransition } from "../src/lifecycle/transitions.ts";
 import type { LifecycleJournalEntry } from "../src/redis/lifecycle-journal.ts";
 
@@ -294,6 +295,27 @@ describe("qa-passed exits (INV-3, INV-4, INV-13)", () => {
     assert.equal(classifyQaPassedExit(live({ checks: "pending" })), "none");
     assert.equal(classifyQaPassedExit(live({ checks: "unknown" })), "none");
     assert.equal(classifyQaPassedExit(live({ isDraft: true, checks: "red" })), "none");
+  });
+
+  test("a red deep-qa-gate folds green for the qa-passed exit; a red CI check still folds red", () => {
+    const required = ["test", "deep-qa-gate"];
+    const done = "2026-11-04T08:00:00Z";
+    // The seam's own fold (the one fetchQaLive calls), fed raw gh rollup entries.
+    const foldChecks = (rollup: Array<{ name: string; conclusion: string; completedAt: string }>): QaLivePr["checks"] =>
+      foldQaLiveChecks(rollup.map((r) => ({ ...r, status: "COMPLETED" })), required);
+    const gateOnly = foldChecks([
+      { name: "test", conclusion: "SUCCESS", completedAt: done },
+      { name: "deep-qa-gate", conclusion: "FAILURE", completedAt: done },
+    ]);
+    assert.equal(gateOnly, "green");
+    assert.equal(classifyQaPassedExit(live({ checks: gateOnly })), "needs-qa");
+    assert.equal(classifyQaPassedExit(live({ checks: gateOnly, bodies: [PASS_TRAILER(200)] })), "none");
+    const ciRed = foldChecks([
+      { name: "test", conclusion: "FAILURE", completedAt: done },
+      { name: "deep-qa-gate", conclusion: "FAILURE", completedAt: done },
+    ]);
+    assert.equal(ciRed, "red");
+    assert.equal(classifyQaPassedExit(live({ checks: ciRed })), "needs-dev-resume");
   });
 
   test("each qa-passed exit cause routes to its state through the seam with actor reconcile", async () => {

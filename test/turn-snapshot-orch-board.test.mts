@@ -208,6 +208,32 @@ describe("untriaged_orphans exclusion set (#2828, #2958)", () => {
   });
 });
 
+describe("untriaged_orphans zero-state-exempt exclusion (#5718)", () => {
+  const rows = (...issues: { labels: string[]; body?: unknown }[]) =>
+    ok(issues.map((i, idx) => ({ number: idx + 1, labels: i.labels.map((name) => ({ name })), body: i.body })));
+  const EPIC = "## Sub-issues\n\n- #10\n- #11\n";
+
+  test("an enhancement-only epic with declared children counts 0; without the section it counts 1", () => {
+    assert.equal(countUntriagedOrphans(rows({ labels: ["enhancement"], body: EPIC })), 0);
+    assert.equal(countUntriagedOrphans(rows({ labels: ["enhancement"], body: "no section" })), 1);
+    assert.equal(countUntriagedOrphans(rows({ labels: ["enhancement"], body: "## Sub-issues\n\n(none yet)\n" })), 1);
+  });
+
+  test("a keep-open-only row counts 0 (parity with reconcile)", () => {
+    assert.equal(countUntriagedOrphans(rows({ labels: ["keep-open"], body: "" })), 0);
+  });
+
+  test("a missing or non-string body is treated as empty: still counted, never throws", () => {
+    assert.equal(countUntriagedOrphans(rows({ labels: [] }, { labels: [], body: null }, { labels: [], body: 7 })), 3);
+  });
+
+  test("the orphan collector reads the body-bearing rows", async () => {
+    const github = { listOpenIssueLabelBodyRows: async () => rows({ labels: ["enhancement"], body: EPIC }), openIssueNumbersByLabel: async () => ok([]) };
+    const out = await collectUntriagedOrphans({ github, ghListLimit: 100 });
+    assert.deepEqual(out.value, { ok: true, value: 0 });
+  });
+});
+
 describe("untriaged_orphans wayfinder prefix exclusion (#3728)", () => {
   test("an issue labelled only wayfinder:grilling is NOT an untriaged orphan", () => {
     assert.equal(count([{ labels: ["wayfinder:grilling"] }]), "0");
@@ -707,7 +733,7 @@ describe("orch board family — a malformed payload degrades, never throws (#508
 
   MALFORMED_READS.forEach((read, i) => {
     test(`every read malformed (shape #${i}) → the three collectors resolve, each degrading only its own value`, async () => {
-      const github = { listOpenIssueBoardRows: async () => read, openIssueNumbersByLabel: async () => read, listOpenIssueLabelRows: async () => read };
+      const github = { listOpenIssueBoardRows: async () => read, openIssueNumbersByLabel: async () => read, listOpenIssueLabelRows: async () => read, listOpenIssueLabelBodyRows: async () => read };
       for (const body of MALFORMED_BODIES) {
         const board = await collectOrchBoard({ github, hydra: fakeHydra({ orchBoardState: async () => ({ kind: "ok", body }) }), now: () => NOW_MS, ghListLimit: 100 });
         const listShaped = read.kind === "ok" && Array.isArray(read.data);

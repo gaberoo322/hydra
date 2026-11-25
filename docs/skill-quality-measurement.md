@@ -137,11 +137,10 @@ touch.
 2026-07-05 → 2026-07-07):
 - `GET /api/scheduler/status` (2026-07-08): **`mergeRate` = 94%** over the last-50-cycle
   window; `emptyRate` = 6%; `consecutiveErrors` = 0; `lastError` = null.
-- `GET /api/metrics`: `mergedRate` **95%**, `regressionRate` **0%**, `falseCompletionRate`
-  **0%**, `verifiedCompletionRate` **100%** over the recent cycle window.
+- `GET /api/metrics`: `mergedRate` **95%**, `regressionRate` **0%** over the recent cycle window.
 
-No dispatch-quality degradation is attributable to the skill edits: merge/verified-completion
-rates are healthy and regression rate is zero across the cycles since the epic merged. This is
+No dispatch-quality degradation is attributable to the skill edits: merge
+rate is healthy and regression rate is zero across the cycles since the epic merged. This is
 **best-available** evidence (rate trend), **not** a controlled holdback A/B — the skill edits
 were never holdback-enrolled, so a causal "no-harm" claim cannot be made; the observational
 signal is simply that nothing regressed.

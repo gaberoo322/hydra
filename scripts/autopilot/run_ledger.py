@@ -189,6 +189,22 @@ def _norm_zero_yield_backoff(value, ctx):
     return out
 
 
+def _norm_item_stamps(value, ctx):
+    """#5717: the per-item sweep triage stamp maps (issue number -> epoch of the
+    last sweep fire). SHAPE only: keep entries whose key is a decimal-digit string
+    and whose value is an integral number with 0 < v <= now (bool rejected,
+    integral floats floored to int); drop the rest. No backoff-age filter -- the
+    ledger never learns the lanes' backoffs; a stale stamp reads as eligible in
+    sweep._triage_item_eligible and the next fire rebuilds the whole map."""
+    if not isinstance(value, dict):
+        return {}
+    out = {}
+    for k, v in value.items():
+        if isinstance(k, str) and k.isascii() and k.isdigit() and _integral(v) and 0 < v <= ctx["now"]:
+            out[k] = int(v)
+    return out
+
+
 def _norm_signal_last_fired(value, ctx):
     """#2575/#4909: every derived key present; a carried class keeps its prior
     numeric stamp else 0, every other key re-arms to 0."""
@@ -285,6 +301,13 @@ FIELDS = [
         rearm_each_run=("discover_target",),
         pipeline_refire_stamps=("research_target",),
     ),
+    # Per-item sweep triage verdict-stability stamps (#3939/#3729/#5167): carried so
+    # the guard spans a Pace Gate relaunch (#5717). CARRY, not MIRRORED: a reboot
+    # costs at most one extra sweep per lane.
+    _row("target_triage_item_stamps", "object", {}, CARRY, decide_owned=True, normalize=_norm_item_stamps),
+    _row("orch_triage_item_stamps", "object", {}, CARRY, decide_owned=True, normalize=_norm_item_stamps),
+    _row("target_stale_item_stamps", "object", {}, CARRY, decide_owned=True, normalize=_norm_item_stamps),
+    _row("target_blocked_item_stamps", "object", {}, CARRY, decide_owned=True, normalize=_norm_item_stamps),
     # Written by other autopilot scripts after seed (not seeded here).
     _row("turn_snapshot", "object", {}, RESET, seeded=False),
     _row("slot_events", "array|object", [], RESET, seeded=False),
@@ -292,10 +315,6 @@ FIELDS = [
     _row("quota_baseline", "object", {}, RESET, seeded=False, decide_owned=True),
     _row("scout_spend_usd_today", "number", 0, RESET, seeded=False),
     _row("dev_target_resume_inflight", "object", {}, RESET, seeded=False, decide_owned=True),
-    _row("target_triage_item_stamps", "object", {}, RESET, seeded=False, decide_owned=True),
-    _row("orch_triage_item_stamps", "object", {}, RESET, seeded=False, decide_owned=True),
-    _row("target_stale_item_stamps", "object", {}, RESET, seeded=False, decide_owned=True),
-    _row("target_blocked_item_stamps", "object", {}, RESET, seeded=False, decide_owned=True),
     # Last emitted dispatch per class (#5323): the instant-death replay's source.
     _row("last_dispatch_by_class", "object", {}, RESET, seeded=False, decide_owned=True),
     # Typed parent-exception journal (#5323): {cause, turn, source, detail, ts_epoch}.
@@ -341,13 +360,9 @@ DECIDE_OWNED_KEYS = frozenset(f["name"] for f in FIELDS if f["decide_owned"])
 
 _IDENTITY_KEYS = ("pid", "run_id")
 _LIMIT_SEED_KEYS = tuple(f["name"] for f in LIMITS if f["default"] is REQUIRED)
-_CARRY_KEYS = (
-    "research_force_counter",
-    "dev_resume_pending",
-    "zero_yield_backoff",
-    "slots",
-    "signal_last_fired",
-)
+# Derived from FIELDS (every carried, mirrored or orchestrator-seeded row, in
+# FIELDS order) so a new carried row cannot be forgotten here (#5717).
+_CARRY_KEYS = tuple(f["name"] for f in FIELDS if f["carry"] in (CARRY, MIRRORED, SEEDED))
 
 
 def _json_type_name(v):
@@ -778,6 +793,10 @@ def _seed_cmd(rest):
     if carry["zero_yield_backoff"]:
         print("[autopilot] carried zero_yield_backoff forward from prior state: %s (issue #4999)"
               % _compact(carry["zero_yield_backoff"]))
+    for row in FIELDS:
+        if row.get("normalize") is _norm_item_stamps and carry[row["name"]]:
+            print("[autopilot] carried %s forward from prior state: %s (issue #5717)"
+                  % (row["name"], _compact(carry[row["name"]])))
     return 0
 
 

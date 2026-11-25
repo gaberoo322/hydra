@@ -127,9 +127,20 @@ function someStatus(fold: RollupFold, pred: (s: RollupStatus) => boolean): boole
   return false;
 }
 
-/** True iff some context is red. CANCELLED is never red (#4460 INV-4). */
+/**
+ * Required contexts whose RED means "the QA-owned marker is absent", not "CI
+ * failed" (#5716). `deep-qa-gate` is red until hydra-qa posts the Deep-QA PASS
+ * marker, and no dev commit can clear it, so it is the normal pre-review state
+ * on a T4 PR. The ONE home of the name: the red folds that feed dispatch,
+ * admission and the verdict read this set; merge-blocking ({@link blocksMerge},
+ * {@link isSettled}) deliberately does not.
+ */
+export const QA_OWNED_CONTEXTS: ReadonlySet<string> = new Set(["deep-qa-gate"]);
+
+/** True iff some context is red. CANCELLED is never red (#4460 INV-4); QA-owned contexts are never red (#5716). */
 export function isRed(fold: RollupFold): boolean {
-  return someStatus(fold, (s) => s === "red");
+  for (const [name, c] of fold.contexts) if (c.status === "red" && !QA_OWNED_CONTEXTS.has(name)) return true;
+  return false;
 }
 
 /** True iff no context is pending (absent required contexts count as pending; CANCELLED is settled). */

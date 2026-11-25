@@ -361,6 +361,9 @@ function fakeGithub(o: FakeOpts): TurnSnapshotGithub & { prListReads: () => numb
     async listOpenIssueLabelRows() {
       return EMPTY;
     },
+    async listOpenIssueLabelBodyRows() {
+      return EMPTY;
+    },
     // slice 3 (#4931) reads — unused by the pr-gate collector
     listReadyForAgentIssues: async () => ok([]),
     searchOpenIssueNumbers: async () => ok([]),
@@ -724,11 +727,34 @@ describe("pr-gate — red-CI resume arm, provenance-agnostic (issues #4460, #505
     assert.equal(buckets.devResumePick, "issue-4240:4433:worktree-agent-glm-4240-1789");
   });
 
-  test("a StatusContext FAILURE on a required context is red (deep-qa-gate commit status shape)", async () => {
+  test("a StatusContext FAILURE on a required context is red (commit status shape, non-QA-owned context)", async () => {
     const rollup = fullRequiredRollup().map((e) =>
-      e.name === "deep-qa-gate"
-        ? { __typename: "StatusContext", context: "deep-qa-gate", state: "FAILURE", startedAt: isoSecondsAgo(7000) }
+      e.name === "tier-gate"
+        ? { __typename: "StatusContext", context: "tier-gate", state: "FAILURE", startedAt: isoSecondsAgo(7000) }
         : e,
+    );
+    const buckets = await runPrGate([baseGlmPr({ statusCheckRollup: rollup })]);
+    assert.deepEqual(buckets.redResume, [4433]);
+  });
+
+  test("a PR whose ONLY red required context is deep-qa-gate is settled and NOT red: no red-resume, no pick (#5716 INV-4)", async () => {
+    for (const shape of ["StatusContext", "CheckRun"] as const) {
+      const rollup = fullRequiredRollup().map((e) =>
+        e.name === "deep-qa-gate"
+          ? shape === "StatusContext"
+            ? { __typename: "StatusContext", context: "deep-qa-gate", state: "FAILURE", startedAt: isoSecondsAgo(7000) }
+            : { ...e, conclusion: "FAILURE" }
+          : e,
+      );
+      const buckets = await runPrGate([baseGlmPr({ statusCheckRollup: rollup })]);
+      assert.deepEqual(buckets.redResume, [], shape);
+      assert.equal(buckets.devResumePick, "none", shape);
+    }
+  });
+
+  test("deep-qa-gate red alongside a genuinely red test is still red-resume (#5716 INV-4)", async () => {
+    const rollup = fullRequiredRollup().map((e) =>
+      e.name === "deep-qa-gate" ? { ...e, conclusion: "FAILURE" } : e.name === "test" ? { ...e, conclusion: "FAILURE" } : e,
     );
     const buckets = await runPrGate([baseGlmPr({ statusCheckRollup: rollup })]);
     assert.deepEqual(buckets.redResume, [4433]);

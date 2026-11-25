@@ -52,5 +52,9 @@
     "wayfinder_orch": 0,
     "tickets_orch": 0,
     "research_target": 0
-  }
+  },
+  "target_triage_item_stamps": {},
+  "orch_triage_item_stamps": {},
+  "target_stale_item_stamps": {},
+  "target_blocked_item_stamps": {}
 }

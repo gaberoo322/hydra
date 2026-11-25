@@ -157,11 +157,10 @@ describe("projectAggregateStats", () => {
     assert.equal(result.regressionRate, 25); // 1/4
     assert.equal(result.noOpMerges, 1); // count of cycles with noOpMerges > 0
     assert.equal(result.noOpMergeRate, 25); // 1/4
-    // verifiedCompletionRate is 100 when any cycle merged.
-    assert.equal(result.verifiedCompletionRate, 100);
-    // Static fields preserved byte-for-byte.
-    assert.equal(result.falseCompletionRate, 0);
-    assert.equal(result.anchoredRate, 100);
+    // Hardcoded rollups were removed: they could never report a failure.
+    for (const key of ["falseCompletionRate", "anchoredRate", "verifiedCompletionRate"]) {
+      assert.ok(!(key in result), `${key} must be absent`);
+    }
   });
 
   test("single-entry trend => rates are 0 or 100, never NaN", () => {
@@ -171,13 +170,14 @@ describe("projectAggregateStats", () => {
     assert.equal(merged.failedRate, 0);
     assert.equal(merged.regressionRate, 0);
     assert.equal(merged.noOpMergeRate, 0);
-    assert.equal(merged.verifiedCompletionRate, 100);
+    assert.ok(!("verifiedCompletionRate" in merged));
 
     const failed = projectAggregateStats([{ tasksFailed: 1 }]) as Record<string, any>;
     assert.equal(failed.mergedRate, 0);
     assert.equal(failed.failedRate, 100);
-    // No merge => verifiedCompletionRate is 0.
-    assert.equal(failed.verifiedCompletionRate, 0);
+    for (const key of ["falseCompletionRate", "anchoredRate", "verifiedCompletionRate"]) {
+      assert.ok(!(key in failed), `${key} must be absent`);
+    }
   });
 
   test("retryRate counts prior-failure anchors; anchorDistribution buckets all", () => {

@@ -107,9 +107,9 @@ The `reviewer-commit` phase returns `commit-a`, `commit-b` or `commit-ab` only w
 
 ```bash
 RC_PLAN_FILE=$(mktemp); printf '%s' "$ROUTE_JSON" | jq -c '.reviewerCommit' > "$RC_PLAN_FILE"   # private tempfile
-OPEN=$(node --no-warnings --experimental-strip-types scripts/qa/reviewer-commit.ts open --plan "$RC_PLAN_FILE" --pr "$pr_number"); rm -f "$RC_PLAN_FILE"
-# .ok true: make the edits in .prWorktree (and .bodyFile when bodyFix), then:
-FINISH=$(node --no-warnings --experimental-strip-types scripts/qa/reviewer-commit.ts finish --state "$(printf '%s' "$OPEN" | jq -r .stateFile)")
+node --no-warnings --experimental-strip-types scripts/qa/reviewer-commit.ts open --plan "$RC_PLAN_FILE" --pr "$pr_number" > "$PK.rc-open.json"; rm -f "$RC_PLAN_FILE"   # persisted beside the packet: shell vars do not survive the hand-edit Bash calls
+# .ok true (read `$PK.rc-open.json`): make the edits in .prWorktree (and .bodyFile when bodyFix), then:
+node --no-warnings --experimental-strip-types scripts/qa/reviewer-commit.ts finish --state "$(jq -r .stateFile "$PK.rc-open.json")" > "$PK.rc-finish.json"
 # a hand step you cannot complete: the same script with `abort --state <stateFile>`
 ```
 
