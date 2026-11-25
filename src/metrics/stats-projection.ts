@@ -294,7 +294,6 @@ export function projectAggregateStats(trend: Array<Record<string, any>>) {
   if (trend.length === 0) return { cycles: 0 };
 
   const total = trend.length;
-  const merged = trend.filter(countsAsMerge).length;
   const failed = trend.filter((m) => m.tasksFailed > 0).length;
   const abandoned = trend.filter((m) => m.tasksAbandoned > 0).length;
   const regressions = trend.filter((m) => m.regressionIntroduced).length;
@@ -343,9 +342,6 @@ export function projectAggregateStats(trend: Array<Record<string, any>>) {
     // record — the truthful unattributed sentinel, not a fabricated 0.
     tokensPerMergedPR: projectTokensPerMergedPR(trend),
     anchorDistribution: anchorDist,
-    falseCompletionRate: 0,
-    anchoredRate: 100,
-    verifiedCompletionRate: merged > 0 ? 100 : 0,
   };
 }
 
