@@ -1,0 +1,1 @@
+- chore: ratchet fenced-shell mktemp without trap and counts before constants in playbooks (#5719)
