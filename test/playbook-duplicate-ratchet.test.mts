@@ -11,6 +11,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import baseline from "../scripts/ci/playbook-duplicate-baseline.json" with { type: "json" };
 
 const {
   MIN_SPAN_TOKENS,
@@ -18,6 +19,9 @@ const {
   tokenise,
   scanTexts,
   countSpans,
+  findIntraSpans,
+  measureTexts,
+  readTexts,
   duplicateRatchet,
 } = await import("../scripts/ci/playbook-duplicate-ratchet.ts");
 const { REPO_ROOT } = await import("../scripts/ci/seam-check-lib.ts");
@@ -96,8 +100,28 @@ describe("playbook-duplicate-ratchet: spans", () => {
     assert.deepEqual(found["a.md"][0].partners, ["b.md", "c.md"]);
   });
 
-  test("repetition inside one file is not a hit", () => {
+  test("repetition inside one file is not a cross-file hit", () => {
     assert.deepEqual(scanTexts({ "a.md": `${shared}\n\n${shared}`, "b.md": "unrelated words only" }), {});
+  });
+
+  test("repetition inside one file is an intra row, never a cross row", () => {
+    const rows = measureTexts({ "a.md": `${shared}\n\n${shared}`, "b.md": "unrelated words only" });
+    assert.deepEqual(rows, { "a.md\tintra": 1 });
+  });
+
+  test("a passage stated three times counts once per extra occurrence", () => {
+    const spans = findIntraSpans("a.md", tokenise(`${shared}\n\nx1 x2 x3\n\n${shared}\n\ny1 y2 y3\n\n${shared}`));
+    assert.equal(spans.length, 2);
+  });
+
+  test("a passage stated once is not an intra hit, and fenced repeats are exempt", () => {
+    assert.deepEqual(findIntraSpans("a.md", tokenise(shared)), []);
+    assert.deepEqual(findIntraSpans("a.md", tokenise(["```", shared, "```", "```", shared, "```"].join("\n"))), []);
+  });
+
+  test("a passage cross-shared and self-repeated counts in both arms independently", () => {
+    const rows = measureTexts({ "a.md": `${shared}\n\n${shared}`, "b.md": shared });
+    assert.deepEqual(rows, { "a.md": 2, "b.md": 1, "a.md\tintra": 1 });
   });
 
   test("exempt text shared between files is not a hit", () => {
@@ -134,5 +158,19 @@ describe("playbook-duplicate-ratchet: the real playbooks", () => {
   test("the standard the report points at defines STD-PLAYBOOK-ONE-HOME and names this ratchet", () => {
     const standard = readFileSync(join(REPO_ROOT, STANDARD_REL), "utf8");
     assert.match(standard, /^### STD-PLAYBOOK-ONE-HOME\n[\s\S]*?enforced-by: reviewer, scripts\/ci\/playbook-duplicate-ratchet\.ts/m);
+  });
+
+  test("measured keys are a bare playbook path or path+TAB+intra, and equal the committed baseline", async () => {
+    const measured = measureTexts(readTexts(REPO_ROOT));
+        for (const key of Object.keys(measured)) {
+      assert.match(key, /^docs\/operator-playbooks\/[^\t]+\.md(\tintra)?$/, `bad key shape: ${JSON.stringify(key)}`);
+    }
+    assert.ok(Object.keys(measured).some((k) => k.endsWith("\tintra")), "at least one intra row is measured");
+    assert.ok(Object.keys(measured).some((k) => !k.includes("\t")), "at least one bare cross-file row is measured");
+    assert.deepEqual(measured, baseline);
+  });
+  test("a bare cross-file key never carries the intra suffix (sibling shape)", () => {
+    const rows = measureTexts({ "a.md": words("x", 20), "b.md": words("x", 20) });
+    assert.deepEqual(Object.keys(rows).sort(), ["a.md", "b.md"]);
   });
 });

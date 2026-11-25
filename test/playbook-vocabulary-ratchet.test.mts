@@ -98,7 +98,7 @@ describe("playbook-vocabulary-ratchet: each banned shape is detected", () => {
 
 describe("playbook-vocabulary-ratchet: the Historical: exemption", () => {
   test("a line marked Historical: is exempt from every shape", () => {
-    const body = "not yet at src/gate.ts:42 in hydra-betting, the Untouchable Core, see #1945, kept for legacy, EMIT_CAP, INV-9, tracked as a follow-up";
+    const body = "not yet at src/gate.ts:42 in hydra-betting, the Untouchable Core, see #1945, kept for legacy, EMIT_CAP, INV-9, tracked as a follow-up, Step 0.6";
     assert.deepEqual(
       new Set(findHits(PB, body, AVOID).map((h: { shape: string }) => h.shape)),
       new Set(SHAPES.filter((s: string) => s !== "shell-lines")),
@@ -245,7 +245,7 @@ describe("playbook-vocabulary-ratchet: issue-cite, back-compat and shell-lines s
 
   test("new shapes sit after the original four so existing hit order is unchanged", () => {
     assert.deepEqual(SHAPES.slice(0, 4), ["status", "line-cite", "target", "avoid-term"]);
-    assert.deepEqual(SHAPES.slice(4), ["issue-cite", "back-compat", "shell-lines", "symbol-cite", "invariant-cite", "process-meta"]);
+    assert.deepEqual(SHAPES.slice(4), ["issue-cite", "back-compat", "shell-lines", "symbol-cite", "invariant-cite", "process-meta", "step-cite"]);
   });
 });
 
@@ -349,6 +349,33 @@ describe("playbook-vocabulary-ratchet: the real playbooks", () => {
   test("the standard the report points at defines the playbook rules", () => {
     const standard = readFileSync(join(REPO_ROOT, STANDARD_REL), "utf8");
     assert.match(standard, /^### STD-PLAYBOOK-CURRENT-BEHAVIOUR$/m);
+  });
+});
+
+describe("playbook-vocabulary-ratchet: the step-cite shape", () => {
+  const step = (text: string): string[] => hits(text, "step-cite");
+
+  test("counts dotted, lettered, child- and parent- step cites and gate cites", () => {
+    assert.deepEqual(step("Run it as child-step 7a, then Step 0.6 and parent-step 2.\nSame body file as Gate 1."), [
+      "1 step-cite child-step 7a",
+      "1 step-cite Step 0.6",
+      "1 step-cite parent-step 2",
+      "2 step-cite Gate 1",
+    ]);
+  });
+
+  test("a heading or definition opener is exempt by token; the rest of the line still counts", () => {
+    assert.deepEqual(step("## Step 0.0: Resolve the Target seam\n### Gate 1 \u2014 reconcile\n- **Step 3.5**: scope\n2. Gate 4: the last"), []);
+    assert.deepEqual(step("**Step 3.5's scope and Step 4.5's artifact**"), ["1 step-cite Step 4.5"]);
+  });
+
+  test("fenced lines count, and a Historical: line is exempt", () => {
+    assert.deepEqual(step(["```bash", 'echo "ABORT: see Step 0.6"', "```"].join("\n")), ["2 step-cite Step 0.6"]);
+    assert.deepEqual(step("Historical: Step 4.5 used to run first"), []);
+  });
+
+  test("a bare word 'step' or 'Steps' is not a hit", () => {
+    assert.deepEqual(step("Take the next step. Steps 1 and 2 follow."), []);
   });
 });
 

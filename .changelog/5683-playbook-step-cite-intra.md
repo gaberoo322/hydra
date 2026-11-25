@@ -1,0 +1,1 @@
+- ci: count step/gate-number cites and intra-file duplicate passages in the playbook ratchets (#5683)
