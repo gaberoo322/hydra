@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -20,6 +20,24 @@ test("isEntrypoint is true for a script run from a directory with a space and a 
       `import { isEntrypoint } from ${JSON.stringify(MODULE_URL)};\nconsole.log(String(isEntrypoint(import.meta.url)));\n`,
     );
     const r = spawnSync(process.execPath, [probe], { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout.trim(), "true");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("isEntrypoint is true when the script is invoked through a symlink", () => {
+  const dir = mkdtempSync(join(tmpdir(), "entry link-"));
+  try {
+    const real = join(dir, "real.mjs");
+    writeFileSync(
+      real,
+      `import { isEntrypoint } from ${JSON.stringify(MODULE_URL)};\nconsole.log(String(isEntrypoint(import.meta.url)));\n`,
+    );
+    const link = join(dir, "linked script.mjs");
+    symlinkSync(real, link);
+    const r = spawnSync(process.execPath, [link], { encoding: "utf8" });
     assert.equal(r.status, 0, r.stderr);
     assert.equal(r.stdout.trim(), "true");
   } finally {
