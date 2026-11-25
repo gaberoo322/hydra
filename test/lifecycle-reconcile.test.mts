@@ -24,7 +24,7 @@ import {
   type ReconcileReport,
 } from "../src/lifecycle/reconcile.ts";
 import { externalMoves, lastKnownState, replayStateSnapshots } from "../src/lifecycle/timeline.ts";
-import { classifyQaPassedExit, type QaLivePr } from "../src/lifecycle/gates.ts";
+import { classifyQaPassedExit, gatePrOpen, type QaLivePr } from "../src/lifecycle/gates.ts";
 import { foldQaLiveChecks } from "../src/lifecycle/seam-deps.ts";
 import { findTransition } from "../src/lifecycle/transitions.ts";
 import type { LifecycleJournalEntry } from "../src/redis/lifecycle-journal.ts";
@@ -858,6 +858,36 @@ describe("PR-covered ready-for-agent promotion (#5489)", () => {
     ];
     assert.deepEqual(closingPrs(prs, 9).map((p) => p.number), [1, 3, 5]);
     assert.equal(singleClosingPr(prs.slice(0, 2), 9), 1);
+  });
+
+  // #5766 (epic #5762) acceptance: reconcile's candidate filter and the pr-open
+  // gate give the SAME answer for every row of the shared truth table, so a PR
+  // reconcile promotes on can never be one the gate then refuses (or vice versa).
+  test("closingPrs, singleClosingPr and resolveQaPr agree with the pr-open gate on every truth-table row", () => {
+    const rows = (
+      JSON.parse(readFileSync(new URL("./fixtures/pr-refs-truth-table.json", import.meta.url), "utf-8")) as {
+        rows: Array<{ name: string; body: string; closing: number[]; referenced: number[]; doesNotClose?: number[] }>;
+      }
+    ).rows;
+    assert.ok(rows.length > 0, "truth table must not be empty");
+    let probes = 0;
+    for (const row of rows) {
+      for (const n of new Set([...row.closing, ...row.referenced, ...(row.doesNotClose ?? [])])) {
+        probes++;
+        const gate = gatePrOpen(
+          { issue: n, from: "in-progress", to: "needs-qa", flags: [], evidence: { pr: "55" } },
+          { pr: { ok: true, value: { number: 55, state: "OPEN", body: row.body } } },
+        );
+        assert.ok(gate.code === "ok" || gate.code === "pr-does-not-close-issue", `gate code ${gate.code} — ${row.name}`);
+        const prs: OpenPrRef[] = [{ number: 55, body: row.body }];
+        const label = `#${n} — ${row.name}`;
+        assert.equal(closingPrs(prs, n).length === 1, gate.ok, `closingPrs vs gate ${label}`);
+        assert.equal(singleClosingPr(prs, n) === 55, gate.ok, `singleClosingPr vs gate ${label}`);
+        assert.equal(resolveQaPr([], n, prs) === 55, gate.ok, `resolveQaPr vs gate ${label}`);
+        assert.equal(gate.ok, row.closing.includes(n), `gate vs table ${label}`);
+      }
+    }
+    assert.ok(probes > 0);
   });
 
   test("promotions are bounded per pass", async () => {
