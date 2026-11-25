@@ -39,6 +39,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
+import { seedRelaunchedState } from "./_helpers/relaunch-seed.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const DECIDE = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
@@ -493,5 +494,31 @@ describe("decide.py — sweep_target blocked arm (issue #5167)", () => {
     assert.ok(a);
     assert.match(a.reason, /stranded in-progress/);
     assert.deepEqual(stateAfter.target_blocked_item_stamps, { "187": NOW });
+  });
+});
+
+describe("decide.py — sweep_target stamp maps survive a Pace Gate relaunch (issue #5717)", () => {
+  test("a run seeded --carry-from a prior doc fires no sweep_target while every stamped item is in window, and one new item fires", () => {
+    const prior = {
+      target_triage_item_stamps: { "626": NOW - 10 },
+      target_stale_item_stamps: { "297": NOW - 10 },
+      target_blocked_item_stamps: { "187": NOW - 10 },
+    };
+    const signals: Record<string, string | boolean> = {
+      needs_triage_target: true,
+      target_needs_triage_items: "626",
+      target_stale_in_progress_items: "297",
+      target_blocked_items: "187",
+    };
+    const quiet = seedRelaunchedState(prior, NOW - 1);
+    quiet.signals = signals;
+    assert.equal(findSweep(runDecide(quiet, feedNoResearch).plan), undefined, "all three lanes suppressed across the relaunch");
+
+    for (const key of Object.keys(signals).filter((k) => k !== "needs_triage_target")) {
+      const fresh = seedRelaunchedState(prior, NOW - 1);
+      fresh.signals = { ...signals, [key]: `${signals[key]} 999` };
+      const { plan } = runDecide(fresh, feedNoResearch);
+      assert.equal((plan.actions ?? []).filter(sweepTarget).length, 1, `a new item in ${key} fires exactly once`);
+    }
   });
 });

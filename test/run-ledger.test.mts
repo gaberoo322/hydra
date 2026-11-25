@@ -412,6 +412,9 @@ function carry(prevJson: string, now = 1792911953): any {
   return pyJson(`print(json.dumps(L.carry_forward(json.loads(${JSON.stringify(prevJson)}), CLASSES, ${now})))`);
 }
 
+// #5717: the four per-item triage stamp maps carry across a Pace Gate relaunch.
+const STAMP_ROWS = ["target_triage_item_stamps", "orch_triage_item_stamps", "target_stale_item_stamps", "target_blocked_item_stamps"];
+
 const HISTORICAL_SIGNAL_KEYS = [
   "architecture_orch", "cleanup_orch", "cleanup_target", "design_qa_target",
   "discover_orch", "discover_target", "health", "retro_orch", "research_target",
@@ -539,9 +542,14 @@ describe("run_ledger carry_forward — policy is data, the prior document is unt
   test("the policy table: only the declared rows carry, slots is seeded-from-orchestrator", () => {
     const o = pyJson(
       "print(json.dumps({f['name']: f['carry'] for f in L.FIELDS if f['name'] in " +
-        "('research_force_counter','dev_resume_pending','zero_yield_backoff','slots','signal_last_fired','turn')}))",
+        "('research_force_counter','dev_resume_pending','zero_yield_backoff','slots','signal_last_fired','turn'," +
+        "'target_triage_item_stamps','orch_triage_item_stamps','target_stale_item_stamps','target_blocked_item_stamps')}))",
     );
     assert.deepEqual(o, {
+      target_triage_item_stamps: "carry-across-relaunch",
+      orch_triage_item_stamps: "carry-across-relaunch",
+      target_stale_item_stamps: "carry-across-relaunch",
+      target_blocked_item_stamps: "carry-across-relaunch",
       research_force_counter: "mirrored-to-Redis",
       dev_resume_pending: "carry-across-relaunch",
       zero_yield_backoff: "carry-across-relaunch",
@@ -581,7 +589,10 @@ describe("run_ledger carry_forward — policy is data, the prior document is unt
 
   test("seed no longer accepts the five carry keys as key=<json>: exits 2 before any write", () => {
     const golden = JSON.parse(readFileSync(join(FIXTURES, "heredoc-default.json"), "utf-8"));
-    for (const k of ["research_force_counter", "dev_resume_pending", "zero_yield_backoff", "slots", "signal_last_fired"]) {
+    for (const k of [
+      "research_force_counter", "dev_resume_pending", "zero_yield_backoff", "slots", "signal_last_fired",
+      ...STAMP_ROWS,
+    ]) {
       withDir((dir) => {
         const path = join(dir, "state.json");
         const r = ledger(["seed", path, ...seedArgsFrom(golden), `${k}={}`]);
@@ -606,6 +617,78 @@ describe("run_ledger carry_forward — policy is data, the prior document is unt
     assert.deepEqual(run("not json at all"), golden.slots);
     assert.deepEqual(run(JSON.stringify({ slots: "nope" })), golden.slots);
     assert.deepEqual(run("[1]"), golden.slots);
+  });
+});
+
+describe("run_ledger item-stamp maps carry across a relaunch (issue #5717)", () => {
+  const NOW = 1792911953;
+
+  test("INV-1/5/6: seed --carry-from carries each stamp map, seeds {} by default, journals non-empty maps", () => {
+    withDir((dir) => {
+      const prev = join(dir, "prev.json");
+      writeFileSync(
+        prev,
+        JSON.stringify({
+          orch_triage_item_stamps: { "5649": NOW - 60, "5658": NOW - 60 },
+          target_triage_item_stamps: { "626": NOW - 30 },
+          target_stale_item_stamps: {},
+        }),
+      );
+      const golden = JSON.parse(readFileSync(join(FIXTURES, "heredoc-default.json"), "utf-8"));
+      const path = join(dir, "state.json");
+      const r = ledger(["seed", path, "--carry-from", prev, ...seedArgsFrom(golden)]);
+      assert.equal(r.status, 0, r.stderr);
+      const doc = JSON.parse(readFileSync(path, "utf-8"));
+      assert.deepEqual(doc.orch_triage_item_stamps, { "5649": NOW - 60, "5658": NOW - 60 });
+      assert.deepEqual(doc.target_triage_item_stamps, { "626": NOW - 30 });
+      assert.deepEqual(doc.target_stale_item_stamps, {});
+      assert.deepEqual(doc.target_blocked_item_stamps, {});
+      assert.match(r.stdout, /carried orch_triage_item_stamps forward from prior state: \{"5649":\d+,"5658":\d+\} \(issue #5717\)/);
+      assert.match(r.stdout, /carried target_triage_item_stamps forward/);
+      assert.doesNotMatch(r.stdout, /carried target_stale_item_stamps/);
+    });
+  });
+
+  test("INV-2/8: the normaliser keeps digit keys with integral 0 < v <= now, floors integral floats, degrades the rest", () => {
+    const c = carry(
+      JSON.stringify({
+        orch_triage_item_stamps: {
+          "10": 1792911000, "11": 1792911000.0, "12": 1.5, "13": true, "14": -3, "15": 0,
+          "16": NOW + 1, "17": "x", "abc": 5, "": 5, "1x": 5, "18": null,
+        },
+        target_triage_item_stamps: [1, 2],
+        target_stale_item_stamps: "str",
+        target_blocked_item_stamps: null,
+      }),
+      NOW,
+    );
+    assert.deepEqual(c.orch_triage_item_stamps, { "10": 1792911000, "11": 1792911000 });
+    for (const k of ["target_triage_item_stamps", "target_stale_item_stamps", "target_blocked_item_stamps"]) {
+      assert.deepEqual(c[k], {}, k);
+    }
+  });
+
+  test("INV-2/3: no backoff-age filter at seed — an ancient stamp is carried (decide treats it as eligible)", () => {
+    const c = carry(JSON.stringify({ orch_triage_item_stamps: { "5649": 1000 } }), NOW);
+    assert.deepEqual(c.orch_triage_item_stamps, { "5649": 1000 });
+  });
+
+  test("INV-5: _CARRY_KEYS is derived from FIELDS (carry/mirrored/seeded rows, FIELDS order)", () => {
+    const o = pyJson(
+      "print(json.dumps({'k': list(L._CARRY_KEYS), 'd': [f['name'] for f in L.FIELDS if f['carry'] in " +
+        "(L.CARRY, L.MIRRORED, L.SEEDED)]}))",
+    );
+    assert.deepEqual(o.k, o.d);
+    for (const k of STAMP_ROWS) assert.ok(o.k.includes(k), k);
+  });
+
+  test("INV-7/9: the ledger stays a leaf and the stamp rows are CARRY, not MIRRORED (no Redis key)", () => {
+    const src = readFileSync(join(AUTOPILOT_DIR, "run_ledger.py"), "utf-8");
+    assert.doesNotMatch(src, /^\s*(import|from)\s+(decide|decide_base|turn_snapshot)\b/m);
+    const o = pyJson(
+      "print(json.dumps([[f['carry'], 'mirror' in f] for f in L.FIELDS if f['name'].endswith('_item_stamps')]))",
+    );
+    assert.deepEqual(o, STAMP_ROWS.map(() => ["carry-across-relaunch", false]));
   });
 });
 
