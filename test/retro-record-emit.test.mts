@@ -1,109 +1,140 @@
 /**
- * test/retro-record-emit.test.mts — the hydra-retro section 8 emit sequence
- * (issue #5739): create, first-state, then record, in that order.
+ * test/retro-record-emit.test.mts — scripts/retro/record-emit.ts decision
+ * function (issue #5739), driven with fakes: no Redis, gh or network IO.
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { emitIssue, recheckEntry, parseIssueNumber, type EmitPorts, type EmitInput } from "../scripts/retro/record-emit.ts";
+import { runRecordEmit, parseIssueNumber, type RecordEmitPorts } from "../scripts/retro/record-emit.ts";
 import type { RetroSeenEntry } from "../src/redis/retro-seen.ts";
+import type { AdvanceResult } from "../src/lifecycle/index.ts";
 
-const INPUT: EmitInput = { title: "t", body: "b", cue: "some-cue", runId: "run-1", labels: [], repo: "o/r", decision: "issue" };
+const OK_ADVANCE = { ok: true, issue: 77, from: null, to: "needs-triage", mode: "enforce", observed: { state: "needs-triage", labels: [] } } as unknown as AdvanceResult;
+const REFUSED = (code: string): AdvanceResult => ({ ok: false, issue: 77, code, mode: "enforce", written: false });
 
-function fakePorts(over: Partial<EmitPorts> = {}) {
+function fakePorts(over: Partial<RecordEmitPorts> = {}, files: Record<string, string> = {}) {
   const calls: string[] = [];
   const recorded: RetroSeenEntry[] = [];
-  const ports: EmitPorts = {
-    async createIssue() {
-      calls.push("create");
-      return "https://github.com/o/r/issues/77\n";
+  const bumped: string[] = [];
+  const ports: RecordEmitPorts = {
+    async gh() {
+      calls.push("gh");
+      return { ok: true, stdout: "https://github.com/o/r/issues/77\n" };
     },
-    async advanceFirstState(n) {
-      calls.push(`advance:${n}`);
-      return { code: 0, json: { ok: true } };
+    async advance() {
+      calls.push("advance");
+      return OK_ADVANCE;
     },
-    async record(e) {
+    async recordSeen(e) {
       calls.push("record");
       recorded.push(e);
     },
+    async bumpRecurrence(c) {
+      bumped.push(c);
+      return 1;
+    },
+    async getSeen() {
+      return { a: {} as RetroSeenEntry, b: {} as RetroSeenEntry };
+    },
+    async getRecurrence() {
+      return { a: 2 };
+    },
     now: () => "2026-11-25T00:00:00.000Z",
+    readFile: (p) => files[p] ?? "body",
     ...over,
   };
-  return { ports, calls, recorded };
+  return { ports, calls, recorded, bumped };
 }
 
+const ISSUE_ARGV = ["issue", "--title", "t", "--body-file", "f", "--cue", "some-cue", "--run-id", "run-1"];
+
 describe("retro record-emit", () => {
-  test("happy path runs create, first-state, record in order and records the issue ref", async () => {
+  test("issue runs gh create, advance, record in order and records the issue ref", async () => {
     const { ports, calls, recorded } = fakePorts();
-    const res = await emitIssue(INPUT, ports);
-    assert.deepEqual(calls, ["create", "advance:77", "record"]);
-    assert.equal(res.ok, true);
+    const out = await runRecordEmit(ISSUE_ARGV, ports);
+    assert.equal(out.code, 0);
+    assert.deepEqual(calls, ["gh", "advance", "record"]);
     assert.deepEqual(recorded, [{ cue: "some-cue", decision: "issue", runId: "run-1", ref: "77", at: "2026-11-25T00:00:00.000Z" }]);
   });
 
-  test("a failed first-state advance leaves the cue unrecorded", async () => {
-    const { ports, calls, recorded } = fakePorts({
-      async advanceFirstState() {
-        return { code: 1, json: { ok: false, error: "gate-refused" } };
-      },
-    });
-    const res = await emitIssue(INPUT, ports);
-    assert.equal(res.ok, false);
-    assert.equal(res.ok === false && res.stage, "first-state");
+  test("a refused first-state advance leaves the cue unrecorded and exits 1 with the code", async () => {
+    const { ports, recorded } = fakePorts({ advance: async () => REFUSED("parked:cap") });
+    const out = await runRecordEmit(ISSUE_ARGV, ports);
+    assert.equal(out.code, 1);
+    assert.equal(out.result.code, "parked:cap");
+    assert.equal(out.result.issue, 77);
     assert.equal(recorded.length, 0);
-    assert.ok(!calls.includes("record"));
   });
 
-  test("illegal-transition observed at needs-triage (backstop race) still records", async () => {
-    const { ports, recorded } = fakePorts({
-      async advanceFirstState() {
-        return { code: 1, json: { ok: false, code: "illegal-transition", observed: { state: "needs-triage" } } };
-      },
-    });
-    const res = await emitIssue(INPUT, ports);
-    assert.equal(res.ok, true);
+  test("illegal-transition that the identical retry resolves (backstop race) still records", async () => {
+    let n = 0;
+    const { ports, recorded } = fakePorts({ advance: async () => (n++ === 0 ? REFUSED("illegal-transition") : OK_ADVANCE) });
+    const out = await runRecordEmit(ISSUE_ARGV, ports);
+    assert.equal(out.code, 0);
     assert.equal(recorded.length, 1);
   });
 
-  test("illegal-transition from any other observed state is a failure", async () => {
-    const { ports, recorded } = fakePorts({
-      async advanceFirstState() {
-        return { code: 1, json: { ok: false, code: "illegal-transition", observed: { state: "closed" } } };
-      },
-    });
-    const res = await emitIssue(INPUT, ports);
-    assert.equal(res.ok, false);
+  test("illegal-transition that persists is a refusal", async () => {
+    const { ports, recorded } = fakePorts({ advance: async () => REFUSED("illegal-transition") });
+    const out = await runRecordEmit(ISSUE_ARGV, ports);
+    assert.equal(out.code, 1);
     assert.equal(recorded.length, 0);
   });
 
-  test("a failed gh issue create runs no later step", async () => {
-    const { ports, calls } = fakePorts({
-      async createIssue() {
-        throw new Error("gh down");
+  test("a seam throw exits 1 unrecorded", async () => {
+    const { ports, recorded } = fakePorts({
+      advance: async () => {
+        throw new Error("boom");
       },
     });
-    const res = await emitIssue(INPUT, ports);
-    assert.equal(res.ok === false && res.stage, "create");
-    assert.deepEqual(calls, []);
+    const out = await runRecordEmit(ISSUE_ARGV, ports);
+    assert.equal(out.code, 1);
+    assert.equal(recorded.length, 0);
   });
 
-  test("an unparseable issue URL stops before first-state", async () => {
-    const { ports, calls } = fakePorts({
-      async createIssue() {
-        return "no url here";
-      },
-    });
-    const res = await emitIssue(INPUT, ports);
-    assert.equal(res.ok === false && res.stage, "parse-url");
-    assert.ok(!calls.some((c) => c.startsWith("advance")));
+  test("an unparseable gh issue create stdout exits 1 before any advance", async () => {
+    const { ports, calls } = fakePorts({ gh: async () => ({ ok: true, stdout: "no url" }) });
+    const out = await runRecordEmit(ISSUE_ARGV, ports);
+    assert.equal(out.code, 1);
+    assert.ok(!calls.includes("advance"));
   });
 
-  test("recheck re-records the entry with a fresh timestamp", async () => {
+  test("a failed gh create runs no later step", async () => {
+    const { ports, calls } = fakePorts({ gh: async () => ({ ok: false, code: "gh-auth" }) });
+    const out = await runRecordEmit(ISSUE_ARGV, ports);
+    assert.equal(out.code, 1);
+    assert.ok(!calls.includes("advance") && !calls.includes("record"));
+  });
+
+  test("recheck preserves every field but at, and never creates or advances", async () => {
+    const entry = { cue: "review:check:x", decision: "issue", runId: "r", ref: "5", at: "old" };
+    const { ports, calls, recorded } = fakePorts({}, { "e.json": JSON.stringify([entry]) });
+    const out = await runRecordEmit(["recheck", "--entries-file", "e.json"], ports);
+    assert.equal(out.code, 0);
+    assert.deepEqual(recorded, [{ ...entry, at: "2026-11-25T00:00:00.000Z" }]);
+    assert.deepEqual(calls, ["record"]);
+  });
+
+  test("pr writes decision pr", async () => {
     const { ports, recorded } = fakePorts();
-    const res = await recheckEntry({ cue: "review:check:x", decision: "issue", runId: "r", ref: "5" }, ports);
-    assert.equal(res.ok, true);
-    assert.equal(recorded[0].at, "2026-11-25T00:00:00.000Z");
-    assert.equal(recorded[0].ref, "5");
+    const out = await runRecordEmit(["pr", "--cue", "c", "--run-id", "r", "--ref", "9"], ports);
+    assert.equal(out.code, 0);
+    assert.equal(recorded[0].decision, "pr");
+    assert.equal(recorded[0].ref, "9");
+  });
+
+  test("ledger bumps once per cue in order and prints the seenCues and recurrence shape", async () => {
+    const { ports, bumped } = fakePorts({}, { "c.json": JSON.stringify(["x", "y"]) });
+    const out = await runRecordEmit(["ledger", "--cues-file", "c.json"], ports);
+    assert.equal(out.code, 0);
+    assert.deepEqual(bumped, ["x", "y"]);
+    assert.deepEqual(out.result, { seenCues: ["a", "b"], recurrence: { a: 2 } });
+  });
+
+  test("missing flags and unknown verbs exit 2", async () => {
+    const { ports } = fakePorts();
+    assert.equal((await runRecordEmit(["issue"], ports)).code, 2);
+    assert.equal((await runRecordEmit(["nope"], ports)).code, 2);
   });
 
   test("parseIssueNumber reads the trailing issue number", () => {

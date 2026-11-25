@@ -1,197 +1,216 @@
 /**
- * scripts/retro/record-emit.ts — the hydra-retro section 8 emit sequence in ONE
- * tested call (issue #5739).
+ * scripts/retro/record-emit.ts — the hydra-retro plumbing (ledger, emit,
+ * recheck) in ONE tested CLI (issue #5739).
  *
- *   npx tsx scripts/retro/record-emit.ts emit --title T --body-file F --cue C --run-id R
- *       [--label L]... [--repo owner/name] [--decision issue]
- *   npx tsx scripts/retro/record-emit.ts recheck --cue C --decision issue|pr|artifact --run-id R [--ref N]
+ *   npx tsx scripts/retro/record-emit.ts issue --title T --body-file F --cue C --run-id R
+ *   npx tsx scripts/retro/record-emit.ts pr --cue C --run-id R --ref N
+ *   npx tsx scripts/retro/record-emit.ts recheck --entries-file F.json
+ *   npx tsx scripts/retro/record-emit.ts ledger --cues-file F.json
  *
- * `emit` is: `gh issue create`, then the first-state write through the
- * lifecycle seam, then `recordRetroSeen`. The order is the contract: a failed
- * first-state advance leaves the cue UNRECORDED, so the next retro run retries
- * the finding instead of deduping against an issue that never reached
- * needs-triage. `recheck` re-records an existing seen entry with a fresh `at`
- * (the review-mode recheck: an open prior emit emits nothing, but the due
- * signal must not re-fire daily).
+ * `issue` is three effects in order: `gh issue create` (no state label), the
+ * lifecycle-seam first-state advance, then `recordRetroSeen`. The record runs
+ * only after the advance succeeded (or the zero-state backstop already put the
+ * issue in needs-triage), so a refused advance leaves the cue UNRECORDED and
+ * the next run retries it. The created issue is reported, never deleted.
  *
- * Prints ONE JSON line. Exit 0 = emitted/recorded, 1 = a step failed (the
- * `stage` names which), 2 = usage.
+ * Every subcommand prints ONE JSON line. Exit 0 = ok, 1 = refused or a failed
+ * effect, 2 = usage. Nothing throws past `main` (STD-VERIFY-NEVER-THROW).
+ * This is plumbing for the plan the playbook already computes, not a planner.
  */
 
-import { execFile } from "node:child_process";
+import { resolve, dirname } from "node:path";
 import { readFileSync } from "node:fs";
-import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import { isEntrypoint } from "../lib/entrypoint.mjs";
-import type { RetroSeenEntry } from "../../src/redis/retro-seen.ts";
+import { advance, defaultSeamDeps, type AdvanceResult } from "../../src/lifecycle/index.ts";
+import { ghExec } from "../../src/github/gh.ts";
+import { resolveGithubRepo } from "../../src/github/issues.ts";
+import { closeRedisConnections } from "../../src/redis/connection.ts";
+import {
+  bumpRetroRecurrence,
+  getRetroRecurrence,
+  getRetroSeen,
+  recordRetroSeen,
+  type RetroSeenEntry,
+} from "../../src/redis/retro-seen.ts";
 
-const execFileP = promisify(execFile);
-
-export const DEFAULT_REPO = "gaberoo322/hydra";
 export const RETRO_ACTOR = "hydra-retro";
 
-export interface EmitInput {
-  title: string;
-  body: string;
-  cue: string;
-  runId: string;
-  labels: string[];
-  repo: string;
-  decision: RetroSeenEntry["decision"];
-}
-
-/** The side effects, injected so the ordering contract is testable offline. */
-export interface EmitPorts {
-  /** Create the issue; resolves to gh's stdout (the issue URL). */
-  createIssue(input: EmitInput): Promise<string>;
-  /** Run the lifecycle first-state advance; resolves to the exit code and the verb's last JSON line. */
-  advanceFirstState(issue: number): Promise<{ code: number; json: unknown }>;
-  record(entry: RetroSeenEntry): Promise<void>;
+export interface RecordEmitPorts {
+  /** Run a `gh` argv; resolves to stdout on success or the failure code. */
+  gh(args: string[]): Promise<{ ok: true; stdout: string } | { ok: false; code: string }>;
+  advance(input: { issue: number; to: string; actor: string }): Promise<AdvanceResult>;
+  recordSeen(entry: RetroSeenEntry): Promise<void>;
+  bumpRecurrence(cue: string): Promise<number>;
+  getSeen(): Promise<Record<string, RetroSeenEntry>>;
+  getRecurrence(): Promise<Record<string, number>>;
   now(): string;
+  readFile(path: string): string;
 }
 
-export type EmitResult =
-  | { ok: true; issue: number; url: string; recorded: true }
-  | { ok: false; stage: "create" | "parse-url" | "first-state" | "record"; error: string; issue?: number; url?: string };
-
-/** The reconcile zero-state backstop racing the first-state write is a success, per the first-state rule. */
-function isBackstopRace(json: unknown): boolean {
-  if (typeof json !== "object" || json === null) return false;
-  const j = json as { error?: unknown; code?: unknown; observed?: { state?: unknown; labels?: unknown } };
-  const code = j.code ?? j.error;
-  if (code !== "illegal-transition") return false;
-  const labels = Array.isArray(j.observed?.labels) ? (j.observed?.labels as unknown[]) : [];
-  return j.observed?.state === "needs-triage" || labels.includes("needs-triage");
+export interface RecordEmitOutcome {
+  code: 0 | 1 | 2;
+  result: Record<string, unknown>;
 }
 
-export function parseIssueNumber(url: string): number | null {
-  const m = /\/issues\/(\d+)\s*$/.exec(url.trim().split("\n").pop() ?? "");
+const usage = (message: string): RecordEmitOutcome => ({ code: 2, result: { ok: false, code: "usage", message } });
+const failed = (code: string, extra: Record<string, unknown> = {}): RecordEmitOutcome => ({
+  code: 1,
+  result: { ok: false, ...extra, code },
+});
+
+function parseFlags(argv: readonly string[]): Record<string, string> {
+  const flags: Record<string, string> = {};
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith("--")) flags[a.slice(2)] = argv[++i] ?? "";
+  }
+  return flags;
+}
+
+export function parseIssueNumber(stdout: string): number | null {
+  const m = /\/issues\/(\d+)\s*$/.exec(stdout.trim().split("\n").pop() ?? "");
   return m ? Number(m[1]) : null;
 }
 
-export async function emitIssue(input: EmitInput, ports: EmitPorts): Promise<EmitResult> {
-  let url: string;
+async function runIssue(flags: Record<string, string>, ports: RecordEmitPorts): Promise<RecordEmitOutcome> {
+  const { title, "body-file": bodyFile, cue, "run-id": runId } = flags;
+  if (!title || !bodyFile || !cue || !runId) return usage("issue requires --title, --body-file, --cue and --run-id");
+  const body = ports.readFile(bodyFile);
+  const created = await ports.gh(["issue", "create", "--repo", resolveGithubRepo(), "--title", title, "--body", body]);
+  if (!created.ok) return failed(created.code);
+  const issue = parseIssueNumber(created.stdout);
+  if (issue === null) return failed("gh-url-unparseable", { stdout: created.stdout.slice(0, 200) });
+
+  let adv: AdvanceResult;
   try {
-    url = (await ports.createIssue(input)).trim();
+    adv = await ports.advance({ issue, to: "needs-triage", actor: RETRO_ACTOR });
   } catch (err) {
-    console.error("[retro-emit] gh issue create failed:", err);
-    return { ok: false, stage: "create", error: err instanceof Error ? err.message : String(err) };
+    console.error(`[retro-emit] lifecycle advance threw for #${issue}; cue ${cue} left unrecorded:`, err);
+    return failed("crashed", { issue });
   }
-  const issue = parseIssueNumber(url);
-  if (issue === null) return { ok: false, stage: "parse-url", error: `no issue number in: ${url}`, url };
-
-  const adv = await ports.advanceFirstState(issue);
-  if (adv.code !== 0 && !isBackstopRace(adv.json)) {
-    console.error(`[retro-emit] first-state advance failed for #${issue}; cue ${input.cue} left unrecorded`, adv.json);
-    return { ok: false, stage: "first-state", error: JSON.stringify(adv.json), issue, url };
+  if (!adv.ok) {
+    // The reconcile zero-state backstop can win the race and leave the issue in needs-triage:
+    // the same move then answers ok+noop, so one identical retry tells that case from a real refusal.
+    const retry = adv.code === "illegal-transition" ? await safeAdvance(ports, issue) : null;
+    if (!retry || !retry.ok) {
+      console.error(`[retro-emit] first-state refused for #${issue} (${adv.code}); cue ${cue} left unrecorded`);
+      return failed(adv.code, { issue });
+    }
   }
 
   try {
-    await ports.record({ cue: input.cue, decision: input.decision, runId: input.runId, ref: String(issue), at: ports.now() });
+    await ports.recordSeen({ cue, decision: "issue", runId, ref: String(issue), at: ports.now() });
   } catch (err) {
     console.error(`[retro-emit] recordRetroSeen failed for #${issue}:`, err);
-    return { ok: false, stage: "record", error: err instanceof Error ? err.message : String(err), issue, url };
+    return failed("record-failed", { issue });
   }
-  return { ok: true, issue, url, recorded: true };
+  return { code: 0, result: { ok: true, issue, cue } };
 }
 
-/** Re-record an existing seen entry with a fresh `at` (review-mode recheck). */
-export async function recheckEntry(
-  entry: Omit<RetroSeenEntry, "at">,
-  ports: Pick<EmitPorts, "record" | "now">,
-): Promise<{ ok: true } | { ok: false; error: string }> {
+async function safeAdvance(ports: RecordEmitPorts, issue: number): Promise<AdvanceResult | null> {
   try {
-    await ports.record({ ...entry, at: ports.now() });
-    return { ok: true };
+    return await ports.advance({ issue, to: "needs-triage", actor: RETRO_ACTOR });
   } catch (err) {
-    console.error(`[retro-emit] recheck record failed for ${entry.cue}:`, err);
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    console.error(`[retro-emit] lifecycle advance re-read threw for #${issue}:`, err);
+    return null;
   }
 }
 
-function parseLastJson(text: string): unknown {
-  const last = text.trim().split("\n").pop() ?? "";
+async function runPr(flags: Record<string, string>, ports: RecordEmitPorts): Promise<RecordEmitOutcome> {
+  const { cue, "run-id": runId, ref } = flags;
+  if (!cue || !runId || !ref) return usage("pr requires --cue, --run-id and --ref");
   try {
-    return JSON.parse(last);
-  } catch {
-    /* intentional: a non-JSON lifecycle line is reported raw to the caller */
-    return { raw: last };
+    await ports.recordSeen({ cue, decision: "pr", runId, ref, at: ports.now() });
+  } catch (err) {
+    console.error(`[retro-emit] recordRetroSeen (pr) failed for ${cue}:`, err);
+    return failed("record-failed");
+  }
+  return { code: 0, result: { ok: true, cue } };
+}
+
+function readJsonArray(ports: RecordEmitPorts, path: string): unknown[] | null {
+  try {
+    const parsed: unknown = JSON.parse(ports.readFile(path));
+    return Array.isArray(parsed) ? parsed : null;
+  } catch (err) {
+    console.error(`[retro-emit] cannot read a JSON array from ${path}:`, err);
+    return null;
   }
 }
 
-function productionPorts(): EmitPorts {
+async function runRecheck(flags: Record<string, string>, ports: RecordEmitPorts): Promise<RecordEmitOutcome> {
+  if (!flags["entries-file"]) return usage("recheck requires --entries-file");
+  const entries = readJsonArray(ports, flags["entries-file"]);
+  if (entries === null) return failed("entries-unreadable");
+  let n = 0;
+  for (const e of entries as RetroSeenEntry[]) {
+    try {
+      await ports.recordSeen({ ...e, at: ports.now() });
+      n++;
+    } catch (err) {
+      console.error(`[retro-emit] recheck record failed for ${e.cue}:`, err);
+      return failed("record-failed", { cue: e.cue, rechecked: n });
+    }
+  }
+  return { code: 0, result: { ok: true, rechecked: n } };
+}
+
+async function runLedger(flags: Record<string, string>, ports: RecordEmitPorts): Promise<RecordEmitOutcome> {
+  if (!flags["cues-file"]) return usage("ledger requires --cues-file");
+  const cues = readJsonArray(ports, flags["cues-file"]);
+  if (cues === null) return failed("cues-unreadable");
+  try {
+    for (const c of cues as string[]) await ports.bumpRecurrence(c);
+    const seen = await ports.getSeen();
+    const recurrence = await ports.getRecurrence();
+    return { code: 0, result: { seenCues: Object.keys(seen), recurrence } };
+  } catch (err) {
+    console.error("[retro-emit] ledger read/bump failed:", err);
+    return failed("ledger-failed");
+  }
+}
+
+/** Decision function: argv + ports in, one outcome out. Never throws. */
+export async function runRecordEmit(argv: readonly string[], ports: RecordEmitPorts): Promise<RecordEmitOutcome> {
+  const [verb, ...rest] = argv;
+  const flags = parseFlags(rest);
+  try {
+    if (verb === "issue") return await runIssue(flags, ports);
+    if (verb === "pr") return await runPr(flags, ports);
+    if (verb === "recheck") return await runRecheck(flags, ports);
+    if (verb === "ledger") return await runLedger(flags, ports);
+  } catch (err) {
+    console.error("[retro-emit] unexpected failure:", err);
+    return failed("crashed");
+  }
+  return usage("usage: issue | pr | recheck | ledger");
+}
+
+function productionPorts(): RecordEmitPorts {
+  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+  const deps = defaultSeamDeps(repoRoot);
   return {
-    async createIssue(input) {
-      const args = ["issue", "create", "--repo", input.repo, "--title", input.title, "--body", input.body];
-      for (const l of input.labels) args.push("--label", l);
-      const { stdout } = await execFileP("gh", args);
-      return stdout;
+    async gh(args) {
+      const res = await ghExec(args);
+      return res.ok ? { ok: true, stdout: res.data.stdout } : { ok: false, code: res.code };
     },
-    async advanceFirstState(issue) {
-      try {
-        const { stdout } = await execFileP("npx", ["tsx", "scripts/lifecycle.ts", "advance", String(issue), "needs-triage", "--actor", RETRO_ACTOR]);
-        return { code: 0, json: parseLastJson(stdout) };
-      } catch (err) {
-        const e = err as { code?: number; stdout?: string };
-        return { code: typeof e.code === "number" ? e.code : 1, json: parseLastJson(e.stdout ?? "") };
-      }
-    },
-    async record(entry) {
-      const { recordRetroSeen } = await import("../../src/redis/retro-seen.ts");
-      await recordRetroSeen(entry);
-    },
+    advance: (input) => advance(input, deps),
+    recordSeen: recordRetroSeen,
+    bumpRecurrence: (cue) => bumpRetroRecurrence(cue),
+    getSeen: getRetroSeen,
+    getRecurrence: getRetroRecurrence,
     now: () => new Date().toISOString(),
+    readFile: (path) => readFileSync(path, "utf8"),
   };
 }
 
-function parseFlags(argv: readonly string[]): { flags: Record<string, string>; multi: Record<string, string[]> } {
-  const flags: Record<string, string> = {};
-  const multi: Record<string, string[]> = {};
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (!a.startsWith("--")) continue;
-    const v = argv[i + 1] ?? "";
-    flags[a.slice(2)] = v;
-    (multi[a.slice(2)] ??= []).push(v);
-    i++;
-  }
-  return { flags, multi };
-}
-
-const DECISIONS = ["issue", "pr", "artifact"];
-
-export async function main(argv: readonly string[], ports: EmitPorts = productionPorts()): Promise<number> {
-  const [verb, ...rest] = argv;
-  const { flags, multi } = parseFlags(rest);
-  if (verb === "emit") {
-    const { title, "body-file": bodyFile, cue, "run-id": runId } = flags;
-    if (!title || !bodyFile || !cue || !runId) {
-      console.error("[retro-emit] emit requires --title, --body-file, --cue and --run-id");
-      return 2;
-    }
-    const decision = (flags.decision ?? "issue") as RetroSeenEntry["decision"];
-    if (!DECISIONS.includes(decision)) {
-      console.error(`[retro-emit] unknown --decision '${decision}'`);
-      return 2;
-    }
-    const res = await emitIssue(
-      { title, body: readFileSync(bodyFile, "utf8"), cue, runId, labels: multi.label ?? [], repo: flags.repo ?? DEFAULT_REPO, decision },
-      ports,
-    );
-    process.stdout.write(`${JSON.stringify(res)}\n`);
-    return res.ok ? 0 : 1;
-  }
-  if (verb === "recheck") {
-    const { cue, decision, "run-id": runId, ref } = flags;
-    if (!cue || !runId || !decision || !DECISIONS.includes(decision)) {
-      console.error("[retro-emit] recheck requires --cue, --run-id and --decision issue|pr|artifact");
-      return 2;
-    }
-    const res = await recheckEntry({ cue, decision: decision as RetroSeenEntry["decision"], runId, ref: ref ?? null }, ports);
-    process.stdout.write(`${JSON.stringify(res)}\n`);
-    return res.ok ? 0 : 1;
-  }
-  console.error("[retro-emit] usage: emit --title T --body-file F --cue C --run-id R [--label L]... | recheck --cue C --decision D --run-id R [--ref N]");
-  return 2;
+/** CLI entry: one JSON line, exit 0/1/2, Redis closed before exit. */
+export async function main(argv: readonly string[]): Promise<number> {
+  const out = await runRecordEmit(argv, productionPorts());
+  process.stdout.write(`${JSON.stringify(out.result)}\n`);
+  closeRedisConnections();
+  return out.code;
 }
 
 if (isEntrypoint(import.meta.url)) {
@@ -199,6 +218,7 @@ if (isEntrypoint(import.meta.url)) {
     (code) => process.stdout.write("", () => process.exit(code)),
     (err) => {
       console.error("[retro-emit] crashed:", err);
+      closeRedisConnections();
       process.exit(1);
     },
   );

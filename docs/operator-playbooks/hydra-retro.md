@@ -133,10 +133,11 @@ marker is persisted alongside).
 For each flagged dispatch (the ones the bundle flagged for drill), and ONLY
 those, read the full transcript. The ONLY handle is `dispatches[].transcriptId`
 (the bare agent hash, same value as `slot.task_id`); `cycleId` is the
-cycle-record key, NOT a transcript handle — never pass it to the route:
+cycle-record key, NOT a transcript handle — never pass it to the route. the flagged row's occupancy id fills the jq argument; an empty result is a transcript-less row:
 
 ```bash
-printf '%s' "$BUNDLE" | jq -r '.dispatches[] | select(.flagged) | .transcriptId // empty' | while read -r TRANSCRIPT_ID; do curl -sf "http://localhost:4000/api/dispatches/${TRANSCRIPT_ID}/transcript"; done
+TRANSCRIPT_ID=$(jq -r --arg oid "$OCCUPANCY_ID" '.dispatches[] | select(.flagged==true and .occupancyId==$oid) | .transcriptId // empty' <<<"$BUNDLE")
+curl -sf "http://localhost:4000/api/dispatches/${TRANSCRIPT_ID}/transcript"
 ```
 
 If the route 404s (`dispatch-not-found` — the registry row expired or was never
@@ -200,25 +201,10 @@ issue instead of filing a new one).
 
 For every cue OBSERVED this run (whether or not it survives), bump its
 cross-run recurrence count once, then snapshot both ledgers for the planner.
-Both go through the typed Redis seam `src/redis/retro-seen.ts` — never raw Redis.
-Use a tiny `tsx` shim:
+Write the observed cues as a JSON array to a temp file and run the ledger
+subcommand; it bumps each cue once, in order, and prints the seen cues and the recurrence map:
 
-```bash
-# Bump recurrence for each observed cue, then print {seenCues, recurrence}.
-# `npx tsx -e` runs CJS, so top-level `await` is a syntax error: the body lives in
-# an async IIFE and the seam is loaded with a dynamic import().
-npx tsx -e '
-  (async () => {
-    const { bumpRetroRecurrence, getRetroSeen, getRetroRecurrence } = await import("./src/redis/retro-seen.ts");
-    const cues = JSON.parse(process.env.CUES || "[]");
-    for (const c of cues) await bumpRetroRecurrence(c);
-    const seen = await getRetroSeen();
-    const recurrence = await getRetroRecurrence();
-    process.stdout.write(JSON.stringify({ seenCues: Object.keys(seen), recurrence }));
-    process.exit(0);
-  })();
-'
-```
+    npx tsx scripts/retro/record-emit.ts ledger --cues-file "$CUES_FILE"
 
 ## 7. Plan the emit (pure, capped, gated)
 
@@ -242,15 +228,15 @@ If `apply === false` (the default), PRINT the plan and STOP — no issues, no PR
 
 Under `--apply`:
 
-- For each `plan.issues[]`, write the body to a temp file and run the emit script (create, first state, record; a failed first state leaves the cue unrecorded):
+- For each `plan.issues[]`, write the body to a temp file and run the script, which creates the issue, writes the first state through the lifecycle seam, then records the cue. A refusal exits 1 with the cue unrecorded: log it and never fall back to a direct label write.
 
-      npx tsx scripts/retro/record-emit.ts emit --title "$TITLE" --body-file "$BODY_FILE" --cue "$CUE" --run-id "$RUN_ID"
+      npx tsx scripts/retro/record-emit.ts issue --title "$TITLE" --body-file "$BODY_FILE" --cue "$CUE" --run-id "$RUN_ID"
 
 - For `plan.pr` (if non-null): open a feature branch, apply the prompt/doc fix
   (skill lesson / CLAUDE.md / CONTEXT.md note), run `npm run typecheck:test`
   AND `npm test`, then `gh pr create` with `Tier:` populated from
-  `GET /api/tier` and a `## Files in scope` mirror. Record the cue in the
-  seen-list with `decision: "pr"`. This is the ONLY file-mutation path.
+  `GET /api/tier` and a `## Files in scope` mirror. Record the cue with
+  `record-emit.ts pr --cue "$CUE" --run-id "$RUN_ID" --ref "$PR"`. This is the ONLY file-mutation path.
 
 Caps mean at most 2 issues + 1 PR ever leave a single retro run.
 
@@ -292,7 +278,7 @@ Without `--apply` print the plan and write the artifact only.
    check, standard, fence; the rung is in the cue (`review:<rung>:<slug>`, the
    `REVIEW_CUE` grammar). A slug re-trips only after its prior emit closes and
    lands exactly one rung up; an open prior emit emits nothing, but each `plan.recheck` entry is re-recorded
-   with `record-emit.ts recheck` so the due signal does not
+   with `record-emit.ts recheck --entries-file "$ENTRIES_FILE"` (the entries as JSON) so the due signal does not
    re-fire daily (next check in 7 days); `fence` is
    terminal. Caps are independent of the run pass: at most **2** check issues
    (filed through § 8's create + first-state step; body names the arm, PRs, rounds and the proposed
