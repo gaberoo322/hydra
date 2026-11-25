@@ -11,6 +11,10 @@
  * STD-PLAYBOOK-CURRENT-BEHAVIOUR, STD-PLAYBOOK-TARGET-SEAM and
  * STD-PLAYBOOK-LOGIC-IN-SCRIPTS.
  *
+ * The same detector also backs the ADR-corpus ratchet (`adrVocabularyRatchet`,
+ * ADR-0037 Decision 7), exported below with its own baseline; the CLI entry
+ * runs the playbook ratchet.
+ *
  * Ten banned shapes:
  *
  *   status      a status or history phrase: "not yet", "currently", "formerly",
