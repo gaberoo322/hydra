@@ -7,6 +7,7 @@
  * A failed fetch is a refusal (`fetch-failed`), never a pass.
  */
 import { extractClearanceBlockerRefs, hasCrossRepoBlockerRef, type BlockerRefState } from "../github/blockers.ts";
+import { bodyClosesIssue } from "../github/pr-refs.ts";
 import { hasScopeSection } from "../scope-section.ts";
 import { isFailVerdict, isPassVerdict, parseQaVerdictTrailers, qaVerdictShaMatches, type FinalVerdict } from "../qa/verdict-trailer.ts";
 import { isAdr5Reason, isAllowedReason } from "./reasons.ts";
@@ -261,12 +262,6 @@ export function parsePrEvidence(evidence: Readonly<Record<string, string>>): num
   if (raw === undefined) return null;
   const m = /^#?(\d+)$/.exec(raw.trim());
   return m ? Number(m[1]) : null;
-}
-
-/** True when the PR body carries a closing reference to `issue`. */
-export function bodyClosesIssue(body: string, issue: number): boolean {
-  const re = new RegExp(`\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s+#${issue}\\b`, "i");
-  return re.test(body);
 }
 
 /** `in-progress -> needs-qa`: evidence `pr=N` must be an OPEN PR closing the issue. */

@@ -4,6 +4,9 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import * as gatesModule from "../src/lifecycle/gates.ts";
+import * as lifecycleIndex from "../src/lifecycle/index.ts";
 import { lastWrittenTransition } from "../src/lifecycle/reconcile.ts";
 import {
   advance,
@@ -88,12 +91,107 @@ describe("gate predicates (INV-7, INV-8)", () => {
     assert.equal(gatePrOpen(gi({ evidence: { pr: "56" } }), { pr: open }).code, "record-binding-mismatch");
     assert.equal(gatePrOpen(gi({ evidence: ev }), { pr: { ok: true, value: { ...open.value, state: "MERGED" } } }).code, "pr-not-open");
     assert.equal(gatePrOpen(gi({ evidence: ev }), { pr: { ok: true, value: { ...open.value, body: "Refs #10" } } }).code, "pr-does-not-close-issue");
+    // #5766: the gate asks the PR refs module — a negated ref is not a close, the colon form is.
+    assert.equal(gatePrOpen(gi({ evidence: ev }), { pr: { ok: true, value: { ...open.value, body: "This does not close #10" } } }).code, "pr-does-not-close-issue");
+    assert.equal(gatePrOpen(gi({ evidence: ev }), { pr: { ok: true, value: { ...open.value, body: "Closes: #10" } } }).ok, true);
     assert.equal(gatePrOpen(gi({ evidence: ev }), { pr: open }).ok, true);
+  });
+
+  // #5766 (epic #5762): the pr-open and close gates ask the PR refs module, so
+  // every row of the shared truth table is the gate's answer too.
+  test("pr-open and close gates answer every row of the shared PR-refs truth table", () => {
+    const rows = (
+      JSON.parse(readFileSync(new URL("./fixtures/pr-refs-truth-table.json", import.meta.url), "utf-8")) as {
+        rows: Array<{ name: string; body: string; closing: number[]; referenced: number[]; doesNotClose?: number[] }>;
+      }
+    ).rows;
+    assert.ok(rows.length > 0, "truth table must not be empty");
+    // Probes: the row's three columns UNION every number written after a hash in
+    // the body, so a row whose columns are all empty ("Closes:#4", "Closing #5")
+    // is still asked about the number it names.
+    let probes = 0;
+    const zeroProbeRows: string[] = [];
+    for (const row of rows) {
+      const inBody = [...row.body.matchAll(/#(\d+)/g)].map((m) => Number(m[1]));
+      const probeSet = new Set([...row.closing, ...row.referenced, ...(row.doesNotClose ?? []), ...inBody]);
+      if (probeSet.size === 0) {
+        zeroProbeRows.push(row.name);
+        assert.equal(/#\d/.test(row.body), false, `a row with a hash-number must be probed — ${row.name}`);
+      }
+      for (const n of probeSet) {
+        probes++;
+        const closes = row.closing.includes(n);
+        const open = gatePrOpen(gi({ issue: n, evidence: { pr: "55" } }), { pr: { ok: true, value: { number: 55, state: "OPEN", body: row.body } } });
+        assert.equal(open.code, closes ? "ok" : "pr-does-not-close-issue", `pr-open #${n} — ${row.name}`);
+        const closed = gateClose(
+          gi({ issue: n, to: "closed", closeReason: "completed", evidence: { pr: "55" } }),
+          { pr: { ok: true, value: { number: 55, state: "MERGED", body: row.body } } },
+        );
+        assert.equal(closed.code, closes ? "ok" : "pr-does-not-close-issue", `close #${n} — ${row.name}`);
+      }
+    }
+    // Only a body that names no hash-number at all may go unprobed.
+    assert.deepEqual(zeroProbeRows, ["empty body"]);
+    assert.ok(probes >= rows.length - zeroProbeRows.length, `every other row is probed at least once (${probes} probes)`);
+  });
+
+  // #5766: each behaviour that differs from the deleted private regex
+  // (`\\b(?:verbs)\\s+#N\\b`, built per issue number), pinned through the gate.
+  test("pr-open gate: every answer that changed when the private regex was deleted", () => {
+    const answer = (body: string, issue: number): string =>
+      gatePrOpen(gi({ issue, evidence: { pr: "55" } }), { pr: { ok: true, value: { number: 55, state: "OPEN", body } } }).code;
+    // Now refused (the old regex had no negation guard).
+    for (const body of [
+      "This does not close #10",
+      "Does not close #10 — #63 does.",
+      "Doesn't fix #10",
+      "Doesn\u2019t fix #10",
+      "This cannot close #10",
+      "Never closes #10",
+      "No longer resolves #10",
+      "Does not yet fix #10",
+    ]) {
+      assert.equal(answer(body, 10), "pr-does-not-close-issue", body);
+    }
+    assert.equal(answer("Closes #1, does not close #10", 10), "pr-does-not-close-issue");
+    assert.equal(answer("Closes #1, does not close #10", 1), "ok");
+    // Now accepted (the old regex allowed only whitespace between verb and #N,
+    // and interpolated the number so a zero-padded ref never matched).
+    assert.equal(answer("Closes: #10", 10), "ok");
+    assert.equal(answer("Closes : #10", 10), "ok");
+    assert.equal(answer("Closes #0010", 10), "ok");
+    // Issue 0 is not an issue: the old regex matched a literal "#0".
+    assert.equal(answer("Closes #0", 0), "pr-does-not-close-issue");
+    // Unchanged from the old regex, pinned so they stay that way.
+    assert.equal(answer("Closes  #10", 10), "ok");
+    assert.equal(answer("closed #10", 10), "ok");
+    assert.equal(answer("FIXES #10", 10), "ok");
+    assert.equal(answer("Closes:#10", 10), "pr-does-not-close-issue");
+    assert.equal(answer("encloses #10", 10), "pr-does-not-close-issue");
+    assert.equal(answer("Closing #10", 10), "pr-does-not-close-issue");
+    assert.equal(answer("Closes owner/repo#10", 10), "pr-does-not-close-issue");
+    assert.equal(answer("Closes #100", 10), "pr-does-not-close-issue");
+    assert.equal(answer("Closes #10", 1), "pr-does-not-close-issue");
+    assert.equal(answer("Closes #10a", 10), "pr-does-not-close-issue");
+  });
+
+  test("the lifecycle gates no longer export a closing predicate of their own (#5766)", () => {
+    assert.equal("bodyClosesIssue" in gatesModule, false);
+    assert.equal("bodyClosesIssue" in lifecycleIndex, false);
   });
 
   test("close: completed needs a merged PR; not planned needs superseded-by", () => {
     const merged = { ok: true as const, value: { number: 55, state: "MERGED", body: "closes #10" } };
     assert.equal(gateClose(gi({ to: "closed", closeReason: "completed", evidence: { pr: "55" } }), { pr: merged }).ok, true);
+    // #5766: same predicate as pr-open — negated ref refused, colon form accepted.
+    assert.equal(
+      gateClose(gi({ to: "closed", closeReason: "completed", evidence: { pr: "55" } }), { pr: { ok: true, value: { ...merged.value, body: "Does not close #10" } } }).code,
+      "pr-does-not-close-issue",
+    );
+    assert.equal(
+      gateClose(gi({ to: "closed", closeReason: "completed", evidence: { pr: "55" } }), { pr: { ok: true, value: { ...merged.value, body: "Closes: #10" } } }).ok,
+      true,
+    );
     assert.equal(
       gateClose(gi({ to: "closed", closeReason: "completed", evidence: { pr: "55" } }), { pr: { ok: true, value: { ...merged.value, state: "OPEN" } } }).code,
       "pr-not-merged",

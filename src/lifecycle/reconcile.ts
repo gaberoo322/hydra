@@ -21,6 +21,7 @@
  */
 import { logger } from "../logger.ts";
 import { isZeroStateExempt } from "../github/blockers.ts";
+import { bodyClosesIssue } from "../github/pr-refs.ts";
 import type { IssueReadResult, IssueRow } from "../github/issues.ts";
 import type {
   JournalWriteResult,
@@ -28,7 +29,6 @@ import type {
 } from "../redis/lifecycle-journal.ts";
 import { latestResetMs, resetsCapsOnExit } from "./caps.ts";
 import {
-  bodyClosesIssue,
   classifyQaPassedExit,
   parsePrEvidence,
   type Fetched,
