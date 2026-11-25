@@ -88,9 +88,10 @@
  * alarm on an unrelated change" — bump the baseline by hand if that ever bites.
  */
 
+import { isEntrypoint } from "../lib/entrypoint.mjs";
 import { readFileSync, readdirSync, writeFileSync, existsSync } from "node:fs";
 import { resolve, dirname, relative, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 // HYDRA_REPO_ROOT: run this (trusted) script against another checkout, e.g. the
@@ -569,11 +570,8 @@ export function branchChangedTestFiles(cwd = REPO_ROOT, base = "origin/master") 
 // CLI entrypoint — guarded so the exports above stay importable without
 // running the CLI (same pattern as scripts/test/redis-db-launch.mjs).
 // ---------------------------------------------------------------------------
-const isMain =
-  process.argv[1] !== undefined &&
-  import.meta.url === pathToFileURL(process.argv[1]).href;
 
-if (isMain) {
+if (isEntrypoint(import.meta.url)) {
   const args = process.argv.slice(2);
   if (args[0] === "--update-baseline") {
     const generated = generateBaseline();

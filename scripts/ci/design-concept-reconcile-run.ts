@@ -37,9 +37,10 @@
  * around elsewhere (`reference_npm_audit_required_check_ambient_poison_pill`).
  */
 
+import { isEntrypoint } from "../lib/entrypoint.mjs";
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { resolve, join, sep } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import {
   checkReconciliation,
   extractAnchorRefFromPrBody,
@@ -263,10 +264,8 @@ function report(result: ReconcileRunResult, mode: "ci" | "local"): number {
   return 1;
 }
 
-const isMain =
-  process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
 
-if (isMain) {
+if (isEntrypoint(import.meta.url)) {
   const args = parseLocalArgs(process.argv.slice(2));
   if (args.kind === "error") {
     console.error(`[dc-reconcile:dry-run] ${args.message}`);

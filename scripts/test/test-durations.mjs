@@ -10,9 +10,9 @@
  *
  *   node scripts/test/test-durations.mjs [--top N] [--pool serial|parallel] [--capture <path>]
  */
+import { isEntrypoint } from "../lib/entrypoint.mjs";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { loadManifest, REPO_ROOT, splitPools } from "./test-pools.mjs";
 
 /** Sum duration_ms per file and label each file's pool from the manifest. */
@@ -62,8 +62,7 @@ export function renderReport({ entries, totals, zeroRows = 0 }, { top = 25, pool
   return lines.join("\n") + "\n";
 }
 
-const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
-if (isMain) {
+if (isEntrypoint(import.meta.url)) {
   const argv = process.argv.slice(2);
   const opt = (name) => {
     const i = argv.indexOf(name);

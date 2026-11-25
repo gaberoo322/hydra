@@ -48,6 +48,7 @@
  * It prints a JSON verdict ({duplicate, matchedTitle, overlap}) to stdout and
  * exits 0 always (a dedup check never crashes the producing skill).
  */
+import { isEntrypoint } from "../lib/entrypoint.mjs";
 
 /** Default Jaccard-overlap threshold above which two titles are duplicates. */
 export const DEFAULT_OVERLAP_THRESHOLD = 0.5;
@@ -203,22 +204,8 @@ export function partitionCandidates(
 // (argv[3..]) and exits 0 always — a dedup check must never crash the
 // producing skill (CLAUDE.md fail-loud-but-don't-block discipline).
 // ---------------------------------------------------------------------------
-const isMain = (() => {
-  try {
-    return (
-      typeof process !== "undefined" &&
-      Array.isArray(process.argv) &&
-      typeof import.meta.url === "string" &&
-      process.argv[1] !== undefined &&
-      import.meta.url === `file://${process.argv[1]}`
-    );
-  } catch {
-    /* intentional: import.meta may be unavailable under some loaders; treat as not-main */
-    return false;
-  }
-})();
 
-if (isMain) {
+if (isEntrypoint(import.meta.url)) {
   const [, , candidate, ...existing] = process.argv;
   if (candidate === undefined) {
     console.error(

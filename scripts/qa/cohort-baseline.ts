@@ -22,6 +22,7 @@
  * 14 days gets a revert PR, a fix PR, or a `Post-mortem:` issue naming it.
  */
 
+import { isEntrypoint } from "../lib/entrypoint.mjs";
 import {
   isFailVerdict,
   parseQaVerdictTrailers,
@@ -550,20 +551,8 @@ async function harvest(repo: string, since: string, until: string): Promise<Coho
   return { prs, items, until, tokens };
 }
 
-const isMain = (() => {
-  try {
-    return (
-      Array.isArray(process.argv) &&
-      process.argv[1] !== undefined &&
-      import.meta.url === `file://${process.argv[1]}`
-    );
-  } catch {
-    /* intentional: import.meta unavailable outside a module host — not the CLI */
-    return false;
-  }
-})();
 
-if (isMain) {
+if (isEntrypoint(import.meta.url)) {
   const fs = await import("node:fs");
   const arg = (flag: string): string | null => {
     const i = process.argv.indexOf(flag);

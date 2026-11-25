@@ -20,11 +20,12 @@
  *     only if listed in `parallel` and not in `serialPinned`; anything the
  *     manifest does not name (incl. every new test file) runs serial.
  */
+import { isEntrypoint } from "../lib/entrypoint.mjs";
 import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(HERE, "..", "..");
@@ -460,8 +461,7 @@ export function runPools({ invocations, env, cwd = process.cwd(), stdout = proce
   });
 }
 
-const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
-if (isMain) {
+if (isEntrypoint(import.meta.url)) {
   const scanned = scanPools();
   if (process.argv.includes("--update")) {
     writeFileSync(MANIFEST_PATH, JSON.stringify(scanned, null, 2) + "\n");

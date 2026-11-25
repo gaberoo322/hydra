@@ -115,9 +115,10 @@
  *       the side-effect-free observability hook the contract tests use.
  */
 
+import { isEntrypoint } from "../lib/entrypoint.mjs";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
-import { pathToFileURL, fileURLToPath } from "node:url";
+import { fileURLToPath } from "node:url";
 import { connect } from "node:net";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync } from "node:fs";
@@ -791,11 +792,8 @@ function installLauncherSignalHandlers() {
 // hit the no-args usage branch and `process.exit(1)` — which made the exports
 // effectively unreachable and forced every contract test through a subprocess.
 // ---------------------------------------------------------------------------
-const isMain =
-  process.argv[1] !== undefined &&
-  import.meta.url === pathToFileURL(process.argv[1]).href;
 
-if (isMain) {
+if (isEntrypoint(import.meta.url)) {
   await main();
 }
 

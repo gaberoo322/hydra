@@ -13,6 +13,7 @@
  */
 
 import { resolve } from "node:path";
+import { isEntrypoint as rawIsEntrypoint } from "../lib/entrypoint.mjs";
 import { fileURLToPath } from "node:url";
 import type { CapCount } from "../../src/lifecycle/caps.ts";
 import type { QaBounceInput, QaBounceResult } from "../../src/lifecycle/qa-bounce.ts";
@@ -152,15 +153,8 @@ export async function createProductionPorts(repo: string, apiBase: string): Prom
   };
 }
 
-/** True when the module is the process entrypoint (the qa-verdict.ts guard). */
-export function isEntrypoint(metaUrl: string): boolean {
-  return (
-    typeof process !== "undefined" &&
-    Array.isArray(process.argv) &&
-    process.argv[1] !== undefined &&
-    metaUrl === `file://${process.argv[1]}`
-  );
-}
+/** True when the module is the process entrypoint — typed re-export of the single implementation in scripts/lib/entrypoint.mjs. */
+export const isEntrypoint: (metaUrl: string) => boolean = rawIsEntrypoint;
 
 /**
  * Run `body` as a CLI: print its JSON result on stdout and exit once stdout

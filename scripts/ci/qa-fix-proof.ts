@@ -18,6 +18,7 @@
  * never reddens a merge: exit 0 on every path except usage (2).
  */
 
+import { isEntrypoint } from "../lib/entrypoint.mjs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -236,20 +237,8 @@ export function runChangedTestsMode(base: string, head: string): { lines: string
   }
 }
 
-const isMain = (() => {
-  try {
-    if (typeof process === "undefined" || !Array.isArray(process.argv) || process.argv[1] === undefined) {
-      return false;
-    }
-    // realpath both sides: a symlinked or space-containing argv[1] must still match.
-    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]);
-  } catch (err) {
-    console.error("[qa-fix-proof] could not resolve entrypoint; treating as not-main:", err);
-    return false;
-  }
-})();
 
-if (isMain) {
+if (isEntrypoint(import.meta.url)) {
   const parseArg = (flag: string): string => {
     const idx = process.argv.indexOf(flag);
     if (idx === -1 || idx === process.argv.length - 1) return "";
