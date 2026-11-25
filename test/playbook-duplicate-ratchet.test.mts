@@ -20,6 +20,7 @@ const {
   countSpans,
   findIntraSpans,
   measureTexts,
+  readTexts,
   duplicateRatchet,
 } = await import("../scripts/ci/playbook-duplicate-ratchet.ts");
 const { REPO_ROOT } = await import("../scripts/ci/seam-check-lib.ts");
@@ -156,5 +157,20 @@ describe("playbook-duplicate-ratchet: the real playbooks", () => {
   test("the standard the report points at defines STD-PLAYBOOK-ONE-HOME and names this ratchet", () => {
     const standard = readFileSync(join(REPO_ROOT, STANDARD_REL), "utf8");
     assert.match(standard, /^### STD-PLAYBOOK-ONE-HOME\n[\s\S]*?enforced-by: reviewer, scripts\/ci\/playbook-duplicate-ratchet\.ts/m);
+  });
+
+  test("measured keys are a bare playbook path or path+TAB+intra, and equal the committed baseline", () => {
+    const measured = measureTexts(readTexts(REPO_ROOT));
+    const baseline = JSON.parse(readFileSync(join(REPO_ROOT, "scripts/ci/playbook-duplicate-baseline.json"), "utf8"));
+    for (const key of Object.keys(measured)) {
+      assert.match(key, /^docs\/operator-playbooks\/[^\t]+\.md(\tintra)?$/, `bad key shape: ${JSON.stringify(key)}`);
+    }
+    assert.ok(Object.keys(measured).some((k) => k.endsWith("\tintra")), "at least one intra row is measured");
+    assert.ok(Object.keys(measured).some((k) => !k.includes("\t")), "at least one bare cross-file row is measured");
+    assert.deepEqual(measured, baseline);
+  });
+  test("a bare cross-file key never carries the intra suffix (sibling shape)", () => {
+    const rows = measureTexts({ "a.md": words("x", 20), "b.md": words("x", 20) });
+    assert.deepEqual(Object.keys(rows).sort(), ["a.md", "b.md"]);
   });
 });

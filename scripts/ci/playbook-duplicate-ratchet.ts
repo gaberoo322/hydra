@@ -34,7 +34,7 @@
  * until the baseline is lowered; a file absent from the baseline is capped at 0.
  *
  * The functions that decide are pure. The filesystem is touched only by
- * `scanRepo`, `loadBaseline` and `main`. Run by
+ * `readTexts`, `scanRepo`, `loadBaseline` and `main`. Run by
  * test/playbook-duplicate-ratchet.test.mts in the required suite.
  */
 
@@ -295,7 +295,7 @@ export const duplicateRatchet = defineRatchet({
   measure: async (root) => measureTexts(readTexts(root)),
   help: [
     `Move the passage into a _fragments/ file and @include it from every holder (${STANDARD_REL} STD-PLAYBOOK-ONE-HOME).`,
-    "A `<file>\tintra` row: a passage the file states twice; delete the later copy and point at the first (STD-PLAYBOOK-ONE-HOME).",
+    "A `<file>` + TAB + `intra` row: a passage the file states twice; delete the later copy and point at the first (STD-PLAYBOOK-ONE-HOME).",
     "A removed copy also lowers its partner playbook's row; tighten that row too.",
     "To find the span, diff the named playbook against master; scanTexts(texts) lists every span with its line and partners.",
   ],
