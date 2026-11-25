@@ -67,6 +67,14 @@ them, so a task loads 2–4 ADRs rather than the whole corpus. Per-area routed w
 flat by a non-growth ratchet in `test/adr-roster.test.mts`: an area may not grow without a
 deliberate baseline bump in the same PR.
 
+### Decision 7 — An ADR points at an invariant or symbol's home; it does not copy it
+
+A Decision bullet names the artifact or file that owns an invariant, constant or field, and
+never copies the `INV-<n>` id or the symbol: the copy drifts from its home and cites
+artifacts that are not in the repo. A definition bullet that opens with its own invariant
+label is the home and is exempt. `scripts/ci/playbook-vocabulary-ratchet.ts` counts both
+shapes per ADR against `scripts/ci/adr-vocabulary-baseline.json`, a shrink-only ceiling.
+
 ## Consequences
 
 - Adding an ADR to an already-heavy area fails CI until the author either re-routes, trims
