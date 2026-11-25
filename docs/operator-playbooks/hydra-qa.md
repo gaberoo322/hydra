@@ -367,7 +367,7 @@ If `NEXT` is `reviewer-commit`, `route` decided a class-A (or, at stage `A+B`, c
 
 ```bash
 if [ "$NEXT" = "reviewer-commit" ]; then
-  RC_OK=$(jq -r '(.ok // false) | if . then 1 else 0 end' "$PK.rc-finish.json" 2>/dev/null || echo 0); NEW_HEAD=$(jq -r '.newHead // empty' "$PK.rc-finish.json" 2>/dev/null) # intentional: finish output file is absent after abort, so RC_OK falls to 0
+  RC_OK=$(jq -r '(.ok // false) | if . then 1 else 0 end' "$PK.rc-finish.json" 2>/dev/null || echo 0); NEW_HEAD=$(jq -r '.newHead // empty' "$PK.rc-finish.json" 2>/dev/null) # intentional: no finish file after abort -> 0
   if [ "${RC_OK:-0}" = 1 ] && [ -n "${NEW_HEAD:-}" ]; then
     ROUTE_JSON=$(node --no-warnings --experimental-strip-types scripts/qa/route.ts \
       --preflight "$PF" --packet "$PK" --findings "$FINDINGS_FILE" --summaries "$SUMMARIES_FILE" --reviewer-fixed "$NEW_HEAD") || exit 1
