@@ -536,6 +536,14 @@ describe("github/pr-refs (issue #4683)", () => {
       assert.deepEqual(referencedIssuesInBody(body), []);
       assert.equal(bodyClosesIssue(body, 5), false);
     }
+    // A truthy non-string that slipped past the types (untyped JSON) is
+    // treated like no body — the same answer the Python twin gives below.
+    for (const junk of [5, 0, true, {}, [], ["Closes #5"], { body: "Closes #5" }]) {
+      const body = junk as unknown as string;
+      assert.deepEqual(closingIssuesInBody(body), [], `closing — ${JSON.stringify(junk)}`);
+      assert.deepEqual(referencedIssuesInBody(body), [], `referenced — ${JSON.stringify(junk)}`);
+      assert.equal(bodyClosesIssue(body, 5), false, `bodyClosesIssue — ${JSON.stringify(junk)}`);
+    }
     assert.equal(bodyClosesIssue("Closes #5", Number.NaN), false);
     assert.equal(bodyClosesIssue("Closes #5", -5), false);
     assert.deepEqual(pyBodyAnswers([null, "", 5, { body: "Closes #5" }]), [

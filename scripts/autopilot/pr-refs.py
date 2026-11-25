@@ -69,7 +69,8 @@ applied to every body predicate here:
     negation guard's horizontal space-or-tab, exactly as in JS).
   * only POSITIVE numbers count — `Closes #0` is nothing, as in TS.
 
-Pure: stdin JSON in, stdout numbers out. It NEVER shells out to `gh` — the
+Pure: stdin JSON in, stdout out (space-separated numbers; `<issue> <pr>`
+lines for `--pairs`; a JSON array for `--bodies`). It NEVER shells out to `gh` — the
 callers (recover-stale.sh, the target-build preflight) own the `gh pr list` call and
 the never-abort degradation contract. Any parse error prints nothing and
 exits 0: an empty result is the caller's "no open PR" signal, which falls
