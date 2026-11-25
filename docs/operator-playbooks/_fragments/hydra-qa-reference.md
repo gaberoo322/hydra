@@ -106,13 +106,11 @@ esac
 The `reviewer-commit` phase returns `commit-a`, `commit-b` or `commit-ab` only when ALL of these hold: the stage is `A` or `A+B`; the tier is 1-3; no changed file is Verifier Core; the one-way-door detector says `two-way` (`one-way` and `unknown` both refuse); and EVERY blocking finding of the fold sits in a class-A location (the PR body, or a path `classifyQaFixPath` calls `A`/`AB` that is not listed under the PR body's `## Files out of scope`; and, ONLY at stage `A+B`, a class-`B` test path, i.e. `test/**/*.test.mts` excluding the helpers subdirectory, likewise not out of scope). Under stage `A` a blocking finding at a class-B path is `ineligible-finding` exactly as before. A row located in `src/` (the "branch has no test" form) is never reviewer-fixable: a test edit cannot satisfy its per-row re-verify, so a reviewer who wants the class-B fix locates the coverage finding at the test file. The action is `commit-a` (class-A bucket only), `commit-b` (class-B only) or `commit-ab` (both); `blockingTestPaths[]` / `followUpTestPaths[]` carry the class-B paths, `blockingPaths[]` / `followUpPaths[]` keep their class-A meaning, and a blocking row AT an AB baseline stays in the class-A bucket. One blocking finding anywhere else makes the whole round `none`: nothing is committed, nothing is pushed, and `route` runs the ordinary FAIL routing unchanged on the original FAIL. The phase never edits, filters or re-grades a finding.
 
 ```bash
-RC_PLAN_FILE=$(mktemp)   # private tempfile
-printf '%s' "$ROUTE_JSON" | jq -c '.reviewerCommit' > "$RC_PLAN_FILE"
-OPEN=$(node --no-warnings --experimental-strip-types scripts/qa/reviewer-commit.ts open --plan "$RC_PLAN_FILE" --pr "$pr_number")
+RC_PLAN_FILE=$(mktemp); printf '%s' "$ROUTE_JSON" | jq -c '.reviewerCommit' > "$RC_PLAN_FILE"   # private tempfile
+OPEN=$(node --no-warnings --experimental-strip-types scripts/qa/reviewer-commit.ts open --plan "$RC_PLAN_FILE" --pr "$pr_number"); rm -f "$RC_PLAN_FILE"
 # .ok true: make the edits in .prWorktree (and .bodyFile when bodyFix), then:
 FINISH=$(node --no-warnings --experimental-strip-types scripts/qa/reviewer-commit.ts finish --state "$(printf '%s' "$OPEN" | jq -r .stateFile)")
 # a hand step you cannot complete: the same script with `abort --state <stateFile>`
-rm -f "$RC_PLAN_FILE"
 ```
 
 A round makes at most one commit ending `QA-Fix: A` and at most one ending `QA-Fix: B`, never a combined trailer; the PASS trailer's `qa-fixes=` names every commit made. A class-B edit may never reduce coverage by deletion (`case-count-check`, fails closed), and the proof is per file: an edit whose file still passes at the merge-base, or whose import crashes there, is unproven and the round commits nothing; `qa-fix-proof.yml` re-runs the same proof on the pushed head and `qa-merge-guard` holds with `qa-fix-proof-not-green` until it is green. The stage switch is flipped only by the operator-merged graduation item that `scripts/qa/commit-graduation.ts` files. A reviewer-commit round is one `round=` like any other and never counts as a FAIL round; the round cap and the T4 2-strike rule are untouched.
