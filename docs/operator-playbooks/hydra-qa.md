@@ -367,7 +367,10 @@ If `NEXT` is `reviewer-commit`, `route` decided a class-A (or, at stage `A+B`, c
 
 ```bash
 if [ "$NEXT" = "reviewer-commit" ]; then
-  # scripts/qa/reviewer-commit.ts open -> hand edit -> finish (or abort); RC_OK=finish .ok, NEW_HEAD=finish .newHead
+  # scripts/qa/reviewer-commit.ts open -> hand edit -> finish (or abort): run the 9.4 fence, which leaves $FINISH
+  FINISH=${FINISH:-'{}'}
+  RC_OK=$(printf '%s' "$FINISH" | jq -r '.ok // false | if . then 1 else 0 end')
+  NEW_HEAD=$(printf '%s' "$FINISH" | jq -r '.newHead // empty')
   if [ "${RC_OK:-0}" = 1 ] && [ -n "${NEW_HEAD:-}" ]; then
     ROUTE_JSON=$(node --no-warnings --experimental-strip-types scripts/qa/route.ts \
       --preflight "$PF" --packet "$PK" --findings "$FINDINGS_FILE" --summaries "$SUMMARIES_FILE" --reviewer-fixed "$NEW_HEAD") || exit 1

@@ -20,6 +20,7 @@
  */
 
 import { join } from "node:path";
+import { InvariantViolationError } from "../../src/errors.ts";
 import {
   checkBodyScopeEdit,
   countTestCases,
@@ -200,17 +201,17 @@ export async function openReviewerCommit(
 
     // TRUST (INV-1): scripts run only from a detached worktree of plan.fixedSha (origin/master).
     const master = await ports.git(["worktree", "add", "--detach", st.masterWorktree, plan.fixedSha], st.sessionRoot);
-    if (!master.ok) throw new OpenRefusal("master-worktree-failed");
+    if (!master.ok) throw new Refusal("master-worktree-failed");
     const nm = join(st.sessionRoot, "node_modules");
     if (ports.fs.exists(nm)) ports.fs.symlink(nm, join(st.masterWorktree, "node_modules"));
 
     const fetched = await ports.git(["fetch", "origin", plan.headRef], st.sessionRoot);
-    if (!fetched.ok) throw new OpenRefusal("fetch-failed");
+    if (!fetched.ok) throw new Refusal("fetch-failed");
     const pr = await ports.git(["worktree", "add", "--detach", st.prWorktree, plan.reviewedHead], st.sessionRoot);
-    if (!pr.ok) throw new OpenRefusal("pr-worktree-failed");
+    if (!pr.ok) throw new Refusal("pr-worktree-failed");
 
     const body = await ports.gh(["pr", "view", String(input.pr), "--repo", input.repo, "--json", "body", "--jq", ".body"]);
-    if (!body.ok) throw new OpenRefusal("body-unreadable");
+    if (!body.ok) throw new Refusal("body-unreadable");
     ports.fs.write(st.origBodyFile, body.stdout);
     ports.fs.write(st.bodyFile, body.stdout);
 
@@ -218,23 +219,15 @@ export async function openReviewerCommit(
     ports.fs.write(stateFile, JSON.stringify(st));
     return { ok: true, prWorktree: st.prWorktree, masterWorktree: st.masterWorktree, bodyFile: st.bodyFile, stateFile };
   } catch (err) {
-    const reason = err instanceof OpenRefusal ? err.reason : "crashed";
-    if (!(err instanceof OpenRefusal)) console.error("[qa-reviewer-commit] open crashed:", err);
+    const reason = err instanceof Refusal ? err.reason : "crashed";
+    if (!(err instanceof Refusal)) console.error("[qa-reviewer-commit] open crashed:", err);
     if (st !== null) await cleanup(st, ports);
     return { ok: false, reason };
   }
 }
 
-class OpenRefusal extends Error {
-  readonly reason: string;
-  constructor(reason: string) {
-    super(reason);
-    this.reason = reason;
-  }
-}
-
-/** Internal: a refusal carries a reason and aborts the finish pipeline. */
-class Refusal extends Error {
+/** A refusal carries a machine-readable reason and aborts the open/finish pipeline (STD-ERROR-TYPED-CODE). */
+class Refusal extends InvariantViolationError {
   readonly reason: string;
   constructor(reason: string) {
     super(reason);
@@ -356,9 +349,13 @@ async function runFinish(
       const testPaths = [...plan.blockingTestPaths, ...plan.followUpTestPaths];
       for (const p of testPaths) {
         const after = ports.fs.read(join(st.prWorktree, p));
-        if (after === null) continue; // an optional path the reviewer never created
         // INV-7: a reviewer-added NEW file has no reviewed-head version, so its before-count is 0.
         const existed = await ports.git(["cat-file", "-e", `${plan.reviewedHead}:${p}`], st.prWorktree);
+        if (after === null) {
+          // An optional path the reviewer never created is fine; deleting an existing test file lowers its count to 0.
+          if (existed.ok) throw new Refusal("case-count-lowered");
+          continue;
+        }
         let before = 0;
         if (existed.ok) {
           const shown = await ports.git(["show", `${plan.reviewedHead}:${p}`], st.prWorktree);

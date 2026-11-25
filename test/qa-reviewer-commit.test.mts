@@ -285,6 +285,22 @@ describe("finish: the three named defects (issue #5712 group A)", () => {
     env.files.set(`${o.prWorktree}/test/old.test.mts`, "test('a', () => {});\n");
     assert.equal((await finishReviewerCommit(o.stateFile, env.ports)).reason, "case-count-lowered");
   });
+
+  test("class B: deleting an existing reviewed test file refuses case-count-lowered", async () => {
+    const env = makeEnv();
+    const o = await open(env, plan({ action: "commit-b", blockingPaths: [], blockingTestPaths: ["test/old.test.mts"], blockingLocations: ["test/old.test.mts"] }));
+    env.cfg.reviewedCopies.set("test/old.test.mts", "test('a', () => {});\n");
+    // no file at prWorktree/test/old.test.mts: the reviewer deleted it
+    assert.equal((await finishReviewerCommit(o.stateFile, env.ports)).reason, "case-count-lowered");
+  });
+
+  test("class B: an optional follow-up path the reviewer never created is skipped, not refused", async () => {
+    const env = makeEnv();
+    const o = await open(env, plan({ action: "commit-b", blockingPaths: [], blockingTestPaths: ["test/old.test.mts"], blockingLocations: ["test/old.test.mts"], followUpTestPaths: ["test/never.test.mts"] }));
+    env.cfg.reviewedCopies.set("test/old.test.mts", "test('a', () => {});\n");
+    env.files.set(`${o.prWorktree}/test/old.test.mts`, "test('a', () => {});\ntest('b', () => {});\n");
+    assert.notEqual((await finishReviewerCommit(o.stateFile, env.ports)).reason, "case-count-lowered");
+  });
 });
 
 describe("finish: proofs, commits, staging, push shape", () => {
