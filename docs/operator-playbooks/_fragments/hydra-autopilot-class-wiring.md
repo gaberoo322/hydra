@@ -116,7 +116,7 @@ GitHub issues. Like `architecture_orch` and `retro_orch` it is
 `design_concept_orch` fires before `dev_orch` for an orch anchor whose design
 concept artifact is missing or stale. The plan-level selector is **warn-only**: a
 draft artifact whose `gateCheck()` returns `ok:false` counts as freshly present
-and `dev_orch` proceeds (a stderr warning only). The hard gate is
+and `dev_orch` proceeds (a stderr warning, not a block). The hard gate is
 per-anchor at PR time, in the `design-concept-reconcile` required check and the
 `hydra-qa` preflight (see `hydra-qa-reference.md`).
 

@@ -143,7 +143,7 @@ jq -nc --argjson pr "$PR" --argjson tier "$TIER" --argjson guard "$GUARD_JSON" -
   `qaVerdictShaMatches`, `src/qa/verdict-trailer.ts`); `decide.py` reads it and
   never re-derives the sha-prefix rule. A stale PASS keeps its mismatched SHAs
   and `verdict_at_head: false`, so it holds visibly as `hold:#N:stale-verdict`.
-  An event WITHOUT the three fields gets only the SHA-less verdict check; an
+  An event WITHOUT the three fields gets only the QA-verdict-PASS auto-merge check; an
   event with the SHAs but no `verdict_at_head` is treated as stale (fail
   closed), so never omit them.
 
