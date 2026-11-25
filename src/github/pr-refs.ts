@@ -199,3 +199,52 @@ export function mergedPrReferences(prs: readonly PrRefRow[]): ReadonlySet<number
   }
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// Per-body answers (issue #5763, epic #5762)
+// ---------------------------------------------------------------------------
+//
+// The row-set functions above answer "which issues does this PR LIST touch".
+// The three below answer the same two questions for ONE body, in body order,
+// so a caller that holds a single PR body (the lifecycle seam's pr-open gate,
+// QA preflight) asks this module instead of carrying its own verb regex. They
+// are thin views over the SAME `CLOSE_RE` / `BODY_RE` — no second verb list —
+// and are pinned, together with their Python twins in `pr-refs.py`, by the one
+// shared truth table `test/fixtures/pr-refs-truth-table.json`.
+
+/** First-occurrence-ordered, de-duplicated copy of `nums`. */
+function orderedUnique(nums: readonly number[]): number[] {
+  return [...new Set(nums)];
+}
+
+/**
+ * The issue numbers ONE PR body CLOSES — {@link CLOSE_RE} (closing verb,
+ * negation-guarded; never `Refs #N`) — in body order, de-duplicated on first
+ * occurrence. A null/undefined/empty body yields `[]`; never throws. Mirrors
+ * `pr-refs.py`'s `body_closing_issues()`.
+ */
+export function closingIssuesInBody(body: string | null | undefined): number[] {
+  return orderedUnique(matchAllNumbers(CLOSE_RE, body ?? ""));
+}
+
+/**
+ * The issue numbers ONE PR body REFERENCES — {@link BODY_RE}: a closing verb
+ * OR the non-closing `Ref(s) #N` form — in body order, de-duplicated on first
+ * occurrence, so element `[0]` is the FIRST issue the body references. Like
+ * {@link referencedIssues}, a negated closing ref ("does not close #N") still
+ * counts as referenced. A null/undefined/empty body yields `[]`; never
+ * throws. Mirrors `pr-refs.py`'s `body_referenced_issues()`.
+ */
+export function referencedIssuesInBody(body: string | null | undefined): number[] {
+  return orderedUnique(matchAllNumbers(BODY_RE, body ?? ""));
+}
+
+/**
+ * True iff ONE PR body closes `issue` — i.e. `issue` is among
+ * {@link closingIssuesInBody}. A null/undefined/empty body, or an `issue`
+ * that is not a positive integer, is `false`; never throws. Mirrors
+ * `pr-refs.py`'s `body_closes_issue()`.
+ */
+export function bodyClosesIssue(body: string | null | undefined, issue: number): boolean {
+  return closingIssuesInBody(body).includes(issue);
+}

@@ -44,6 +44,31 @@ src/github/pr-refs.ts's `mergedPrReferences()` directly.
 (body closing verb only) from the CLI; hydra-target-build's shipped-anchor
 preflight pipes a REST merged-pulls payload through it.
 
+`--bodies` (issue #5763) is the PER-BODY entry point: stdin is a JSON array of
+PR-body strings, stdout a JSON array of `{"closing": [...], "referenced":
+[...]}` objects (one per body, numbers in body order, de-duplicated on first
+occurrence) — `body_closing_issues()` / `body_referenced_issues()`, the twins
+of pr-refs.ts's `closingIssuesInBody()` / `referencedIssuesInBody()`.
+`body_closes_issue()` twins `bodyClosesIssue()`. One shared truth table
+(`test/fixtures/pr-refs-truth-table.json`) drives both languages; a row where
+they disagree fails the suite.
+
+ENGINE PARITY (issue #5763). The pattern sources are byte-identical to the
+TypeScript twin, but Python's `re` and JavaScript's RegExp read the same
+source differently on non-ASCII text, and the truth table surfaced real
+disagreements. Both sides now give the JavaScript answer, by three rules
+applied to every body predicate here:
+
+  * `re.ASCII` on `_BODY_RE` / `_CLOSE_RE` — word boundaries, digits and
+    case-folding are ASCII-only, as in a JS regex without the `u` flag
+    (before: `éCloses #5`, `Closes #5é`, `日本語fixes #7` were refs in TS
+    only; `Closes #٥` and `cloſes #5` in Python only).
+  * `_JS_ONLY_WS` — the non-ASCII characters a JS whitespace class matches
+    (NBSP, U+2028, U+FEFF, ...) are translated to a vertical tab before
+    matching, so whitespace agrees (a vertical tab is whitespace but NOT the
+    negation guard's horizontal space-or-tab, exactly as in JS).
+  * only POSITIVE numbers count — `Closes #0` is nothing, as in TS.
+
 Pure: stdin JSON in, stdout numbers out. It NEVER shells out to `gh` — the
 callers (recover-stale.sh, the target-build preflight) own the `gh pr list` call and
 the never-abort degradation contract. Any parse error prints nothing and
@@ -67,7 +92,7 @@ _BRANCH_RE = re.compile(r"issue-(\d+)\b")
 # PLUS the non-closing `Ref(s) #N` form (issue #3851). Case-insensitive.
 _BODY_RE = re.compile(
     r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?)\s*:?\s+#(\d+)\b",
-    re.IGNORECASE,
+    re.IGNORECASE | re.ASCII,
 )
 
 # Closing-verb-only subset of _BODY_RE (issue #4045) — deliberately EXCLUDES
@@ -108,8 +133,55 @@ _BODY_RE = re.compile(
 # reference, so the in-flight exclusion stays conservative.
 _CLOSE_RE = re.compile(
     r"(?:\b(?:can)?not|n't|n’t|\bnever|\bno[ \t]+longer)[ \t]+(?:(?:yet|fully|actually|necessarily|really|entirely|completely)[ \t]+)?(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#\d+\b|\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#(\d+)\b",
-    re.IGNORECASE,
+    re.IGNORECASE | re.ASCII,
 )
+
+# The non-ASCII characters a JavaScript `\s` matches (ECMAScript WhiteSpace +
+# LineTerminator), translated to `\v` before matching so the ASCII-flagged
+# patterns above see whitespace exactly where the TypeScript twin does (issue
+# #5763 — see ENGINE PARITY in the module docstring). `\v`, not a space: the
+# negation guard's `[ \t]+` must NOT accept them, as it does not in JS.
+_JS_ONLY_WS = {
+    cp: "\v"
+    for cp in (
+        [0x00A0, 0x1680, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF]
+        + list(range(0x2000, 0x200B))
+    )
+}
+
+
+def _nums(regex, body):
+    """Every POSITIVE group(1) number `regex` finds in one PR body, in body
+    order (duplicates kept). A non-string body (None, missing) yields [].
+    group(1) is None for _CLOSE_RE's negated arm (#4767) — skipped."""
+    if not isinstance(body, str):
+        return []
+    out = []
+    for m in regex.finditer(body.translate(_JS_ONLY_WS)):
+        if m.group(1) is not None and int(m.group(1)) > 0:
+            out.append(int(m.group(1)))
+    return out
+
+
+def body_closing_issues(body):
+    """The issue numbers ONE PR body CLOSES (`_CLOSE_RE`: closing verb,
+    negation-guarded, never `Refs #N`), in body order, de-duplicated on first
+    occurrence. Twin of pr-refs.ts's `closingIssuesInBody()` (issue #5763)."""
+    return list(dict.fromkeys(_nums(_CLOSE_RE, body)))
+
+
+def body_referenced_issues(body):
+    """The issue numbers ONE PR body REFERENCES (`_BODY_RE`: closing verb or
+    `Ref(s) #N`; a negated closing ref still counts), in body order,
+    de-duplicated on first occurrence — element [0] is the first referenced
+    issue. Twin of pr-refs.ts's `referencedIssuesInBody()` (issue #5763)."""
+    return list(dict.fromkeys(_nums(_BODY_RE, body)))
+
+
+def body_closes_issue(body, issue):
+    """True iff ONE PR body closes `issue`. Twin of pr-refs.ts's
+    `bodyClosesIssue()` (issue #5763)."""
+    return issue in body_closing_issues(body)
 
 
 def _prs(pr_json):
@@ -136,7 +208,7 @@ def _branch_refs(pr):
 
 def _body_refs(pr):
     """The issue numbers one PR row references via body keyword refs."""
-    return {int(m.group(1)) for m in _BODY_RE.finditer(pr.get("body") or "")}
+    return set(_nums(_BODY_RE, pr.get("body")))
 
 
 def referenced_issues(pr_json):
@@ -195,9 +267,7 @@ def closing_issues(pr_json):
     """
     out = set()
     for pr in _prs(pr_json):
-        for m in _CLOSE_RE.finditer(pr.get("body") or ""):
-            if m.group(1) is not None:  # None = the negated arm (#4767)
-                out.add(int(m.group(1)))
+        out.update(_nums(_CLOSE_RE, pr.get("body")))  # negated arm skipped (#4767)
     return out
 
 
@@ -209,9 +279,8 @@ def closing_pr_number(pr_json, issue):
         number = pr.get("number")
         if not isinstance(number, int) or isinstance(number, bool):
             continue
-        for m in _CLOSE_RE.finditer(pr.get("body") or ""):
-            if m.group(1) is not None and int(m.group(1)) == issue:
-                return number
+        if body_closes_issue(pr.get("body"), issue):
+            return number
     return None
 
 
@@ -249,6 +318,7 @@ def _selector_for(argv):
         return branch_issues if argv[1] == "branch" else bodyref_issues
     sys.stderr.write(
         "usage: pr-refs.py [--source branch|body] [--closing] [--pairs] < gh-pr-list-JSON\n"
+        "       pr-refs.py --bodies < JSON-array-of-PR-body-strings\n"
         f"unknown arguments: {' '.join(argv)}\n"
     )
     sys.exit(2)
@@ -260,6 +330,23 @@ def main():
         # One `<issue> <pr>` line per pair, sorted by issue for determinism.
         for issue in sorted(pairs):
             sys.stdout.write(f"{issue} {pairs[issue]}\n")
+        return
+    if sys.argv[1:] == ["--bodies"]:
+        # Per-body answers (issue #5763): JSON array of bodies in, JSON array
+        # of {closing, referenced} out. Unparsable / non-list stdin prints
+        # nothing and exits 0, the same fail-open contract as every selector.
+        try:
+            bodies = json.loads(sys.stdin.read())
+        except Exception:  # intentional: fail-open contract — empty output is the caller's "no answer"
+            return
+        if isinstance(bodies, list):
+            json.dump(
+                [
+                    {"closing": body_closing_issues(b), "referenced": body_referenced_issues(b)}
+                    for b in bodies
+                ],
+                sys.stdout,
+            )
         return
     nums = _selector_for(sys.argv[1:])(sys.stdin.read())
     if nums:
