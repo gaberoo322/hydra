@@ -11,6 +11,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import baseline from "../scripts/ci/playbook-duplicate-baseline.json" with { type: "json" };
 
 const {
   MIN_SPAN_TOKENS,
@@ -159,10 +160,9 @@ describe("playbook-duplicate-ratchet: the real playbooks", () => {
     assert.match(standard, /^### STD-PLAYBOOK-ONE-HOME\n[\s\S]*?enforced-by: reviewer, scripts\/ci\/playbook-duplicate-ratchet\.ts/m);
   });
 
-  test("measured keys are a bare playbook path or path+TAB+intra, and equal the committed baseline", () => {
+  test("measured keys are a bare playbook path or path+TAB+intra, and equal the committed baseline", async () => {
     const measured = measureTexts(readTexts(REPO_ROOT));
-    const baseline = JSON.parse(readFileSync(join(REPO_ROOT, "scripts/ci/playbook-duplicate-baseline.json"), "utf8"));
-    for (const key of Object.keys(measured)) {
+        for (const key of Object.keys(measured)) {
       assert.match(key, /^docs\/operator-playbooks\/[^\t]+\.md(\tintra)?$/, `bad key shape: ${JSON.stringify(key)}`);
     }
     assert.ok(Object.keys(measured).some((k) => k.endsWith("\tintra")), "at least one intra row is measured");
