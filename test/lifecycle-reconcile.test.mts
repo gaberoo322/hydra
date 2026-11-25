@@ -870,9 +870,19 @@ describe("PR-covered ready-for-agent promotion (#5489)", () => {
       }
     ).rows;
     assert.ok(rows.length > 0, "truth table must not be empty");
+    // Probes: the row's three columns UNION every number written after a hash in
+    // the body, so a row whose columns are all empty ("Closes:#4", "Closing #5")
+    // is still asked about the number it names.
     let probes = 0;
+    const zeroProbeRows: string[] = [];
     for (const row of rows) {
-      for (const n of new Set([...row.closing, ...row.referenced, ...(row.doesNotClose ?? [])])) {
+      const inBody = [...row.body.matchAll(/#(\d+)/g)].map((m) => Number(m[1]));
+      const probeSet = new Set([...row.closing, ...row.referenced, ...(row.doesNotClose ?? []), ...inBody]);
+      if (probeSet.size === 0) {
+        zeroProbeRows.push(row.name);
+        assert.equal(/#\d/.test(row.body), false, `a row with a hash-number must be probed — ${row.name}`);
+      }
+      for (const n of probeSet) {
         probes++;
         const gate = gatePrOpen(
           { issue: n, from: "in-progress", to: "needs-qa", flags: [], evidence: { pr: "55" } },
@@ -887,7 +897,9 @@ describe("PR-covered ready-for-agent promotion (#5489)", () => {
         assert.equal(gate.ok, row.closing.includes(n), `gate vs table ${label}`);
       }
     }
-    assert.ok(probes > 0);
+    // Only a body that names no hash-number at all may go unprobed.
+    assert.deepEqual(zeroProbeRows, ["empty body"]);
+    assert.ok(probes >= rows.length - zeroProbeRows.length, `every other row is probed at least once (${probes} probes)`);
   });
 
   test("promotions are bounded per pass", async () => {

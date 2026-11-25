@@ -106,9 +106,19 @@ describe("gate predicates (INV-7, INV-8)", () => {
       }
     ).rows;
     assert.ok(rows.length > 0, "truth table must not be empty");
+    // Probes: the row's three columns UNION every number written after a hash in
+    // the body, so a row whose columns are all empty ("Closes:#4", "Closing #5")
+    // is still asked about the number it names.
     let probes = 0;
+    const zeroProbeRows: string[] = [];
     for (const row of rows) {
-      for (const n of new Set([...row.closing, ...row.referenced, ...(row.doesNotClose ?? [])])) {
+      const inBody = [...row.body.matchAll(/#(\d+)/g)].map((m) => Number(m[1]));
+      const probeSet = new Set([...row.closing, ...row.referenced, ...(row.doesNotClose ?? []), ...inBody]);
+      if (probeSet.size === 0) {
+        zeroProbeRows.push(row.name);
+        assert.equal(/#\d/.test(row.body), false, `a row with a hash-number must be probed — ${row.name}`);
+      }
+      for (const n of probeSet) {
         probes++;
         const closes = row.closing.includes(n);
         const open = gatePrOpen(gi({ issue: n, evidence: { pr: "55" } }), { pr: { ok: true, value: { number: 55, state: "OPEN", body: row.body } } });
@@ -120,7 +130,9 @@ describe("gate predicates (INV-7, INV-8)", () => {
         assert.equal(closed.code, closes ? "ok" : "pr-does-not-close-issue", `close #${n} — ${row.name}`);
       }
     }
-    assert.ok(probes > 0);
+    // Only a body that names no hash-number at all may go unprobed.
+    assert.deepEqual(zeroProbeRows, ["empty body"]);
+    assert.ok(probes >= rows.length - zeroProbeRows.length, `every other row is probed at least once (${probes} probes)`);
   });
 
   // #5766: each behaviour that differs from the deleted private regex
