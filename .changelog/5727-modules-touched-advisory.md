@@ -1,0 +1,1 @@
+- feat: design-concept reconcile now warns when an approved artifact lists a module the PR never touches (#5727)
