@@ -20,7 +20,7 @@
  * classification with every write skipped.
  */
 import { logger } from "../logger.ts";
-import { declaresEpicChildren } from "../github/blockers.ts";
+import { isZeroStateExempt } from "../github/blockers.ts";
 import type { IssueReadResult, IssueRow } from "../github/issues.ts";
 import type {
   JournalWriteResult,
@@ -164,14 +164,8 @@ function tallyJournal(report: ReconcileReport, entries: readonly LifecycleJourna
   }
 }
 
-/** True when the zero-state backstop must leave this issue alone (ADR-0047 D2). */
-export function isZeroStateExempt(issue: Pick<IssueRow, "labels" | "body">): boolean {
-  return (
-    declaresEpicChildren(issue.body) ||
-    issue.labels.includes("keep-open") ||
-    issue.labels.some((l) => l.startsWith("wayfinder:"))
-  );
-}
+/** True when the zero-state backstop must leave this issue alone (ADR-0047 D2) — the one definition lives in `src/github/blockers.ts`. */
+export { isZeroStateExempt };
 
 /**
  * The qa-passed exit's PR, resolved from pointers and never guessed: the `pr`

@@ -361,6 +361,9 @@ function fakeGithub(o: FakeOpts): TurnSnapshotGithub & { prListReads: () => numb
     async listOpenIssueLabelRows() {
       return EMPTY;
     },
+    async listOpenIssueLabelBodyRows() {
+      return EMPTY;
+    },
     // slice 3 (#4931) reads — unused by the pr-gate collector
     listReadyForAgentIssues: async () => ok([]),
     searchOpenIssueNumbers: async () => ok([]),
