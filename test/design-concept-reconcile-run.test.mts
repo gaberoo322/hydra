@@ -154,6 +154,47 @@ describe("design-concept-reconcile-run — fail-closed path (#4132)", () => {
   });
 });
 
+describe("design-concept-reconcile-run — advisory modulesTouched arm (#5727)", () => {
+  const withModules = { status: "approved", invariants: [INVARIANT], artifactHash: HASH, modulesTouched: [{ path: "lib/gone.ts" }] };
+  const RECONCILED = GOOD_BODY.replace("verified by: manual review", "verified by: `manual: reviewed the binding path`");
+  const payloadBody = (n: number) => JSON.stringify({ pull_request: { number: n, body: RECONCILED } });
+
+  test("untouched module surfaces as an advisory while the outcome stays pass", async () => {
+    const r = await runReconcileCheck(
+      deps({ artifact: withModules, readEventPayload: () => payloadBody(9), fetchChangedFiles: async () => ["lib/other.ts"] }),
+    );
+    assert.equal(r.outcome, "pass");
+    assert.equal(r.outcome === "pass" ? r.advisories?.[0]?.path : "", "lib/gone.ts");
+  });
+
+  test("a changed-file fetch failure leaves the outcome pass with no advisories", async () => {
+    const r = await runReconcileCheck(
+      deps({ artifact: withModules, readEventPayload: () => payloadBody(9), fetchChangedFiles: async () => null }),
+    );
+    assert.deepEqual(r, { outcome: "pass", anchorRef: 7 });
+  });
+
+  test("a throwing changed-file fetch never throws out of the runner", async () => {
+    const r = await runReconcileCheck(
+      deps({
+        artifact: withModules,
+        readEventPayload: () => payloadBody(9),
+        fetchChangedFiles: async () => {
+          throw new Error("boom");
+        },
+      }),
+    );
+    assert.equal(r.outcome, "pass");
+  });
+
+  test("an advisory never turns a violation into anything else", async () => {
+    const r = await runReconcileCheck(
+      deps({ artifact: withModules, prBody: BAD_BODY, fetchChangedFiles: async () => [] }),
+    );
+    assert.equal(r.outcome, "violation");
+  });
+});
+
 describe("design-concept-reconcile-run — repo file reader traversal guard (#4132)", () => {
   test("rejects traversal and absolute paths, returning null rather than reading", () => {
     const read = makeRepoFileReader();

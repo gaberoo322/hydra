@@ -39,6 +39,7 @@ import {
   extractQuotedText,
   extractReconciliationSection,
   findCorrectHashMention,
+  findUntouchedModules,
   formatViolations,
   hashesMatch,
   isMachineCheckable,
@@ -1097,6 +1098,48 @@ describe("design-concept reconcile adapter approval guard (issue #3849)", () => 
 // =============================================================================
 // The `test:` assertion kind — parsing (issue #4118).
 // =============================================================================
+describe("findUntouchedModules — advisory modulesTouched arm (#5727)", () => {
+  const section = "Artifact: abc\nDeviation: docs/a.md - superseded by sidecar\n";
+
+  test("an untouched file path is reported as modules-touched-untouched", () => {
+    const r = findUntouchedModules([{ path: "src/a.ts" }], ["src/b.ts"], section);
+    assert.equal(r.length, 1);
+    assert.equal(r[0].code, "modules-touched-untouched");
+    assert.equal(r[0].path, "src/a.ts");
+  });
+
+  test("a touched file path is silent", () => {
+    assert.deepEqual(findUntouchedModules([{ path: "src/a.ts" }], ["src/a.ts"], section), []);
+  });
+
+  test("an untouched path with a Deviation line is silent", () => {
+    assert.deepEqual(findUntouchedModules([{ path: "docs/a.md" }], ["src/b.ts"], section), []);
+  });
+
+  test("an INV line naming the path does not satisfy the deviation grammar", () => {
+    const inv = "- INV-1: \"docs/a.md\" — verified by: file-exists: docs/a.md";
+    assert.equal(findUntouchedModules([{ path: "docs/a.md" }], [], inv).length, 1);
+  });
+
+  test("a directory entry is prefix-matched against changed files", () => {
+    assert.deepEqual(findUntouchedModules([{ path: "src/qa/" }], ["src/qa/x.ts"], null), []);
+    assert.equal(findUntouchedModules([{ path: "src/qa/" }], ["src/other.ts"], null).length, 1);
+  });
+
+  test("an ambiguous entry with no dot in its last segment is skipped", () => {
+    assert.deepEqual(findUntouchedModules([{ path: "src/qa" }], [], null), []);
+  });
+
+  test("a Deviation line with an empty reason does not silence the path", () => {
+    assert.equal(findUntouchedModules([{ path: "a.ts" }], [], "Deviation: a.ts - ").length, 1);
+  });
+
+  test("garbage inputs return no findings and never throw", () => {
+    assert.deepEqual(findUntouchedModules(undefined, [], null), []);
+    assert.deepEqual(findUntouchedModules([{ path: "a.ts" }], null, null), []);
+  });
+});
+
 describe("design-concept-reconcile — parseAssertion, `test:` kind (issue #4118)", () => {
   test("parses a path and a quoted subtest name, in any of the three quote styles", () => {
     for (const q of ['"', "'", "`"]) {
