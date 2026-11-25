@@ -21,7 +21,8 @@ import { join, resolve } from "node:path";
 
 import { runQaVerdictPhase, type QaVerdictFetchers } from "../src/qa/phases.ts";
 import { guardedSeamMove, phaseRunner, type CmdResult, type PlumbingPorts, type SeamMoveInput, type SeamMoveResult } from "../scripts/qa/_lib.ts";
-import { runPreflight, type PreflightOptions } from "../scripts/qa/preflight.ts";
+import { parentIssueOf, runPreflight, type PreflightOptions } from "../scripts/qa/preflight.ts";
+import { bodyClosesIssue, closingIssuesInBody, referencedIssuesInBody } from "../src/github/pr-refs.ts";
 import { NO_STANDARDS_SENTINEL, runPacket } from "../scripts/qa/packet.ts";
 import { SKIP_REVIEW_REPORT, renderParkSummary, runRoute, type RouteDeps, type RouteOptions } from "../scripts/qa/route.ts";
 import type { CapCount } from "../src/lifecycle/caps.ts";
@@ -360,6 +361,81 @@ describe("preflight (steps 1-6.7 in one read-only call)", () => {
       );
       assert.equal(linked.pr?.number, 77, `a PR whose body is ${JSON.stringify(body)} is the linked PR`);
     }
+  });
+
+  test("preflight: over the shared truth table, the finder links a PR exactly when its body closes the issue, and posts the no-linked-PR comment only otherwise (#5767)", async () => {
+    const rows = (
+      JSON.parse(readFileSync(join(ROOT, "test", "fixtures", "pr-refs-truth-table.json"), "utf8")) as {
+        rows: Array<{ name: string; body: string; closing: number[]; referenced: number[]; doesNotClose?: number[] }>;
+      }
+    ).rows;
+    let accepted = 0;
+    let refused = 0;
+    for (const row of rows) {
+      const probes = [...new Set([...row.closing, ...row.referenced, ...(row.doesNotClose ?? [])])];
+      for (const issue of probes) {
+        const gh = (a: string[]) =>
+          a[0] === "pr" && a[1] === "list" ? ok(JSON.stringify([{ number: 91, body: row.body }])) : preflightGh()(a);
+        const h = harness({ ghHandler: gh, gitHandler: preflightGit(), http: httpFound(2) });
+        const out = await runPreflight({ ...PRE_OPTS, issue, pr: undefined }, h.ports);
+        const where = `row ${JSON.stringify(row.name)}, issue #${issue}`;
+        // The table's own `closing` column is what the seam's pr-open gate accepts (bodyClosesIssue, pinned to
+        // the same table by test/github-pr-refs.test.mts); asserted here too so the two can never drift apart.
+        assert.equal(bodyClosesIssue(row.body, issue), row.closing.includes(issue), `${where}: module vs table`);
+        if (row.closing.includes(issue)) {
+          accepted += 1;
+          assert.equal(out.pr?.number, 91, `${where}: a body the pr-open gate accepts must be found`);
+          assert.notEqual(out.stage, "no-pr", where);
+          assert.equal(out.stop, null, `${where}: no stop comment when a PR closes the issue`);
+        } else {
+          refused += 1;
+          assert.equal(out.stage, "no-pr", `${where}: a body that does not close the issue is not the linked PR`);
+          assert.equal(out.pr, null, where);
+          assert.equal(out.stop?.target, "issue", where);
+          assert.match(out.stop?.body ?? "", new RegExp(`no open PR whose body closes #${issue} `), where);
+        }
+        assert.deepEqual(h.writes(), [], `${where}: preflight never writes`);
+      }
+    }
+    assert.ok(accepted >= 20 && refused >= 10, `the table must exercise both arms (accepted ${accepted}, refused ${refused})`);
+  });
+
+  test("preflight: the no-linked-PR comment needs EVERY open PR to not close the issue; one closer among non-closers is found (#5767)", async () => {
+    const bodies = ["Refs #5269", "Does not close #5269 — #91 does.", "encloses #5269", "Closes #52690", "Closes #526"];
+    const listing = (prs: Array<{ number: number; body: string | null }>) => (a: string[]) =>
+      a[0] === "pr" && a[1] === "list" ? ok(JSON.stringify(prs)) : preflightGh()(a);
+    const nonClosers = bodies.map((body, i) => ({ number: 80 + i, body }));
+    assert.ok(nonClosers.every((p) => !bodyClosesIssue(p.body, 5269)));
+    const none = await runPreflight(
+      { ...PRE_OPTS, pr: undefined },
+      harness({ ghHandler: listing([...nonClosers, { number: 90, body: null }]), gitHandler: preflightGit(), http: httpFound(2) }).ports,
+    );
+    assert.equal(none.stage, "no-pr");
+    assert.match(none.stop?.body ?? "", /no open PR whose body closes #5269 /);
+
+    const one = await runPreflight(
+      { ...PRE_OPTS, pr: undefined },
+      harness({ ghHandler: listing([...nonClosers, { number: 91, body: "Summary.\n\nResolves: #5269" }]), gitHandler: preflightGit(), http: httpFound(2) }).ports,
+    );
+    assert.equal(one.pr?.number, 91);
+    assert.equal(one.stop, null);
+  });
+
+  test("parentIssueOf: closing ref first, then the first plain reference, over the shared truth table (#5767)", () => {
+    const rows = (
+      JSON.parse(readFileSync(join(ROOT, "test", "fixtures", "pr-refs-truth-table.json"), "utf8")) as {
+        rows: Array<{ name: string; body: string; closing: number[]; referenced: number[] }>;
+      }
+    ).rows;
+    for (const row of rows) {
+      assert.equal(parentIssueOf(row.body), row.closing[0] ?? row.referenced[0] ?? null, `row ${JSON.stringify(row.name)}`);
+      assert.equal(parentIssueOf(row.body), closingIssuesInBody(row.body)[0] ?? referencedIssuesInBody(row.body)[0] ?? null);
+    }
+    assert.equal(parentIssueOf("Does not close #26 — #63 does.\n\nCloses #63"), 63, "the negated companion ref is not the parent");
+    assert.equal(parentIssueOf("Does not close #26"), 26, "with no closing ref, the plain reference is followed");
+    assert.equal(parentIssueOf("Closes#5"), null);
+    assert.equal(parentIssueOf("refs#5"), null);
+    assert.equal(parentIssueOf(""), null);
   });
 
   test("preflight: a failed gh list is a pre-stage exit, never read as 'nothing found' (no false no-pr / no-issue)", async () => {

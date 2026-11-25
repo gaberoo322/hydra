@@ -1,0 +1,1 @@
+- refactor: QA preflight finds the linked PR and the spec parent through the PR refs module — any-tense closing verbs and the colon form now link, embedded verbs and negated refs no longer do (#5767)
