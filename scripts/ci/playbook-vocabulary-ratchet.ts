@@ -11,6 +11,10 @@
  * STD-PLAYBOOK-CURRENT-BEHAVIOUR, STD-PLAYBOOK-TARGET-SEAM and
  * STD-PLAYBOOK-LOGIC-IN-SCRIPTS.
  *
+ * The same detector also backs the ADR-corpus ratchet (`adrVocabularyRatchet`,
+ * ADR-0037 Decision 7), exported below with its own baseline; the CLI entry
+ * runs the playbook ratchet.
+ *
  * Ten banned shapes:
  *
  *   status      a status or history phrase: "not yet", "currently", "formerly",
@@ -52,7 +56,7 @@
  * test/playbook-vocabulary-ratchet.test.mts in the required suite.
  */
 
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { attributedSymbols, listPlaybooks } from "./playbook-reference-check.ts";
 import { defineRatchet, runIfCli } from "./ratchet.ts";
@@ -307,6 +311,51 @@ export const vocabularyRatchet = defineRatchet({
     "symbol-cite: attribute the symbol to its file with an attribution phrase (so playbook-reference-check resolves it), or name the fact's home without copying the symbol.",
     "invariant-cite: name the invariant's home (the design-concept artifact, or the assert_invariants.py docstring) instead of copying the invariant id.",
     "To find the hit, diff the named playbook against master; findHits(file, text, avoidTerms) lists every hit with its line.",
+  ],
+});
+
+// ---------------------------------------------------------------------------
+// ADR corpus (issue #5682): the same detector over docs/adr, two shapes only
+// ---------------------------------------------------------------------------
+
+/** The shapes counted over an ADR; status / back-compat prose is legitimate in Status and Consequences, issue-cite is provenance. */
+export const ADR_SHAPES = ["invariant-cite", "symbol-cite"] as const satisfies readonly Shape[];
+
+/** The numbered ADR files, `docs/adr/<4 digits>-*.md` (never README.md), sorted. */
+export function listAdrs(root: string = REPO_ROOT): string[] {
+  return readdirSync(join(root, "docs/adr"))
+    .filter((f) => /^\d{4}-.*\.md$/.test(f))
+    .sort()
+    .map((f) => `docs/adr/${f}`);
+}
+
+/** One `<adr>\t<shape>` row per ADR per counted shape, valued at the count; zero-count rows absent. */
+export function measureAdrRows(root: string = REPO_ROOT): Record<string, number> {
+  const avoidTerms = parseAvoidTerms(readFileSync(join(root, "CONTEXT.md"), "utf8"));
+  const rows: Record<string, number> = {};
+  for (const file of listAdrs(root)) {
+    const hits = findHits(file, readFileSync(join(root, file), "utf8"), avoidTerms).filter((h) =>
+      (ADR_SHAPES as readonly string[]).includes(h.shape),
+    );
+    for (const [shape, n] of Object.entries(countByShape(hits))) {
+      if (n > 0) rows[`${file}\t${shape}`] = n;
+    }
+  }
+  return rows;
+}
+
+export const adrVocabularyRatchet = defineRatchet({
+  id: "adr-vocabulary-ratchet",
+  baseline: "scripts/ci/adr-vocabulary-baseline.json",
+  shape: "counted",
+  polarity: "ceiling",
+  stale: "fail",
+  enforcement: "required",
+  measure: async (root) => measureAdrRows(root),
+  help: [
+    "An ADR points at the home of an invariant or symbol instead of copying it (ADR-0037 Decision 7): name the artifact or file that owns it, not its INV id, constant or field path.",
+    "An in-file definition bullet (`- **INV-A** \u2014 ...`) is exempt; a count below its baseline row must be lowered in the same PR.",
+    "To find the hit, run findHits(file, text, avoidTerms) over the named ADR and keep invariant-cite / symbol-cite.",
   ],
 });
 

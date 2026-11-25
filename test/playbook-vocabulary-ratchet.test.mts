@@ -12,7 +12,8 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const {
@@ -24,6 +25,10 @@ const {
   measureRows,
   vocabularyRatchet,
   scanRepo,
+  ADR_SHAPES,
+  listAdrs,
+  measureAdrRows,
+  adrVocabularyRatchet,
 } = await import("../scripts/ci/playbook-vocabulary-ratchet.ts");
 const { REPO_ROOT } = await import("../scripts/ci/seam-check-lib.ts");
 
@@ -344,5 +349,68 @@ describe("playbook-vocabulary-ratchet: the real playbooks", () => {
   test("the standard the report points at defines the playbook rules", () => {
     const standard = readFileSync(join(REPO_ROOT, STANDARD_REL), "utf8");
     assert.match(standard, /^### STD-PLAYBOOK-CURRENT-BEHAVIOUR$/m);
+  });
+});
+
+describe("playbook-vocabulary-ratchet: the ADR corpus", () => {
+  test("the ADR policy is a separate required ceiling with its own baseline", () => {
+    assert.equal(adrVocabularyRatchet.policy.id, "adr-vocabulary-ratchet");
+    assert.match(adrVocabularyRatchet.policy.baseline, /^scripts\/ci\/adr-vocabulary-baseline\.json$/);
+    assert.equal(adrVocabularyRatchet.policy.polarity, "ceiling");
+    assert.equal(adrVocabularyRatchet.policy.enforcement, "required");
+    assert.notEqual(adrVocabularyRatchet.policy.baseline, vocabularyRatchet.policy.baseline);
+  });
+
+  test("the corpus is the numbered ADR files, never README.md", () => {
+    const files = listAdrs();
+    assert.ok(files.length > 0);
+    for (const f of files) assert.match(f, /^docs\/adr\/\d{4}-[^/]+\.md$/);
+    assert.ok(!files.some((f) => f.endsWith("README.md")));
+  });
+
+  test("measured rows are nonempty and carry only invariant-cite and symbol-cite", () => {
+    const keys = Object.keys(measureAdrRows());
+    assert.ok(keys.length > 0);
+    for (const key of keys) {
+      assert.ok((ADR_SHAPES as readonly string[]).includes(key.split("\t")[1]), key);
+    }
+  });
+
+  test("a synthetic ADR yields only invariant-cite and symbol-cite rows, README excluded", () => {
+    const root = mkdtempSync(join(tmpdir(), "adr-vocab-"));
+    try {
+      mkdirSync(join(root, "docs/adr"), { recursive: true });
+      writeFileSync(join(root, "CONTEXT.md"), "");
+      writeFileSync(
+        join(root, "docs/adr/0001-x.md"),
+        "# X\n\nSee INV-3 here. It uses `MAX_RETRY_LIMIT` and currently works. Fixed in #123.\n",
+      );
+      writeFileSync(join(root, "docs/adr/README.md"), "INV-4 and `OTHER_CONST_NAME`\n");
+      assert.deepEqual(listAdrs(root), ["docs/adr/0001-x.md"]);
+      const rows = measureAdrRows(root);
+      assert.deepEqual(Object.keys(rows).sort(), [
+        "docs/adr/0001-x.md\tinvariant-cite",
+        "docs/adr/0001-x.md\tsymbol-cite",
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the help text cites ADR-0037", () => {
+    assert.ok(adrVocabularyRatchet.policy.help.some((l: string) => l.includes("ADR-0037")));
+  });
+
+  test("baseline keys are <adr path>\\t<shape> with only the two ADR shapes", () => {
+    const base = JSON.parse(readFileSync(join(process.cwd(), adrVocabularyRatchet.policy.baseline), "utf8"));
+    const rows = base.rows ?? base;
+    const keys = Object.keys(rows);
+    assert.ok(keys.length > 0);
+    for (const k of keys) assert.match(k, /^docs\/adr\/\d{4}-[^\t]+\.md\t(invariant-cite|symbol-cite)$/);
+  });
+
+  test("the live ADR tree is within its baseline", async () => {
+    const v = await adrVocabularyRatchet.verdict();
+    assert.equal(v.ok, true, JSON.stringify(v));
   });
 });

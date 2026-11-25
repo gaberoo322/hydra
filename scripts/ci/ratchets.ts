@@ -29,7 +29,7 @@ import { lifecycleSeamRatchet } from "./lifecycle-seam-check.ts";
 import { neverThrowRatchet } from "./never-throw-scan.ts";
 import { duplicateRatchet } from "./playbook-duplicate-ratchet.ts";
 import { referenceRatchet } from "./playbook-reference-check.ts";
-import { vocabularyRatchet } from "./playbook-vocabulary-ratchet.ts";
+import { adrVocabularyRatchet, vocabularyRatchet } from "./playbook-vocabulary-ratchet.ts";
 import { querySeamRatchet } from "./query-seam-check.ts";
 import type { Ratchet, RatchetEnforcement, RatchetPolarity } from "./ratchet.ts";
 import { redisSeamRatchet } from "./redis-seam-check.ts";
@@ -59,6 +59,7 @@ export type RatchetRow =
   | { kind: "fixture"; id: string; baseline: string; owner: string };
 
 export const RATCHETS: readonly RatchetRow[] = [
+  { kind: "ratchet", ratchet: adrVocabularyRatchet },
   { kind: "ratchet", ratchet: anthropicSeamRatchet },
   { kind: "ratchet", ratchet: claudeCliSeamRatchet },
   { kind: "ratchet", ratchet: duplicateRatchet },
