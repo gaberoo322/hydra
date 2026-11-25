@@ -458,7 +458,9 @@ describe("scripts/sync-skills.sh — @include fragment mechanism (issue #2552)",
   test("issue-first-state includers render their own actor name", () => {
     const r = liveSync();
     assert.equal(r.status, 0, `live sync failed: ${r.stderr}`);
-    for (const skill of ["hydra-retro", "hydra-dev"]) {
+    // hydra-retro no longer includes the fragment: its emit sequence lives in
+    // scripts/retro/record-emit.ts (#5739), which carries the actor itself.
+    for (const skill of ["hydra-dev"]) {
       const body = readFileSync(join(r.dir, "claude", skill, "SKILL.md"), "utf-8");
       assert.ok(
         body.includes(`advance <N> needs-triage --actor ${skill}`),

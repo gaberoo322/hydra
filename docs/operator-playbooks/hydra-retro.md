@@ -136,8 +136,7 @@ those, read the full transcript. The ONLY handle is `dispatches[].transcriptId`
 cycle-record key, NOT a transcript handle — never pass it to the route:
 
 ```bash
-TRANSCRIPT_ID=<dispatches[].transcriptId>
-curl -sf "http://localhost:4000/api/dispatches/${TRANSCRIPT_ID}/transcript"
+printf '%s' "$BUNDLE" | jq -r '.dispatches[] | select(.flagged) | .transcriptId // empty' | while read -r TRANSCRIPT_ID; do curl -sf "http://localhost:4000/api/dispatches/${TRANSCRIPT_ID}/transcript"; done
 ```
 
 If the route 404s (`dispatch-not-found` — the registry row expired or was never
@@ -243,11 +242,9 @@ If `apply === false` (the default), PRINT the plan and STOP — no issues, no PR
 
 Under `--apply`:
 
-- For each `plan.issues[]`: `gh issue create --repo gaberoo322/hydra --title <title> --body <evidence + cue + Source>`, then the first-state step below. Then record the cue in the seen-list:
+- For each `plan.issues[]`, write the body to a temp file and run the emit script (create, first state, record; a failed first state leaves the cue unrecorded):
 
-      npx tsx -e '(async () => { const {recordRetroSeen} = await import("./src/redis/retro-seen.ts"); await recordRetroSeen({cue: process.env.CUE, decision: "issue", runId: process.env.RUN_ID, ref: process.env.REF, at: new Date().toISOString()}); process.exit(0); })();'
-
-@include _fragments/issue-first-state.md
+      npx tsx scripts/retro/record-emit.ts emit --title "$TITLE" --body-file "$BODY_FILE" --cue "$CUE" --run-id "$RUN_ID"
 
 - For `plan.pr` (if non-null): open a feature branch, apply the prompt/doc fix
   (skill lesson / CLAUDE.md / CONTEXT.md note), run `npm run typecheck:test`
@@ -295,7 +292,7 @@ Without `--apply` print the plan and write the artifact only.
    check, standard, fence; the rung is in the cue (`review:<rung>:<slug>`, the
    `REVIEW_CUE` grammar). A slug re-trips only after its prior emit closes and
    lands exactly one rung up; an open prior emit emits nothing, but each `plan.recheck` entry is re-recorded
-   with `recordRetroSeen({...entry, at: <now ISO>})` so the due signal does not
+   with `record-emit.ts recheck` so the due signal does not
    re-fire daily (next check in 7 days); `fence` is
    terminal. Caps are independent of the run pass: at most **2** check issues
    (filed through § 8's create + first-state step; body names the arm, PRs, rounds and the proposed
@@ -318,7 +315,7 @@ Without `--apply` print the plan and write the artifact only.
    `git log --diff-filter=A` on its heading; the rest may be removed in the
    same PR. Never prune a rule with a check-path `enforced-by:`.
 6. **Hot-spots** emit nothing on GitHub; `hydra-architecture-scan` reads them.
-7. Record each emit with `recordRetroSeen` using the rung cue, as in step 8.
+7. Record each emit with the rung cue, as in step 8.
 
 ## Summary output
 
