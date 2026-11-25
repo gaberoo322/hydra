@@ -15,7 +15,7 @@
  * ADR-0037 Decision 7), exported below with its own baseline; the CLI entry
  * runs the playbook ratchet.
  *
- * Eleven banned shapes:
+ * Thirteen banned shapes:
  *
  *   status      a status or history phrase: "not yet", "currently", "formerly",
  *               "no longer", "used to", "until #N", a rollout label
@@ -44,6 +44,13 @@
  *               `child-step 7a`, `Gate 1`. Scanned on every line, fenced or
  *               not; the label that opens a heading or definition bullet is
  *               exempt by token and the rest of that line is still scanned
+ *   mktemp-no-trap a `mktemp` call inside a fenced shell block (bash, sh, zsh,
+ *               shell) that has no `trap` word anywhere in the block: a trailing
+ *               `rm -f` is skipped by an early `|| exit`, so only a `trap ... EXIT`
+ *               cleans up on every path. One hit per `mktemp` call
+ *   count-before-const a cardinal word (one to twelve) or digit run directly
+ *               before a SCREAMING_SNAKE constant (not in a fenced block): the
+ *               count restates the constant's home and drifts when it changes
  *
  * A line that starts with `Historical:` (the existing playbook provenance
  * convention, HISTORICAL_EXEMPT_RE) is exempt from every shape. The exemption
@@ -69,7 +76,7 @@ import { HISTORICAL_EXEMPT_RE, classifyFile } from "./target-coupling-check.ts";
 
 export const STANDARD_REL = "CODING_STANDARDS.md";
 
-export const SHAPES = ["status", "line-cite", "target", "avoid-term", "issue-cite", "back-compat", "shell-lines", "symbol-cite", "invariant-cite", "process-meta", "step-cite"] as const;
+export const SHAPES = ["status", "line-cite", "target", "avoid-term", "issue-cite", "back-compat", "shell-lines", "symbol-cite", "invariant-cite", "process-meta", "step-cite", "mktemp-no-trap", "count-before-const"] as const;
 export type Shape = (typeof SHAPES)[number];
 
 /** One banned-shape occurrence. `line` is 1-based. */
@@ -157,6 +164,17 @@ const STEP_DEFINITION_RE = new RegExp(
   `^(\\s*(?:>\\s*)*(?:#{1,6}\\s+|(?:[-*+]|\\d+\\.)\\s+)?\\**)${STEP_LABEL}(?=\\**\\s*(?:[:.\\u2014\\u2013-]|'s|$))`,
 );
 
+/** A `mktemp` command word; a `trap` word anywhere in the same fenced shell block discharges every mktemp in it. */
+const MKTEMP_RE = /\bmktemp\b/g;
+const TRAP_RE = /\btrap\b/;
+
+/** A count before a constant: a cardinal word (one to twelve) or digit run, a space, an optional backtick, then a SCREAMING_SNAKE constant with an underscore. A `#NNNN` digit run never matches. */
+const CARDINALS = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve"];
+const COUNT_BEFORE_CONST_RE = new RegExp(
+  `(?<![#\\w.])(?:(?:${CARDINALS.map((w) => `[${w[0]}${w[0].toUpperCase()}]${w.slice(1)}`).join("|")})|\\d+) \`?${CONST_TOKEN_RE.source}`,
+  "g",
+);
+
 const SHELL_INFO = new Set(["bash", "sh", "zsh", "shell"]);
 
 /** A CommonMark fence line, optionally inside blockquote prefixes. */
@@ -214,8 +232,9 @@ function avoidRegex(terms: readonly string[]): RegExp | null {
 export function findHits(file: string, text: string, avoidTerms: readonly string[]): Hit[] {
   const hits: Hit[] = [];
   const avoid = avoidRegex(avoidTerms);
-  let fence: { char: string; len: number; info: string; line: number; lines: number } | null = null;
+  let fence: { char: string; len: number; info: string; line: number; lines: number; mktemps: Hit[]; trap: boolean } | null = null;
   const closeFence = (): void => {
+    if (fence && SHELL_INFO.has(fence.info) && !fence.trap) hits.push(...fence.mktemps);
     if (fence && SHELL_INFO.has(fence.info) && fence.lines > 0) {
       hits.push({
         shape: "shell-lines",
@@ -237,7 +256,7 @@ export function findHits(file: string, text: string, avoidTerms: readonly string
         return;
       }
       if (!(marker[0] === "`" && rest.includes("`"))) {
-        fence = { char: marker[0], len: marker.length, info: (rest.split(/\s+/)[0] ?? "").toLowerCase(), line: i + 1, lines: 0 };
+        fence = { char: marker[0], len: marker.length, info: (rest.split(/\s+/)[0] ?? "").toLowerCase(), line: i + 1, lines: 0, mktemps: [], trap: false };
         return;
       }
     }
@@ -245,7 +264,11 @@ export function findHits(file: string, text: string, avoidTerms: readonly string
       fence.lines++;
     }
     const inFence = fence !== null;
+    if (fence && TRAP_RE.test(line)) fence.trap = true;
     if (HISTORICAL_EXEMPT_RE.test(line)) return;
+    if (fence) {
+      for (const m of line.matchAll(MKTEMP_RE)) fence.mktemps.push({ shape: "mktemp-no-trap", line: i + 1, phrase: m[0] });
+    }
     const scan = (shape: Shape, re: RegExp | null, subject: string = line): void => {
       if (!re) return;
       for (const m of subject.matchAll(re)) hits.push({ shape, line: i + 1, phrase: m[0] });
@@ -260,6 +283,7 @@ export function findHits(file: string, text: string, avoidTerms: readonly string
       scan("back-compat", PHASE_RE);
       scan("invariant-cite", INVARIANT_RE, line.replace(INVARIANT_DEFINITION_RE, "$1"));
       scan("process-meta", PROCESS_META_RE);
+      scan("count-before-const", COUNT_BEFORE_CONST_RE);
       const attributed = attributedSymbols(line);
       for (const re of [CONST_TOKEN_RE, CALL_TOKEN_RE, FIELD_TOKEN_RE]) {
         for (const m of line.matchAll(re)) {
@@ -324,6 +348,8 @@ export const vocabularyRatchet = defineRatchet({
     "symbol-cite: attribute the symbol to its file with an attribution phrase (so playbook-reference-check resolves it), or name the fact's home without copying the symbol.",
     "invariant-cite: name the invariant's home (the design-concept artifact, or the assert_invariants.py docstring) instead of copying the invariant id.",
     "step-cite: name the step by what it does, or link its heading, instead of copying its number (a step number drifts on every insertion or retitle).",
+    "mktemp-no-trap: add `trap 'rm -f \"$TMP\"' EXIT` in the same fenced block, right after the mktemp; a trailing `rm -f` is skipped by an early `|| exit`.",
+    "count-before-const: drop the number (\"the VERIFIER_CORE_PATHS files\"); the constant's home owns the count (STD-PLAYBOOK-POINT-DONT-RESTATE).",
     "To find the hit, diff the named playbook against master; findHits(file, text, avoidTerms) lists every hit with its line.",
   ],
 });

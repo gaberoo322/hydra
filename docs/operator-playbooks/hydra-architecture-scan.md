@@ -115,9 +115,9 @@ Drop or re-route a candidate before it becomes an issue when ANY of:
   # refuses `mapfile -t X < <(...)`. See "Guard-compatible shell forms" in
   # _fragments/hydra-dev-parent-flow.md.
   BASELINE_TMP=$(mktemp)
+  trap 'rm -f "$BASELINE_TMP"' EXIT
   bash scripts/ci/backfill-dedup-baseline.sh > "$BASELINE_TMP" || exit
   mapfile -t BASELINE_TITLES < "$BASELINE_TMP"
-  rm -f "$BASELINE_TMP"
 
   # Per surviving candidate title $CANDIDATE:
   node --experimental-strip-types scripts/ci/issue-dedup.ts \
