@@ -683,8 +683,8 @@ describe("run_ledger item-stamp maps carry across a relaunch (issue #5717)", () 
   });
 
   test("INV-7/9: the ledger stays a leaf and the stamp rows are CARRY, not MIRRORED (no Redis key)", () => {
-    const src = readFileSync(join(AUTOPILOT_DIR, "run_ledger.py"), "utf-8");
-    assert.doesNotMatch(src, /^\s*(import|from)\s+(decide|decide_base|turn_snapshot)\b/m);
+    const leaf = pyJson("print(json.dumps([m for m in ('decide','decide_base','turn_snapshot') if m in sys.modules]))");
+    assert.deepEqual(leaf, [], "importing run_ledger must not load decide / decide_base / turn_snapshot");
     const o = pyJson(
       "print(json.dumps([[f['carry'], 'mirror' in f] for f in L.FIELDS if f['name'].endswith('_item_stamps')]))",
     );
