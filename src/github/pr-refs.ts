@@ -9,11 +9,14 @@
  * regexes and three matcher semantics into TypeScript for the two
  * `scripts/ci/*.ts` consumers (`epic-close.ts`, `design-concept-reconcile-check.ts`)
  * that previously hand-rolled their own copy of the closing-verb alternation.
- * `pr-refs.py` itself is NOT edited or replaced — it stays the bash-facing
- * predicate until #4686/#4688 give the bash lane a TS-backed path. This
- * module and the Python script are two independent implementations kept in
- * sync by a source-string parity test (`test/github-pr-refs.test.mts`): a
- * change to either side alone fails the test. The orch-lane picks collector
+ * `pr-refs.py` is NOT replaced — it stays the bash-facing predicate until
+ * #4686/#4688 give the bash lane a TS-backed path. This module and the
+ * Python script are two independent implementations kept in sync by
+ * `test/github-pr-refs.test.mts` in two ways: a source-string parity test
+ * (a change to either side's pattern alone fails it) and, since #5763, one
+ * shared truth table (`test/fixtures/pr-refs-truth-table.json`) run through
+ * BOTH languages, so a body the two engines answer differently fails too.
+ * The orch-lane picks collector
  * (src/autopilot/turn-snapshot/picks.ts, ADR-0043 slice 3) calls
  * {@link mergedPrReferences} directly, so `pr-refs.py --merged` is gone.
  *
@@ -21,8 +24,9 @@
  *
  * This module joins the `src/github/*` family as a PURE predicate sibling of
  * `src/github/blockers.ts` — no `gh`/`git` spawn, no import of
- * `src/github/exec.ts`. It is a leaf: stdin-shaped rows in, `ReadonlySet<number>`
- * out, nothing else.
+ * `src/github/exec.ts`. It is a leaf: stdin-shaped rows in,
+ * `ReadonlySet<number>` out — or, for the per-body answers at the foot of
+ * the file (#5763), one PR body in, `number[]` / `boolean` out.
  *
  * # Purity contract
  *
@@ -198,4 +202,56 @@ export function mergedPrReferences(prs: readonly PrRefRow[]): ReadonlySet<number
     for (const n of matchAllNumbers(TITLE_ANCHOR_RE, pr.title ?? "")) out.add(n);
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Per-body answers (issue #5763, epic #5762)
+// ---------------------------------------------------------------------------
+//
+// The row-set functions above answer "which issues does this PR LIST touch".
+// The three below answer the same two questions for ONE body, in body order,
+// so a caller that holds a single PR body (the lifecycle seam's pr-open gate,
+// QA preflight) asks this module instead of carrying its own verb regex. They
+// are thin views over the SAME `CLOSE_RE` / `BODY_RE` — no second verb list —
+// and are pinned, together with their Python twins in `pr-refs.py`, by the one
+// shared truth table `test/fixtures/pr-refs-truth-table.json`.
+
+/** First-occurrence-ordered, de-duplicated copy of `nums`. */
+function orderedUnique(nums: readonly number[]): number[] {
+  return [...new Set(nums)];
+}
+
+/**
+ * The issue numbers ONE PR body CLOSES — {@link CLOSE_RE} (closing verb,
+ * negation-guarded; never `Refs #N`) — in body order, de-duplicated on first
+ * occurrence. A null/undefined/empty body — or any non-string value that
+ * slipped past the types (untyped JSON) — yields `[]`; never throws. Mirrors
+ * `pr-refs.py`'s `body_closing_issues()`.
+ */
+export function closingIssuesInBody(body: string | null | undefined): number[] {
+  if (typeof body !== "string") return [];
+  return orderedUnique(matchAllNumbers(CLOSE_RE, body));
+}
+
+/**
+ * The issue numbers ONE PR body REFERENCES — {@link BODY_RE}: a closing verb
+ * OR the non-closing `Ref(s) #N` form — in body order, de-duplicated on first
+ * occurrence, so element `[0]` is the FIRST issue the body references. Like
+ * {@link referencedIssues}, a negated closing ref ("does not close #N") still
+ * counts as referenced. A null/undefined/empty body yields `[]`; never
+ * throws. Mirrors `pr-refs.py`'s `body_referenced_issues()`.
+ */
+export function referencedIssuesInBody(body: string | null | undefined): number[] {
+  if (typeof body !== "string") return [];
+  return orderedUnique(matchAllNumbers(BODY_RE, body));
+}
+
+/**
+ * True iff ONE PR body closes `issue` — i.e. `issue` is among
+ * {@link closingIssuesInBody}. A null/undefined/empty body, or an `issue`
+ * that is not a positive integer, is `false`; never throws. Mirrors
+ * `pr-refs.py`'s `body_closes_issue()`.
+ */
+export function bodyClosesIssue(body: string | null | undefined, issue: number): boolean {
+  return closingIssuesInBody(body).includes(issue);
 }
