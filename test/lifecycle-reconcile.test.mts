@@ -25,7 +25,7 @@ import {
 } from "../src/lifecycle/reconcile.ts";
 import { externalMoves, lastKnownState, replayStateSnapshots } from "../src/lifecycle/timeline.ts";
 import { classifyQaPassedExit, type QaLivePr } from "../src/lifecycle/gates.ts";
-import { foldRollup, isRed, isSettled } from "../src/github/check-rollup.ts";
+import { foldQaLiveChecks } from "../src/lifecycle/seam-deps.ts";
 import { findTransition } from "../src/lifecycle/transitions.ts";
 import type { LifecycleJournalEntry } from "../src/redis/lifecycle-journal.ts";
 
@@ -298,13 +298,11 @@ describe("qa-passed exits (INV-3, INV-4, INV-13)", () => {
   });
 
   test("a red deep-qa-gate folds green for the qa-passed exit; a red CI check still folds red", () => {
-    // Mirrors fetchQaLive's fold: foldRollup(required) -> isSettled -> isRed.
     const required = ["test", "deep-qa-gate"];
     const done = "2026-11-04T08:00:00Z";
-    const foldChecks = (rollup: Array<{ name: string; conclusion: string; completedAt: string }>): QaLivePr["checks"] => {
-      const fold = foldRollup(rollup, { required });
-      return !isSettled(fold) ? "pending" : isRed(fold) ? "red" : "green";
-    };
+    // The seam's own fold (the one fetchQaLive calls), fed raw gh rollup entries.
+    const foldChecks = (rollup: Array<{ name: string; conclusion: string; completedAt: string }>): QaLivePr["checks"] =>
+      foldQaLiveChecks(rollup.map((r) => ({ ...r, status: "COMPLETED" })), required);
     const gateOnly = foldChecks([
       { name: "test", conclusion: "SUCCESS", completedAt: done },
       { name: "deep-qa-gate", conclusion: "FAILURE", completedAt: done },
