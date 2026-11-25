@@ -93,7 +93,7 @@ async function runIssue(flags: Record<string, string>, ports: RecordEmitPorts): 
     // The reconcile zero-state backstop can win the race and leave the issue in needs-triage:
     // the same move then answers ok+noop, so one identical retry tells that case from a real refusal.
     const retry = adv.code === "illegal-transition" ? await safeAdvance(ports, issue) : null;
-    if (!retry || retry.ok === false) {
+    if (!retry || retry.ok === false || retry.observed.state !== "needs-triage") {
       console.error(`[retro-emit] first-state refused for #${issue} (${adv.code}); cue ${cue} left unrecorded`);
       return failed(adv.code, { issue });
     }
@@ -206,8 +206,14 @@ function productionPorts(): RecordEmitPorts {
 }
 
 /** CLI entry: one JSON line, exit 0/1/2, Redis closed before exit. */
-export async function main(argv: readonly string[]): Promise<number> {
-  const out = await runRecordEmit(argv, productionPorts());
+export async function main(argv: readonly string[], makePorts: () => RecordEmitPorts = productionPorts): Promise<number> {
+  let out: RecordEmitOutcome;
+  try {
+    out = await runRecordEmit(argv, makePorts());
+  } catch (err) {
+    console.error("[retro-emit] port construction or run crashed:", err);
+    out = failed("crashed");
+  }
   process.stdout.write(`${JSON.stringify(out.result)}\n`);
   closeRedisConnections();
   return out.code;

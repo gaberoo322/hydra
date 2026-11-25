@@ -5,7 +5,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { runRecordEmit, parseIssueNumber, type RecordEmitPorts } from "../scripts/retro/record-emit.ts";
+import { runRecordEmit, parseIssueNumber, main, type RecordEmitPorts } from "../scripts/retro/record-emit.ts";
 import type { RetroSeenEntry } from "../src/redis/retro-seen.ts";
 import type { AdvanceResult } from "../src/lifecycle/index.ts";
 
@@ -72,6 +72,35 @@ describe("retro record-emit", () => {
     const out = await runRecordEmit(ISSUE_ARGV, ports);
     assert.equal(out.code, 0);
     assert.equal(recorded.length, 1);
+  });
+
+  test("illegal-transition whose retry succeeds but observes a non-needs-triage state is a refusal", async () => {
+    let n = 0;
+    const moved = { ...OK_ADVANCE, observed: { state: "in-progress", labels: [] } } as unknown as AdvanceResult;
+    const { ports, recorded } = fakePorts({ advance: async () => (n++ === 0 ? REFUSED("illegal-transition") : moved) });
+    const out = await runRecordEmit(ISSUE_ARGV, ports);
+    assert.equal(out.code, 1);
+    assert.equal(out.result.code, "illegal-transition");
+    assert.equal(recorded.length, 0);
+  });
+
+  test("main reports crashed with exit 1 when port construction throws", async () => {
+    const writes: string[] = [];
+    const orig = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((c: string) => (writes.push(String(c)), true)) as typeof process.stdout.write;
+    const origErr = console.error;
+    console.error = () => {};
+    let code: number;
+    try {
+      code = await main(["pr"], () => {
+        throw new Error("redis down");
+      });
+    } finally {
+      process.stdout.write = orig;
+      console.error = origErr;
+    }
+    assert.equal(code, 1);
+    assert.equal(JSON.parse(writes.join("")).code, "crashed");
   });
 
   test("illegal-transition that persists is a refusal", async () => {
