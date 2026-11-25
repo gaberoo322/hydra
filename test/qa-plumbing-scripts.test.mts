@@ -371,8 +371,19 @@ describe("preflight (steps 1-6.7 in one read-only call)", () => {
     ).rows;
     let accepted = 0;
     let refused = 0;
+    const zeroProbeRows: string[] = [];
     for (const row of rows) {
-      const probes = [...new Set([...row.closing, ...row.referenced, ...(row.doesNotClose ?? [])])];
+      // Every number the row names AND every number written after a hash in its body, so a row with empty
+      // expectation columns (an embedded verb, a no-space form) still goes through runPreflight.
+      const probes = [
+        ...new Set([
+          ...row.closing,
+          ...row.referenced,
+          ...(row.doesNotClose ?? []),
+          ...[...row.body.matchAll(/#(\d+)/g)].map((m) => Number(m[1])),
+        ]),
+      ];
+      if (probes.length === 0) zeroProbeRows.push(row.name);
       for (const issue of probes) {
         const gh = (a: string[]) =>
           a[0] === "pr" && a[1] === "list" ? ok(JSON.stringify([{ number: 91, body: row.body }])) : preflightGh()(a);
@@ -398,6 +409,9 @@ describe("preflight (steps 1-6.7 in one read-only call)", () => {
       }
     }
     assert.ok(accepted >= 20 && refused >= 10, `the table must exercise both arms (accepted ${accepted}, refused ${refused})`);
+    // Only a body with no hash-number at all may skip runPreflight.
+    assert.deepEqual(zeroProbeRows, ["empty body"]);
+    for (const name of zeroProbeRows) assert.doesNotMatch(rows.find((r) => r.name === name)?.body ?? "#0", /#\d/);
   });
 
   test("preflight: the no-linked-PR comment needs EVERY open PR to not close the issue; one closer among non-closers is found (#5767)", async () => {
@@ -419,6 +433,25 @@ describe("preflight (steps 1-6.7 in one read-only call)", () => {
     );
     assert.equal(one.pr?.number, 91);
     assert.equal(one.stop, null);
+  });
+
+  test("preflight: the spec parent is the issue under QA when the PR closes it, even after an earlier prose colon-ref to another issue; else parentIssueOf (#5767)", async () => {
+    const resolveCalls = async (body: string): Promise<string[]> => {
+      const asked: string[] = [];
+      const http: PlumbingPorts["http"] = async (path) => {
+        if (path.includes("/resolve")) asked.push(path);
+        return httpFound(2)(path);
+      };
+      await runPreflight(PRE_OPTS, harness({ ghHandler: preflightGh({ ...PR_VIEW, body }), gitHandler: preflightGit(), http }).ports);
+      return asked;
+    };
+    // The closed-PR-5328 shape: prose "primary fix: #N" for another issue first, the genuine closing line later.
+    const prose = "Stacked on the primary fix: #5326, which lands the parser.\n\n## Summary\n\nCloses #5269";
+    assert.equal(parentIssueOf(prose), 5326, "closing-first alone picks the prose hit");
+    assert.deepEqual(await resolveCalls(prose), ["/api/design-concepts/5269/resolve"]);
+    // Fallback: the body does not close the QA'd issue, so parentIssueOf's answer stands.
+    assert.deepEqual(await resolveCalls("Stacked on the primary fix: #5326.\n\nRefs #5269"), ["/api/design-concepts/5326/resolve"]);
+    assert.deepEqual(await resolveCalls("No closing line here.\n\nRefs #41"), ["/api/design-concepts/41/resolve"]);
   });
 
   test("parentIssueOf: closing ref first, then the first plain reference, over the shared truth table (#5767)", () => {

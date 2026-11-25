@@ -192,7 +192,9 @@ export async function runPreflight(opts: PreflightOptions, ports: PlumbingPorts)
   const changedPaths = paths.stdout.split("\n").map((l) => l.trim()).filter((l) => l !== "");
 
   // 4. Resolve the spec source — the design-concept artifact.
-  const parent = parentIssueOf(body);
+  // The issue under QA wins when this PR really closes it: closing-first alone would let a prose hit on the
+  // module's colon form ("primary fix: #N", earlier in the body) outrank the genuine closing line (#5767).
+  const parent = bodyClosesIssue(body, issue) ? issue : parentIssueOf(body);
   let resolve: Record<string, unknown> | null = null;
   if (parent !== null) {
     const res = await ports.http(`/api/design-concepts/${parent}/resolve`);
