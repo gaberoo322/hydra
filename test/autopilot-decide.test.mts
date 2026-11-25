@@ -36,6 +36,7 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { turnSnapshot, withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
+import { seedRelaunchedState } from "./_helpers/relaunch-seed.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
@@ -4224,6 +4225,26 @@ describe("decide.py — sweep_orch per-item verdict-stability guard (issue #3939
       undefined,
       "the orphan path never touches the per-item stamp map",
     );
+  });
+
+  test("relaunch (#5717): a run seeded --carry-from a prior doc with every item stamped fires no sweep_orch; one new item fires exactly one", () => {
+    const prior = { orch_triage_item_stamps: { "5649": ORCH_NOW - 20, "5658": ORCH_NOW - 20 } };
+    const items = { needs_triage_orch: true, orch_needs_triage_items: "5649 5658" };
+    const quiet = seedRelaunchedState(prior, ORCH_NOW - 1);
+    quiet.signals = items;
+    assert.equal(findSweepOrch(runOrchGuard(quiet).plan), undefined, "the guard spans the relaunch");
+
+    const fresh = seedRelaunchedState(prior, ORCH_NOW - 1);
+    fresh.signals = { ...items, orch_needs_triage_items: "5649 5658 5700" };
+    const { plan } = runOrchGuard(fresh);
+    assert.equal((plan.actions ?? []).filter(sweepOrchDispatch).length, 1, "a new item still fires once (#3939 INV-2)");
+  });
+
+  test("relaunch (#5717): a carried stamp older than the backoff reads as absent and fires", () => {
+    const prior = { orch_triage_item_stamps: { "5649": ORCH_NOW - (ORCH_BACKOFF_SEC + 60) } };
+    const state = seedRelaunchedState(prior, ORCH_NOW - 1);
+    state.signals = { needs_triage_orch: true, orch_needs_triage_items: "5649" };
+    assert.ok(findSweepOrch(runOrchGuard(state).plan));
   });
 
   test("sweep_orch excluded under target-only scope (the guard never bypasses scope)", () => {
