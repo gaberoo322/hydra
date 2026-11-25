@@ -301,7 +301,7 @@ describe("finish: proofs, commits, staging, push shape", () => {
       assert.equal(p.script, `${o.masterWorktree}/scripts/ci/qa-fix-proof.ts`);
       assert.equal(p.cwd, o.prWorktree);
     }
-    assert.ok(env.calls.findLastIndex((c) => c.startsWith("proof")) < env.calls.findIndex((c) => c.startsWith("git push")));
+    assert.ok(env.calls.map((c) => c.startsWith("proof")).lastIndexOf(true) < env.calls.findIndex((c) => c.startsWith("git push")));
   });
 
   test("any class-B commit runs exactly ONE proof, based on fixedSha; A commits before B with separate trailers", async () => {

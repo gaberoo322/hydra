@@ -363,11 +363,11 @@ NEXT=$(printf '%s' "$ROUTE_JSON" | jq -er '.nextStep') || exit 1
 
 #### 9.4 Reviewer commit branch — only when `route` pauses for it (issue #5415)
 
-If `NEXT` is `reviewer-commit`, `route` decided a class-A (or, at stage `A+B`, class-B) reviewer commit may repair this FAIL and has written nothing yet. Read `### 9.4 Reviewer commit (class A)` in `hydra-qa-reference.md`, run its block (every input comes from `$ROUTE_JSON.reviewerCommit`; it exports `RC_OK` and `NEW_HEAD`), then re-call `route` with the same files and read `NEXT` again:
+If `NEXT` is `reviewer-commit`, `route` decided a class-A (or, at stage `A+B`, class-B) reviewer commit may repair this FAIL and has written nothing yet. Read `### 9.4 Reviewer commit (class A)` in `hydra-qa-reference.md`, follow its `scripts/qa/reviewer-commit.ts` `open`, hand-edit, `finish` (or `abort`) sequence (every input comes from `$ROUTE_JSON.reviewerCommit`; `finish` prints `.ok` and `.newHead`, which you carry as `RC_OK` and `NEW_HEAD`), then re-call `route` with the same files and read `NEXT` again:
 
 ```bash
 if [ "$NEXT" = "reviewer-commit" ]; then
-  # ... run the reference sidecar's 9.4 block here ...
+  # scripts/qa/reviewer-commit.ts open -> hand edit -> finish (or abort); RC_OK=finish .ok, NEW_HEAD=finish .newHead
   if [ "${RC_OK:-0}" = 1 ] && [ -n "${NEW_HEAD:-}" ]; then
     ROUTE_JSON=$(node --no-warnings --experimental-strip-types scripts/qa/route.ts \
       --preflight "$PF" --packet "$PK" --findings "$FINDINGS_FILE" --summaries "$SUMMARIES_FILE" --reviewer-fixed "$NEW_HEAD") || exit 1

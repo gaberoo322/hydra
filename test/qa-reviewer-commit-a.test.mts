@@ -363,104 +363,35 @@ describe("qa-verdict phases for the reviewer commit", () => {
   });
 });
 
-describe("playbook step 9.4 pins", () => {
+describe("playbook step 9.4 pins (the effect is scripts/qa/reviewer-commit.ts, #5712)", () => {
   const start = PLAYBOOK.indexOf("### 9.4 Reviewer commit (class A)");
   const step94 = PLAYBOOK.slice(start);
 
-  test("the 9.4 block lives in the sidecar, the loaded playbook carries only the branch, and the sidecar has no 9.5 trailer section", () => {
+  test("the sidecar names open and finish, carries no shell mechanics, and has no 9.5 trailer section", () => {
     assert.ok(start !== -1, "step 9.4 lives in the hydra-qa reference sidecar after the #5269 refactor");
     assert.ok(!PLAYBOOK.includes("### 9.5 "), "route owns the trailer inputs; the sidecar section is gone");
+    assert.ok(step94.includes("scripts/qa/reviewer-commit.ts open") && step94.includes("scripts/qa/reviewer-commit.ts finish"));
+    assert.ok(!/git worktree|git push|gh pr edit|git commit/.test(step94), "the git mechanics live in the tested script");
+    assert.ok(!/RC_OK=|MASTER_WT=|RC_BLOCKING_PATHS/.test(step94));
+  });
+
+  test("the loaded playbook carries only the branch: it names the script and keeps the route re-call flags", () => {
     const branch = QA_PLAYBOOK.slice(QA_PLAYBOOK.indexOf("#### 9.4 Reviewer commit branch"), QA_PLAYBOOK.indexOf("`route.ts` makes exactly ONE pass"));
     assert.ok(branch.includes('if [ "$NEXT" = "reviewer-commit" ]'));
+    assert.ok(branch.includes("scripts/qa/reviewer-commit.ts"));
     assert.ok(branch.includes('--reviewer-fixed "$NEW_HEAD"') && branch.includes("--reviewer-commit-aborted"));
-    assert.ok(!branch.includes("git worktree"), "the full bash stays in the sidecar");
+    assert.ok(!branch.includes("git worktree"), "the git mechanics stay in the script");
   });
 
-  test("the executed block takes every input from route's plan and never re-derives a verdict", () => {
-    for (const v of ["REVIEWED_HEAD", "HEAD_REF", "FIXED_SHA", "RC_BLOCKING_PATHS", "RC_FOLLOWUP_PATHS", "BODY_FIX"]) {
-      assert.ok(step94.includes(`${v}=$(`), `${v} is read from the plan`);
-    }
-    assert.ok(step94.includes("$ROUTE_JSON") && step94.includes(".blockingLocations[]?"));
-    assert.ok(!/qa-verdict\.ts/.test(step94), "no qa-verdict.ts invocation");
-    assert.ok(!/\$FOLD_JSON|\$PREFLIGHT_JSON|\$REVIEW_VERDICT/.test(step94));
-    assert.ok(!/^\s*(REVIEW_VERDICT|VERDICT|REVIEW_REPORT|BLOCKERS|MAX_SEVERITY)=/m.test(step94), "route owns the verdict, report and counts");
-    assert.ok(step94.includes("NEW_HEAD=$(git rev-parse HEAD)"));
-  });
-
-  test("never force-pushes and uses no plus refspec", () => {
-    assert.ok(!/--force|force-with-lease/.test(step94.replace(/never force-push/g, "")));
-    assert.ok(!/\+refs|\+HEAD/.test(step94));
-    assert.ok(step94.includes('git push origin "HEAD:refs/heads/$HEAD_REF"'));
-  });
-
-  test("the commit carries the QA-Fix: A trailer, is detached and runs the local proof before the push", () => {
-    assert.ok(step94.includes('-m "QA-Fix: A"'));
-    assert.ok(step94.includes("git worktree add --detach"));
-    assert.ok(step94.indexOf("scripts/ci/qa-fix-proof.ts") < step94.indexOf("git push origin"));
-    assert.ok(step94.indexOf("gh pr edit") < step94.indexOf("git push origin"));
-  });
-
-  test("the block runs only when route paused for it: gated on NEXT before any worktree is built", () => {
-    const gate = step94.indexOf('if [ "$NEXT" = "reviewer-commit" ]; then');
-    assert.ok(gate !== -1 && gate < step94.indexOf(`git worktree add --detach "$MASTER_ROOT_DIR/master"`));
-  });
-
-  test("only blocking paths must be staged; follow-up paths are an optional subset", () => {
-    assert.ok(step94.includes("RC_BLOCKING_PATHS") && step94.includes("RC_FOLLOWUP_PATHS"));
-    assert.ok(step94.includes('grep -qvxF -f <(printf \'%s\\n\' "$RC_BLOCKING_PATHS" "$RC_FOLLOWUP_PATHS")'));
-    assert.ok(!step94.includes("RC_PATHS"));
-  });
-
-  test("the proof and regenerators run from the master-based session tree against a separate PR worktree", () => {
-    assert.ok(step94.includes('SESSION_ROOT=$(git rev-parse --show-toplevel)'));
-    assert.ok(step94.includes('"$MASTER_WT"/scripts/ci/qa-fix-proof.ts --base "$REVIEWED_HEAD" --head HEAD'));
-    assert.ok(step94.includes('"$MASTER_WT"/scripts/ci/qa-fix-proof.ts --base "$FIXED_SHA" --head HEAD'), "stage is read from master");
-    assert.ok(step94.includes('git worktree add --detach "$PR_WT"'));
-    assert.ok(!/node [^\n]*[ "]scripts\/ci\/qa-fix-proof\.ts/.test(step94), "no PR-tree relative script path");
-    assert.ok(!step94.includes("git checkout --detach"), "the session tree is never switched to the PR head");
-  });
-
-  test("a claimed body fix requires BODY_CHANGED unconditionally, and only Files in scope bullets may be added", () => {
-    assert.ok(step94.includes('[ "$BODY_FIX" != true ] || [ "$BODY_CHANGED" = 1 ] || RC_OK=0'));
-    assert.ok(step94.includes("body-scope-check"));
-  });
-
-  test("each blocking row with a line has an executable diff-hunk check", () => {
-    assert.ok(step94.includes("-U0"));
-    assert.ok(step94.includes("ROW_FILE") && step94.includes("ROW_LINE"));
-  });
-
-  test("cleanup is gated on a created PR worktree, leaves the session tree untouched, and removes tempfiles", () => {
-    assert.ok(step94.includes('[ "$CHECKED_OUT" = 1 ]'));
-    assert.ok(step94.includes("SESSION_HEAD") && !step94.includes("ORIG_HEAD"));
-    assert.ok(step94.includes('rm -f "$ORIG_BODY_FILE" "$RC_BODY_FILE"'));
-    assert.ok(step94.includes("--allow-empty"));
-  });
-
-  test("step 9.4 adds no second fold call and no prior-findings variables", () => {
-    assert.ok(!step94.includes("scripts/ci/qa-verdict.ts fold"));
-    assert.ok(!/PRIOR_FINDINGS|REREVIEW_DIFF_BASE/.test(step94));
+  test("regenerators run from the master worktree against the PR worktree via HYDRA_REPO_ROOT, never npx", () => {
+    assert.ok(step94.includes("HYDRA_REPO_ROOT=<prWorktree>"));
+    assert.ok(step94.includes("<masterWorktree>/node_modules/.bin/tsx"));
+    assert.ok(!step94.includes("npx tsx"));
   });
 
   test("the rollout switch ships off", () => {
     const cfg = JSON.parse(readFileSync(join(ROOT, "config", "orchestrator", "qa-rollout.json"), "utf8"));
     assert.equal(cfg["reviewer-commits"], "off");
-  });
-});
-
-describe("step 9.4 trust: scripts run from a master worktree, regenerators target the PR worktree (round 4)", () => {
-  const start = PLAYBOOK.indexOf("### 9.4 Reviewer commit");
-  const step94 = PLAYBOOK.slice(start);
-
-  test("a master worktree of FIXED_SHA is built, every script is invoked under it, and the session tree is asserted unchanged", () => {
-    assert.ok(step94.includes('git worktree add --detach "$MASTER_ROOT_DIR/master" "$FIXED_SHA"'));
-    assert.ok(!/qa-verdict\.ts/.test(step94), "the decision runs in route now; no relative or absolute qa-verdict path");
-    assert.ok(!step94.includes("$SESSION_ROOT/scripts"), "no script runs from the session tree");
-    assert.ok(step94.includes('git -C "$SESSION_ROOT" status --porcelain'));
-  });
-
-  test("regenerators are pointed at the PR worktree via HYDRA_REPO_ROOT", () => {
-    assert.ok(step94.includes('HYDRA_REPO_ROOT="$PR_WT"'));
   });
 });
 
@@ -522,13 +453,6 @@ describe("reviewer-commits rollout stage authority (INV-1, #5267 round 5)", () =
       rmSync(master, { recursive: true, force: true });
       rmSync(prTree, { recursive: true, force: true });
     }
-  });
-
-  test("the sidecar block pins the master tsx for regenerators, never npx", () => {
-    const start = PLAYBOOK.indexOf("### 9.4 Reviewer commit");
-    const step94 = PLAYBOOK.slice(start);
-    assert.ok(step94.includes('"$MASTER_WT/node_modules/.bin/tsx"'));
-    assert.ok(!step94.includes("npx tsx"));
   });
 });
 
