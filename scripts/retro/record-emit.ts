@@ -78,7 +78,7 @@ async function runIssue(flags: Record<string, string>, ports: RecordEmitPorts): 
   if (!title || !bodyFile || !cue || !runId) return usage("issue requires --title, --body-file, --cue and --run-id");
   const body = ports.readFile(bodyFile);
   const created = await ports.gh(["issue", "create", "--repo", resolveGithubRepo(), "--title", title, "--body", body]);
-  if (!created.ok) return failed(created.code);
+  if (created.ok === false) return failed(created.code);
   const issue = parseIssueNumber(created.stdout);
   if (issue === null) return failed("gh-url-unparseable", { stdout: created.stdout.slice(0, 200) });
 
@@ -89,11 +89,11 @@ async function runIssue(flags: Record<string, string>, ports: RecordEmitPorts): 
     console.error(`[retro-emit] lifecycle advance threw for #${issue}; cue ${cue} left unrecorded:`, err);
     return failed("crashed", { issue });
   }
-  if (!adv.ok) {
+  if (adv.ok === false) {
     // The reconcile zero-state backstop can win the race and leave the issue in needs-triage:
     // the same move then answers ok+noop, so one identical retry tells that case from a real refusal.
     const retry = adv.code === "illegal-transition" ? await safeAdvance(ports, issue) : null;
-    if (!retry || !retry.ok) {
+    if (!retry || retry.ok === false) {
       console.error(`[retro-emit] first-state refused for #${issue} (${adv.code}); cue ${cue} left unrecorded`);
       return failed(adv.code, { issue });
     }
@@ -193,7 +193,7 @@ function productionPorts(): RecordEmitPorts {
   return {
     async gh(args) {
       const res = await ghExec(args);
-      return res.ok ? { ok: true, stdout: res.data.stdout } : { ok: false, code: res.code };
+      return res.ok === false ? { ok: false, code: res.code } : { ok: true, stdout: res.data.stdout };
     },
     advance: (input) => advance(input, deps),
     recordSeen: recordRetroSeen,
