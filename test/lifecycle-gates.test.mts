@@ -88,12 +88,24 @@ describe("gate predicates (INV-7, INV-8)", () => {
     assert.equal(gatePrOpen(gi({ evidence: { pr: "56" } }), { pr: open }).code, "record-binding-mismatch");
     assert.equal(gatePrOpen(gi({ evidence: ev }), { pr: { ok: true, value: { ...open.value, state: "MERGED" } } }).code, "pr-not-open");
     assert.equal(gatePrOpen(gi({ evidence: ev }), { pr: { ok: true, value: { ...open.value, body: "Refs #10" } } }).code, "pr-does-not-close-issue");
+    // #5766: the gate asks the PR refs module — a negated ref is not a close, the colon form is.
+    assert.equal(gatePrOpen(gi({ evidence: ev }), { pr: { ok: true, value: { ...open.value, body: "This does not close #10" } } }).code, "pr-does-not-close-issue");
+    assert.equal(gatePrOpen(gi({ evidence: ev }), { pr: { ok: true, value: { ...open.value, body: "Closes: #10" } } }).ok, true);
     assert.equal(gatePrOpen(gi({ evidence: ev }), { pr: open }).ok, true);
   });
 
   test("close: completed needs a merged PR; not planned needs superseded-by", () => {
     const merged = { ok: true as const, value: { number: 55, state: "MERGED", body: "closes #10" } };
     assert.equal(gateClose(gi({ to: "closed", closeReason: "completed", evidence: { pr: "55" } }), { pr: merged }).ok, true);
+    // #5766: same predicate as pr-open — negated ref refused, colon form accepted.
+    assert.equal(
+      gateClose(gi({ to: "closed", closeReason: "completed", evidence: { pr: "55" } }), { pr: { ok: true, value: { ...merged.value, body: "Does not close #10" } } }).code,
+      "pr-does-not-close-issue",
+    );
+    assert.equal(
+      gateClose(gi({ to: "closed", closeReason: "completed", evidence: { pr: "55" } }), { pr: { ok: true, value: { ...merged.value, body: "Closes: #10" } } }).ok,
+      true,
+    );
     assert.equal(
       gateClose(gi({ to: "closed", closeReason: "completed", evidence: { pr: "55" } }), { pr: { ok: true, value: { ...merged.value, state: "OPEN" } } }).code,
       "pr-not-merged",

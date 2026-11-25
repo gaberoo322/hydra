@@ -371,6 +371,9 @@ describe("qa-passed exits (INV-3, INV-4, INV-13)", () => {
     assert.equal(resolveQaPr([], 50, prs), 7);
     assert.equal(resolveQaPr([], 50, [...prs, { number: 9, body: "Fixes #50" }]), null);
     assert.equal(resolveQaPr([], 51, prs), null);
+    // #5766: a companion PR that says it does NOT close the issue is no candidate,
+    // so the one real closing PR still resolves instead of going ambiguous.
+    assert.equal(resolveQaPr([], 50, [...prs, { number: 9, body: "Does not close #50 — #7 does." }]), 7);
     assert.equal(resolveQaPr([], 50, null), null);
 
     const { w, add } = world();
@@ -844,8 +847,16 @@ describe("PR-covered ready-for-agent promotion (#5489)", () => {
   });
 
   test("closingPrs is the one candidate predicate: drafts dropped, order kept", () => {
-    const prs: OpenPrRef[] = [{ number: 1, body: "Closes #9" }, { number: 2, body: "Closes #9", isDraft: true }, { number: 3, body: "Fixes #9" }];
-    assert.deepEqual(closingPrs(prs, 9).map((p) => p.number), [1, 3]);
+    // #5766: the candidate filter asks the PR refs module — a negated ref (#4) is
+    // not a candidate, the colon form (#5) is.
+    const prs: OpenPrRef[] = [
+      { number: 1, body: "Closes #9" },
+      { number: 2, body: "Closes #9", isDraft: true },
+      { number: 3, body: "Fixes #9" },
+      { number: 4, body: "This does not close #9" },
+      { number: 5, body: "Closes: #9" },
+    ];
+    assert.deepEqual(closingPrs(prs, 9).map((p) => p.number), [1, 3, 5]);
     assert.equal(singleClosingPr(prs.slice(0, 2), 9), 1);
   });
 
