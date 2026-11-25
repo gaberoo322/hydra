@@ -16,6 +16,7 @@
  * `--prune-unknown-rules` opts in and requires an explicit `--repo-root`.
  */
 
+import { isEntrypoint } from "../lib/entrypoint.mjs";
 import { parseReviewFindingsComment, reconcileReviewFindings } from "../../src/qa/review-findings-extract.ts";
 import type { StoredReviewFindingRow } from "../../src/redis/review-findings.ts";
 import { loadCodingStandards } from "../../src/qa/standards-loader.ts";
@@ -56,20 +57,8 @@ export async function harvestReviewFindingRows(
     .flatMap((c) => parseReviewFindingsComment(c.body, { at: c.created_at, source: "reconcile", knownRules }));
 }
 
-const isMain = (() => {
-  try {
-    return (
-      Array.isArray(process.argv) &&
-      process.argv[1] !== undefined &&
-      import.meta.url === `file://${process.argv[1]}`
-    );
-  } catch {
-    /* intentional: import.meta unavailable outside a module host — not the CLI */
-    return false;
-  }
-})();
 
-if (isMain) {
+if (isEntrypoint(import.meta.url)) {
   const arg = (flag: string): string | null => {
     const i = process.argv.indexOf(flag);
     return i === -1 || i === process.argv.length - 1 ? null : (process.argv[i + 1] as string);

@@ -59,8 +59,8 @@
  * applying to the NEXT T4 PR, once this has merged.
  */
 
+import { isEntrypoint } from "../lib/entrypoint.mjs";
 import { spawnSync } from "node:child_process";
-import { pathToFileURL } from "node:url";
 
 /** One POST attempt, reduced to what the classifier needs. */
 export type Attempt = {
@@ -196,11 +196,8 @@ export function ghPost(args: string[]): Attempt {
   };
 }
 
-const isMain =
-  process.argv[1] !== undefined &&
-  import.meta.url === pathToFileURL(process.argv[1]).href;
 
-if (isMain) {
+if (isEntrypoint(import.meta.url)) {
   const [sha, state, context, description] = process.argv.slice(2);
   const repo = process.env.REPO ?? "";
   if (!repo || !sha || !state || !context || description === undefined) {
