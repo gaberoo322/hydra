@@ -51,13 +51,13 @@ authority for PR-body drift, baseline regen and missing pins.
 
 A required `test-source-read-ratchet` test gates test reads of code paths against a kind-tagged
 fixture (grandfathered rows only shrink). The mutation gate counts unparseable mutants as `skipped`
-(removes the ~28.7% free kills); it was advisory when this decision was written (`MUTATION_GATE_BLOCKING` unset) — superseded by the
+(removes the ~28.7% free kills); it was advisory when this decision was written — superseded by the
 2026-11-20 amendment below, which turns blocking on. The 20 runnable structure-sensitive pins convert in ~4 cluster issues;
 `docs/generated/` inventories drop `"line"` fields.
 
-**Amendment — MUTATION_GATE_BLOCKING on at T3 floor 50 (2026-11-20, issue #5273).** Operator
+**Amendment — blocking mutation gate on at T3 floor 50 (2026-11-20, issue #5273).** Operator
 decision after 37 complete in-budget verdicts (min 50, median 78): `ci.yml` now passes
-`MUTATION_GATE_BLOCKING` (fallback `1`; repo variable `0` pauses it) and the T3/T4 floor is 50.
+the blocking switch (default on; a repo variable set to `0` pauses it) and the T3/T4 floor is 50.
 Timed-out and no-signal verdicts stay non-blocking. Ratchet the floor up from the observed distribution.
 
 ### Decision 5 — Review depth is set by reversibility, not tier alone (#5190, #5191)
