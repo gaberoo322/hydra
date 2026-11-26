@@ -9,8 +9,8 @@ import { runRecordEmit, parseIssueNumber, main, type RecordEmitPorts } from "../
 import type { RetroSeenEntry } from "../src/redis/retro-seen.ts";
 import type { AdvanceResult } from "../src/lifecycle/index.ts";
 
-const OK_ADVANCE = { ok: true, issue: 77, from: null, to: "needs-triage", mode: "enforce", observed: { state: "needs-triage", labels: [] } } as unknown as AdvanceResult;
-const REFUSED = (code: string): AdvanceResult => ({ ok: false, issue: 77, code, mode: "enforce", written: false });
+const OK_ADVANCE = { ok: true, issue: 77, from: null, to: "needs-triage", observed: { state: "needs-triage", labels: [] } } as unknown as AdvanceResult;
+const REFUSED = (code: string): AdvanceResult => ({ ok: false, issue: 77, code, written: false });
 
 function fakePorts(over: Partial<RecordEmitPorts> = {}, files: Record<string, string> = {}) {
   const calls: string[] = [];

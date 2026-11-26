@@ -133,10 +133,10 @@ marker is persisted alongside).
 For each flagged dispatch (the ones the bundle flagged for drill), and ONLY
 those, read the full transcript. The ONLY handle is `dispatches[].transcriptId`
 (the bare agent hash, same value as `slot.task_id`); `cycleId` is the
-cycle-record key, NOT a transcript handle — never pass it to the route:
+cycle-record key, NOT a transcript handle — never pass it to the route. `BUNDLE` is the bundle JSON fetched above and `OCCUPANCY_ID` is the flagged row's `.occupancyId`; an empty result is a transcript-less row:
 
 ```bash
-TRANSCRIPT_ID=<dispatches[].transcriptId>
+TRANSCRIPT_ID=$(jq -r --arg oid "$OCCUPANCY_ID" '.dispatches[] | select(.flagged==true and .occupancyId==$oid) | .transcriptId // empty' <<<"$BUNDLE")
 curl -sf "http://localhost:4000/api/dispatches/${TRANSCRIPT_ID}/transcript"
 ```
 
