@@ -10,7 +10,7 @@
 import { logger } from "../logger.ts";
 import { CLAIM_OWNER_MISMATCH, type DispatchClaim, type LifecycleJournalEntry } from "../redis/lifecycle-journal.ts";
 import { classRole, type CapExitCode } from "./caps.ts";
-import { advance, guardCaps, journalEntry as journal, shadowParkEntry, type AdvanceResult } from "./seam.ts";
+import { advance, guardCaps, journalEntry as journal, type AdvanceResult } from "./seam.ts";
 import type { SeamDeps } from "./seam-deps.ts";
 import { stateLabelsOf } from "./transitions.ts";
 // ---------------------------------------------------------------------------
@@ -46,12 +46,7 @@ export interface ClaimInput {
 }
 
 export type ClaimResult =
-  | {
-      ok: true;
-      claim: DispatchClaim;
-      /** Set in shadow when the cap check would have parked this claim in enforce. */
-      wouldPark?: string;
-    }
+  | { ok: true; claim: DispatchClaim }
   | { ok: false; code: "claim-held" | "redis-failed"; existing?: DispatchClaim | null }
   | { ok: false; code: CapExitCode; written: boolean };
 
@@ -101,7 +96,6 @@ export async function openClaim(input: ClaimInput, deps: SeamDeps): Promise<Clai
   if (held.ok && held.claim) return { ok: false, code: "claim-held", existing: held.claim };
 
   // Re-read the issue to stamp `state` (INV-13). A failed read skips the cap check (INV-12).
-  const mode = await deps.mode();
   const view = await deps.view(issue);
   let state = "unknown";
   let capState = "";
@@ -124,10 +118,9 @@ export async function openClaim(input: ClaimInput, deps: SeamDeps): Promise<Clai
       actor,
     },
     deps,
-    mode,
   );
   if (guard.parked !== null) return { ok: false, code: guard.parked.code, written: guard.parked.written };
-  const { stamp, shadowOver } = guard;
+  const { stamp } = guard;
 
   const res = await deps.journal.openClaim(deps.repo, issue, claim);
   if (res.ok === false) {
@@ -149,10 +142,6 @@ export async function openClaim(input: ClaimInput, deps: SeamDeps): Promise<Clai
       }),
     ),
   );
-  if (shadowOver !== null) {
-    await journal(deps, issue, shadowParkEntry(deps, shadowOver, capState === "" ? null : capState, input.pr ?? null, actor));
-    return { ok: true, claim, wouldPark: shadowOver.arm };
-  }
   return { ok: true, claim };
 }
 
@@ -249,9 +238,6 @@ export type DispatchResult =
       claim: DispatchClaim;
       /** The `in-progress` advance, or null when none was attempted (non-dev role, other state, failed read). */
       advanced: Extract<AdvanceResult, { ok: true }> | null;
-      /** Set in shadow when the advance would have been refused in enforce. */
-      wouldRefuse?: string;
-      wouldPark?: string;
     }
   | { ok: false; code: "claim-held" | "redis-failed"; existing?: DispatchClaim | null }
   | { ok: false; code: CapExitCode; written: boolean }
@@ -260,7 +246,7 @@ export type DispatchResult =
 /**
  * Fetch the Design Concept, open the claim (copying the artifact hash only when
  * the artifact is `approved`), then advance dev-role dispatches to `in-progress`.
- * A refused advance in enforce releases the claim BEFORE the refusal is returned.
+ * A refused advance releases the claim BEFORE the refusal is returned.
  * Callers never supply the hash. Never throws.
  */
 export async function dispatch(input: DispatchInput, deps: SeamDeps): Promise<DispatchResult> {
@@ -302,7 +288,7 @@ async function claimThenAdvance(input: DispatchInput, deps: SeamDeps): Promise<D
     deps,
   );
   if (claimed.ok === false) return claimed;
-  const base = { claim: claimed.claim, ...(claimed.wouldPark !== undefined ? { wouldPark: claimed.wouldPark } : {}) };
+  const base = { claim: claimed.claim };
 
   if (classRole(input.class) !== "dev") return { ok: true, ...base, advanced: null };
   const view = await deps.view(issue);
@@ -325,10 +311,5 @@ async function claimThenAdvance(input: DispatchInput, deps: SeamDeps): Promise<D
     const released = await releaseClaim(issue, input.dispatchId, deps, actor, "released");
     return { ok: false, code: "advance-refused", reason: adv.code, released: released.ok };
   }
-  return {
-    ok: true,
-    ...base,
-    advanced: adv,
-    ...(adv.wouldRefuse !== undefined ? { wouldRefuse: adv.wouldRefuse } : {}),
-  };
+  return { ok: true, ...base, advanced: adv };
 }
