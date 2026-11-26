@@ -169,10 +169,15 @@ Caps are per arm, plus a total dispatch-claim budget per issue. The limits live 
 
 ### Decision 7: Shadow first; enforce on evidence (#5297)
 
-- **Switch:** `lifecycle-seam: shadow|enforce` in git-tracked
-  `config/orchestrator/lifecycle-rollout.json`; a missing value means `shadow`. In shadow the seam
-  **always writes**, journaling `would-refuse:<reason>` / `would-park:<arm>`. Dispatch claims are real
-  in shadow.
+- **Shadow is retired (#5768, operator decision 2026-11-25):** the flip criteria below were met and
+  the switch has said `enforce` since 2026-11-19. The seam has one behaviour: refuse on gate fail,
+  park on cap. **Rollback is a `git revert`, not a mode.** The remaining bullets record how the
+  rollout ran; they are history, and no new code may read or branch on shadow.
+- **Switch:** `lifecycle-seam` in git-tracked `config/orchestrator/lifecycle-rollout.json`. The
+  loader fails closed (#5769): a missing, unreadable or malformed file, a missing key, an unknown
+  value and the retired value `shadow` all mean `enforce`, each logged at error level with its
+  reason. While shadow ran, the seam **always wrote**, journaling `would-refuse:<reason>` /
+  `would-park:<arm>`; dispatch claims were real in shadow.
 - **Live arms park in shadow:** a cap arm with `liveInShadow` (Decision 6) parks exactly as in
   enforce, returning `parked:<arm>` (or `escalated:<arm>`) and posting the unified comment, so no previously enforced cap
   regresses. Its park entry carries `mode=shadow live=1` evidence, so the would-park triage for

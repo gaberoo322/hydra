@@ -1299,7 +1299,7 @@
       "date": null,
       "supersedes": [],
       "supersededBy": [],
-      "decision": "Orchestrator issue lifecycle is data: labels are current state (Hydra keeps history only); a closed state set (+`qa-passed`, `parked`) with operator-only human-hold exits; one `src/lifecycle/` writer seam (CLI + board routes) with record-checked evidence-pointer gates; a per-issue Redis journal + `SET NX` dispatch claim; durable per-arm + total caps that park; shadow→enforce rollout; parent loop shrinks to typed exceptions.",
+      "decision": "Orchestrator issue lifecycle is data: labels are current state (Hydra keeps history only); a closed state set (+`qa-passed`, `parked`) with operator-only human-hold exits; one `src/lifecycle/` writer seam (CLI + board routes) with record-checked evidence-pointer gates; a per-issue Redis journal + `SET NX` dispatch claim; durable per-arm + total caps that park; shadow→enforce rollout, shadow retired 2026-11-25 (the seam always enforces; rollback is a revert); parent loop shrinks to typed exceptions.",
       "readWhen": "Writing or routing any issue state label, dispatch claims, cycle caps/parking, `qa-passed`, or the parent-exception metric.",
       "citedBy": [
         "CONTEXT-MAP.md",
