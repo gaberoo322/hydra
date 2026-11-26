@@ -1,0 +1,1 @@
+- fix: the lifecycle mode loader fails closed. A missing, unreadable or malformed `config/orchestrator/lifecycle-rollout.json`, a missing key, an unknown value and the retired value `shadow` all resolve to enforce, each logged at error level with its reason. ADR-0047 Decision 7 records that shadow mode is retired and that rollback is a git revert (#5769)
