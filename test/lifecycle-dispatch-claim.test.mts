@@ -25,7 +25,7 @@ import type { DispatchClaim, LifecycleJournalEntry } from "../src/redis/lifecycl
 
 const NOW = Date.parse("2026-11-07T12:00:00.000Z");
 
-function world(mode: "shadow" | "enforce" = "enforce", dc: { status: string; hash: string | null } | null = null) {
+function world(dc: { status: string; hash: string | null } | null = null) {
   const w = {
     now: NOW,
     claims: new Map<number, DispatchClaim>(),
@@ -38,7 +38,6 @@ function world(mode: "shadow" | "enforce" = "enforce", dc: { status: string; has
   };
   const seam: SeamDeps = {
     repo: "o/r",
-    mode: async () => mode,
     view: async (n) => {
       const labels = w.labels.get(n);
       return labels
@@ -100,22 +99,20 @@ const D = (id: string, cls = "dev_orch") => ({ issue: 10, dispatchId: id, class:
 const closedEntries = (w: ReturnType<typeof world>["w"]) => w.journal.filter((j) => j.entry.kind === "claim-closed");
 
 describe("dispatch: concurrent claims (INV-7)", () => {
-  for (const mode of ["shadow", "enforce"] as const) {
-    test(`a concurrent second dispatch is refused by SET NX in ${mode}: no label write, no journal entry`, async () => {
-      const { w, seam } = world(mode);
-      w.labels.set(10, ["ready-for-agent"]);
-      const first = await dispatch(D("d1"), seam);
-      assert.equal(first.ok, true);
-      const editsBefore = w.edits.length;
-      const journalBefore = w.journal.length;
-      const second = await dispatch(D("d2"), seam);
-      assert.equal(second.ok, false);
-      assert.equal(second.ok === false && second.code, "claim-held");
-      assert.equal(w.edits.length, editsBefore);
-      assert.equal(w.journal.length, journalBefore);
-      assert.equal(w.claims.get(10)?.dispatchId, "d1");
-    });
-  }
+  test("a concurrent second dispatch is refused by SET NX: no label write, no journal entry", async () => {
+    const { w, seam } = world();
+    w.labels.set(10, ["ready-for-agent"]);
+    const first = await dispatch(D("d1"), seam);
+    assert.equal(first.ok, true);
+    const editsBefore = w.edits.length;
+    const journalBefore = w.journal.length;
+    const second = await dispatch(D("d2"), seam);
+    assert.equal(second.ok, false);
+    assert.equal(second.ok === false && second.code, "claim-held");
+    assert.equal(w.edits.length, editsBefore);
+    assert.equal(w.journal.length, journalBefore);
+    assert.equal(w.claims.get(10)?.dispatchId, "d1");
+  });
 
   test("a held legacy-backfill claim is released by its own dispatchId and the new claim opens in the same call", async () => {
     const { w, seam } = world();
@@ -133,7 +130,7 @@ describe("dispatch: concurrent claims (INV-7)", () => {
 
 describe("dispatch: composite verb (INV-6, INV-8)", () => {
   test("enforce refusal of the in-progress advance releases the claim before the refusal is returned", async () => {
-    const { w, seam } = world("enforce", { status: "draft", hash: "h" });
+    const { w, seam } = world({ status: "draft", hash: "h" });
     w.labels.set(10, ["ready-for-agent", "needs-design-concept"]);
     const res = await dispatch(D("d1"), seam);
     assert.equal(res.ok, false);
@@ -144,7 +141,7 @@ describe("dispatch: composite verb (INV-6, INV-8)", () => {
   });
 
   test("a throw after the claim opened returns redis-failed and releases the claim (no claim-held on retry)", async () => {
-    const { w, seam } = world("enforce");
+    const { w, seam } = world();
     w.labels.set(10, ["ready-for-agent"]);
     // The claim opens first; the label write inside the advance then throws.
     seam.edit = async () => {
@@ -156,7 +153,7 @@ describe("dispatch: composite verb (INV-6, INV-8)", () => {
   });
 
   test("sibling: a throw before any claim opens never releases a claim owned by another dispatch", async () => {
-    const { w, seam } = world("enforce");
+    const { w, seam } = world();
     const other = await openClaim({ issue: 10, dispatchId: "other", class: "dev_orch", run: "r0", artifactHash: null, actor: "cli" }, seam);
     assert.equal(other.ok, true);
     seam.fetch.designConcept = async () => {
@@ -167,23 +164,13 @@ describe("dispatch: composite verb (INV-6, INV-8)", () => {
     assert.equal(w.claims.get(10)?.dispatchId, "other");
   });
 
-  test("shadow writes the label and reports wouldRefuse", async () => {
-    const { w, seam } = world("shadow", { status: "draft", hash: "h" });
-    w.labels.set(10, ["ready-for-agent", "needs-design-concept"]);
-    const res = await dispatch(D("d1"), seam);
-    assert.equal(res.ok, true);
-    assert.equal(res.ok && res.wouldRefuse, "design-concept-draft");
-    assert.equal(w.claims.has(10), true);
-    assert.deepEqual(w.labels.get(10)?.includes("in-progress"), true);
-  });
-
   test("an approved artifact hash is copied onto the claim; a draft hash is not", async () => {
-    const approved = world("enforce", { status: "approved", hash: "abc123" });
+    const approved = world({ status: "approved", hash: "abc123" });
     approved.w.labels.set(10, ["ready-for-agent"]);
     await dispatch(D("d1"), approved.seam);
     assert.equal(approved.w.claims.get(10)?.artifactHash, "abc123");
 
-    const draft = world("shadow", { status: "draft", hash: "zzz" });
+    const draft = world({ status: "draft", hash: "zzz" });
     draft.w.labels.set(10, ["ready-for-agent"]);
     await dispatch(D("d1"), draft.seam);
     assert.equal(draft.w.claims.get(10)?.artifactHash, null);
@@ -360,7 +347,7 @@ describe("legacy backfill never cap-parks (INV-9)", () => {
   });
 
   test("an over-cap in-progress issue is claimed by backfill in enforce mode with no label write", async () => {
-    const { w, seam } = world("enforce");
+    const { w, seam } = world();
     w.labels.set(1, ["in-progress"]);
     const deps = overCap(w, seam);
     const res = await openClaim({ issue: 1, dispatchId: "legacy-backfill-1", class: "legacy-backfill", run: "x", skipCaps: true }, deps);
@@ -370,7 +357,7 @@ describe("legacy backfill never cap-parks (INV-9)", () => {
   });
 
   test("a caller-supplied class string alone does not bypass the cap gate", async () => {
-    const { w, seam } = world("enforce");
+    const { w, seam } = world();
     w.labels.set(1, ["in-progress"]);
     const res = await openClaim({ issue: 1, dispatchId: "legacy-backfill-1", class: "legacy-backfill", run: "x" }, overCap(w, seam));
     assert.equal(res.ok, false);
@@ -378,7 +365,7 @@ describe("legacy backfill never cap-parks (INV-9)", () => {
   });
 
   test("sibling: a real dispatch class over the same cap still parks in enforce mode", async () => {
-    const { w, seam } = world("enforce");
+    const { w, seam } = world();
     w.labels.set(1, ["in-progress"]);
     const res = await openClaim({ issue: 1, dispatchId: "d1", class: "dev_orch", run: "r1" }, overCap(w, seam));
     assert.equal(res.ok, false);

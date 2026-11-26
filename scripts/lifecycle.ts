@@ -12,8 +12,8 @@
  *   npx tsx scripts/lifecycle.ts reconcile [--dry-run | --report]
  *
  * Talks to GitHub (gh) and Redis directly: no :4000 dependency. Prints one JSON
- * line. Exit codes: 0 ok (including a shadow `wouldRefuse`), 1 refused / failed
- * (enforce refusals, human-hold exits, claim-held), 2 usage error. There is no
+ * line. Exit codes: 0 ok, 1 refused / failed (gate refusals, cap parks,
+ * human-hold exits, claim-held), 2 usage error. There is no
  * `--operator` flag: human-hold exits are refused for every caller.
  */
 import { fileURLToPath } from "node:url";

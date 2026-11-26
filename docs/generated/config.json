@@ -213,10 +213,8 @@
       "kind": "file",
       "path": "config/orchestrator/lifecycle-rollout.json",
       "section": null,
-      "readBy": [
-        "src/lifecycle/seam-deps.ts"
-      ],
-      "unread": false,
+      "readBy": [],
+      "unread": true,
       "source": {
         "path": "config/orchestrator/lifecycle-rollout.json"
       }

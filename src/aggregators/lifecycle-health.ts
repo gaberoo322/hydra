@@ -26,7 +26,6 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
 import { CAP_ARMS, type CapArm } from "../lifecycle/caps.ts";
-import { loadLifecycleMode, type LifecycleMode } from "../lifecycle/index.ts";
 import { listCapEvents, type CapEventRecord, type ListCapEventsResult } from "../redis/lifecycle-journal.ts";
 import { listAutopilotRunsSince } from "../redis/autopilot-runs.ts";
 import { readRunTurns, sanitizeParentExceptions, type TurnParentException, type TurnRow } from "../autopilot/turn-row.ts";
@@ -74,6 +73,9 @@ export interface FirstPassQaYieldMetric {
   windowDays: number;
   baseline: BaselineEcho | null;
 }
+
+/** The seam always enforces (ADR-0047 Decision 7); the field and its `shadow` arm go with #5771. */
+type LifecycleMode = "shadow" | "enforce";
 
 export interface ParkArmCounts {
   parks: number;
@@ -367,10 +369,9 @@ export async function computeParkRatePerArm(
 ): Promise<ParkRatePerArmMetric> {
   const now = (deps.now ?? new Date()).getTime();
   const repo = resolveGithubRepo(deps.githubRepo);
-  const repoRoot = deps.repoRoot ?? defaultRepoRoot();
   const [res, mode, baselines] = await Promise.all([
     (deps.readCapEvents ?? ((since: number) => listCapEvents(repo, since)))(now - windowDays * DAY_MS),
-    (deps.readMode ?? (async () => (await loadLifecycleMode(repoRoot)).mode))(),
+    (deps.readMode ?? (async (): Promise<LifecycleMode> => "enforce"))(),
     loadBuilderHealthBaselines(deps),
   ]);
   if (res.ok === false) throw new RedisSeamError(res.error);

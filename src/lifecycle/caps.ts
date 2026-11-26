@@ -44,26 +44,20 @@ export interface CapRow {
   readonly arm: CapArm;
   readonly unit: CapUnit;
   readonly limit: number;
-  /**
-   * Enforced even while the seam is in shadow (ADR-0047 D6/D7). True for the arms
-   * that were enforced before the seam existed; false for the arms new with it.
-   * Not env-overridable.
-   */
-  readonly liveInShadow: boolean;
   /** The state an exhausted arm writes. Every arm parks except `deep-qa-fails` (ADR-0047 D6). */
   readonly exit: CapExit;
 }
 
 /** Table order is the park-naming order: per-arm rows first, then the total. */
 export const CAP_TABLE: readonly CapRow[] = [
-  { arm: "qa-fail-rounds", unit: "pr", limit: 3, liveInShadow: true, exit: "park" },
-  { arm: "dev-nopr-resume", unit: "issue", limit: 2, liveInShadow: true, exit: "park" },
-  { arm: "qa-stall", unit: "issue", limit: 3, liveInShadow: true, exit: "park" },
-  { arm: "red-ci-forward-fix", unit: "pr", limit: 2, liveInShadow: true, exit: "park" },
-  { arm: "stale-requeue", unit: "issue", limit: 2, liveInShadow: false, exit: "park" },
-  { arm: "needs-dev-resume-claims", unit: "issue", limit: 4, liveInShadow: false, exit: "park" },
-  { arm: "total-claims", unit: "issue", limit: 10, liveInShadow: false, exit: "park" },
-  { arm: "deep-qa-fails", unit: "pr", limit: 2, liveInShadow: true, exit: "escalate" },
+  { arm: "qa-fail-rounds", unit: "pr", limit: 3, exit: "park" },
+  { arm: "dev-nopr-resume", unit: "issue", limit: 2, exit: "park" },
+  { arm: "qa-stall", unit: "issue", limit: 3, exit: "park" },
+  { arm: "red-ci-forward-fix", unit: "pr", limit: 2, exit: "park" },
+  { arm: "stale-requeue", unit: "issue", limit: 2, exit: "park" },
+  { arm: "needs-dev-resume-claims", unit: "issue", limit: 4, exit: "park" },
+  { arm: "total-claims", unit: "issue", limit: 10, exit: "park" },
+  { arm: "deep-qa-fails", unit: "pr", limit: 2, exit: "escalate" },
 ];
 
 /** The refusal code a cap exit returns: `parked:<arm>` for a park row, `escalated:<arm>` for an escalate row. */
@@ -72,11 +66,6 @@ export type CapExitCode = `parked:${string}` | `escalated:${string}`;
 /** The exit an exhausted `arm` takes (the `exit` column). */
 export function capExitOf(arm: CapArm): CapExit {
   return CAP_TABLE.find((r) => r.arm === arm)?.exit ?? "park";
-}
-
-/** Whether `arm` parks for real even in shadow mode (the `liveInShadow` column). */
-export function isLiveArm(arm: CapArm): boolean {
-  return CAP_TABLE.find((r) => r.arm === arm)?.liveInShadow === true;
 }
 
 export const CAP_DEFAULTS: Readonly<Record<CapArm, number>> = Object.fromEntries(

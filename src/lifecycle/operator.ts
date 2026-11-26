@@ -12,7 +12,7 @@ import { isPullRequestUrl } from "./gates.ts";
 import { resetsCapsOnExit } from "./caps.ts";
 import { postCapReset } from "./park.ts";
 import { entry, journalEntry as journal, normaliseCloseReason, observedOf, type AdvanceResult } from "./seam.ts";
-import type { LifecycleMode, SeamDeps } from "./seam-deps.ts";
+import type { SeamDeps } from "./seam-deps.ts";
 import {
   findOperatorTransition,
   isLifecycleState,
@@ -52,27 +52,25 @@ function operatorEntry(
 
 export async function operatorAdvance(input: OperatorAdvanceInput, deps: SeamDeps): Promise<AdvanceResult> {
   const issue = input.issue;
-  const refuse = async (code: string, mode: LifecycleMode | null, from: string | null): Promise<AdvanceResult> => {
+  const refuse = async (code: string, from: string | null): Promise<AdvanceResult> => {
     await journal(deps, issue, operatorEntry(deps, { kind: "refused", from, result: `refused:${code}`, written: false }, input));
-    return { ok: false, issue, code, mode, written: false };
+    return { ok: false, issue, code, written: false };
   };
   if (!isLifecycleState(input.to)) {
-    return { ok: false, issue, code: "unknown-target-state", mode: null, written: false };
+    return { ok: false, issue, code: "unknown-target-state", written: false };
   }
   const to: LifecycleState = input.to;
-  const mode = await deps.mode();
-
   const before = await deps.view(issue);
-  if (before.ok === false) return refuse("fetch-failed", mode, null);
+  if (before.ok === false) return refuse("fetch-failed", null);
   if (isPullRequestUrl(before.row.url)) {
     logger.warn({ issue }, "[lifecycle] operatorAdvance refused: not an issue (pull request)");
-    return { ok: false, issue, code: "not-an-issue", mode, written: false };
+    return { ok: false, issue, code: "not-an-issue", written: false };
   }
   if (before.row.state === "CLOSED") {
     // Closing an already-closed issue stays idempotent (the pre-seam spine
     // accepted it): ok with the observed state, no write, no journal.
-    if (to === "closed") return { ok: true, issue, from: "closed", to, mode, observed: observedOf(before) };
-    return refuse("issue-closed", mode, "closed");
+    if (to === "closed") return { ok: true, issue, from: "closed", to, observed: observedOf(before) };
+    return refuse("issue-closed", "closed");
   }
 
   const stateLabels = stateLabelsOf(before.row.labels);
@@ -84,7 +82,7 @@ export async function operatorAdvance(input: OperatorAdvanceInput, deps: SeamDep
   const legal =
     isOperatorTarget(to) &&
     (stateLabels.length !== 1 || findOperatorTransition(stateLabels[0], to) !== undefined);
-  if (!legal && !selfMove) return refuse("illegal-transition", mode, from);
+  if (!legal && !selfMove) return refuse("illegal-transition", from);
 
   const removed = stateLabels.filter((s) => s !== to);
   const alreadyThere = (stateLabels as string[]).includes(to);
@@ -115,7 +113,7 @@ export async function operatorAdvance(input: OperatorAdvanceInput, deps: SeamDep
   if (write.ok === false) {
     const code = `write-failed:${write.code}`;
     await journal(deps, issue, operatorEntry(deps, { kind: "refused", from, result: code, written: false, ...capEvidence }, input));
-    return { ok: false, issue, code, mode, written: false };
+    return { ok: false, issue, code, written: false };
   }
 
   const after = await deps.view(issue);
@@ -126,7 +124,7 @@ export async function operatorAdvance(input: OperatorAdvanceInput, deps: SeamDep
       : after.row.labels.includes(to) && removed.every((s) => !after.row.labels.includes(s)));
   if (!verified) {
     await journal(deps, issue, operatorEntry(deps, { kind: "refused", from, result: "write-unverified", written: true, ...capEvidence }, input));
-    return { ok: false, issue, code: "write-unverified", mode, written: true };
+    return { ok: false, issue, code: "write-unverified", written: true };
   }
 
   if (!selfMove) {
@@ -150,7 +148,7 @@ export async function operatorAdvance(input: OperatorAdvanceInput, deps: SeamDep
     const exp = await deps.journal.expireOnClose(deps.repo, issue);
     if (exp.ok === false) logger.error({ issue, error: exp.error }, "[lifecycle] journal expire failed");
   }
-  return { ok: true, issue, from, to, mode, observed: observedOf(after) };
+  return { ok: true, issue, from, to, observed: observedOf(after) };
 }
 
 export async function operatorReopen(
@@ -158,7 +156,6 @@ export async function operatorReopen(
   deps: SeamDeps,
 ): Promise<AdvanceResult> {
   const issue = input.issue;
-  const mode = await deps.mode();
   const jIn = { to: "reopened", actor: input.actor };
   const fail = async (code: string, from: string | null, written: boolean): Promise<AdvanceResult> => {
     await journal(
@@ -166,7 +163,7 @@ export async function operatorReopen(
       issue,
       operatorEntry(deps, { kind: "refused", from, result: written ? code : `refused:${code}`, written }, jIn),
     );
-    return { ok: false, issue, code, mode, written };
+    return { ok: false, issue, code, written };
   };
 
   const before = await deps.view(issue);
@@ -180,7 +177,6 @@ export async function operatorReopen(
       issue,
       from: open.length > 0 ? open.join(",") : null,
       to: (open[0] ?? "needs-triage") as LifecycleState,
-      mode,
       observed: observedOf(before),
     };
   }
@@ -211,7 +207,6 @@ export async function operatorReopen(
     issue,
     from: "closed",
     to: (derived[0] ?? "needs-triage") as LifecycleState,
-    mode,
     observed: observedOf(after),
   };
 }

@@ -20,7 +20,7 @@ export const HOLD_EXIT_ALERT_WINDOW_DAYS = 7;
 export function isUnsanctionedHoldExit(
   entry: Pick<LifecycleJournalEntry, "kind" | "written" | "source" | "from" | "to">,
 ): boolean {
-  // A shadow-mode write is journaled `refused` yet really moved the labels.
+  // A `write-unverified` refusal is journaled `refused` yet may really have moved the labels.
   const wroteLabels = entry.kind === "transition" || entry.kind === "external" || entry.kind === "refused";
   if (!wroteLabels) return false;
   if (entry.written !== true) return false;

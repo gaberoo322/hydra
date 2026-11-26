@@ -1,14 +1,11 @@
 /**
  * Lifecycle seam deps (ADR-0047 Decision 3; issue #5618).
  *
- * The rollout switch (`loadLifecycleMode`), the injectable `SeamDeps` surface and
- * its production binding `defaultSeamDeps` (gh record fetchers + Redis journal).
+ * The injectable `SeamDeps` surface and its production binding `defaultSeamDeps` (gh record fetchers + Redis journal).
  * Pure adapters: this module knows nothing about the transition spine, so
  * `seam.ts`, `claim.ts`, `operator.ts`, `park.ts` and `reconcile.ts` all depend on
  * it and it depends on none of them.
  */
-import { readFile as fsReadFile } from "node:fs/promises";
-import { join } from "node:path";
 import { logger } from "../logger.ts";
 import {
   closeIssue,
@@ -57,79 +54,11 @@ import {
 import type { TimedBody, TimelineLabelEvent } from "./caps.ts";
 
 // ---------------------------------------------------------------------------
-// Rollout switch
-// ---------------------------------------------------------------------------
-
-const LIFECYCLE_ROLLOUT_CONFIG_PATH = "config/orchestrator/lifecycle-rollout.json";
-export type LifecycleMode = "shadow" | "enforce";
-type ModeReason =
-  | "config-missing"
-  | "config-unreadable"
-  | "key-missing"
-  | "value-malformed"
-  | "shadow-retired";
-
-export interface ResolvedMode {
-  mode: LifecycleMode;
-  /** Why the loader fell back to enforce; null when the file says `enforce` explicitly. */
-  reason: ModeReason | null;
-}
-
-/**
- * Pure and total over unknown input, and fail-closed (ADR-0047 Decision 7):
- * every input resolves to enforce. Shadow is retired, so the literal `'shadow'`
- * enforces too; only the literal `'enforce'` carries no fallback reason.
- */
-export function resolveLifecycleMode(raw: unknown): ResolvedMode {
-  if (raw === undefined) return { mode: "enforce", reason: "config-missing" };
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
-    return { mode: "enforce", reason: "value-malformed" };
-  }
-  const obj = raw as Record<string, unknown>;
-  if (!("lifecycle-seam" in obj)) return { mode: "enforce", reason: "key-missing" };
-  const v = obj["lifecycle-seam"];
-  if (v === "enforce") return { mode: "enforce", reason: null };
-  if (v === "shadow") return { mode: "enforce", reason: "shadow-retired" };
-  return { mode: "enforce", reason: "value-malformed" };
-}
-
-const FAIL_CLOSED_MSG = "[lifecycle] rollout config did not say 'enforce'; failing closed to enforce";
-
-/** Enforce-by-fallback is never silent: every reason is logged at error level. */
-export async function loadLifecycleMode(
-  repoRoot: string,
-  deps: { readFile?: (path: string) => Promise<string> } = {},
-): Promise<ResolvedMode> {
-  const read = deps.readFile ?? ((p: string) => fsReadFile(p, "utf8"));
-  const path = join(repoRoot, LIFECYCLE_ROLLOUT_CONFIG_PATH);
-  let text: string;
-  try {
-    text = await read(path);
-  } catch (err) {
-    const code = (err as { code?: unknown } | null)?.code;
-    const reason: ModeReason = code === "ENOENT" ? "config-missing" : "config-unreadable";
-    logger.error({ err, reason, path }, FAIL_CLOSED_MSG);
-    return { mode: "enforce", reason };
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch (err) {
-    logger.error({ err, reason: "value-malformed", path }, FAIL_CLOSED_MSG);
-    return { mode: "enforce", reason: "value-malformed" };
-  }
-  const resolved = resolveLifecycleMode(parsed);
-  if (resolved.reason !== null) logger.error({ reason: resolved.reason, path }, FAIL_CLOSED_MSG);
-  return resolved;
-}
-
-// ---------------------------------------------------------------------------
 // Deps
 // ---------------------------------------------------------------------------
 
 export interface SeamDeps {
   repo: string;
-  mode: () => Promise<LifecycleMode>;
   view: (issue: number) => Promise<IssueViewResult>;
   edit: (
     issue: number,
@@ -385,11 +314,10 @@ export async function postIssueComment(repo: string, number: number, body: strin
   }
 }
 
-/** Production deps: real gh, real Redis, mode read from the git-tracked config. */
+/** Production deps: real gh, real Redis. */
 export function defaultSeamDeps(repoRoot: string): SeamDeps {
   return {
     repo: resolveGithubRepo(),
-    mode: async () => (await loadLifecycleMode(repoRoot)).mode,
     view: (n) => viewIssue(n),
     edit: (n, labels) => editIssueLabels(n, labels),
     close: (n, reason) => closeIssue(n, reason),

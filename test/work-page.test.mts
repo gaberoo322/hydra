@@ -515,7 +515,6 @@ function seamWith(rows: any[], over: any = {}) {
   const persisted: number[] = [];
   const deps: any = {
     repo: "gaberoo322/hydra",
-    mode: async () => "enforce",
     view: seqView(rows),
     edit: over.edit ?? edit.fn,
     close: over.close ?? close.fn,
