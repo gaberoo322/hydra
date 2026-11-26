@@ -115,18 +115,18 @@ GitHub UI (`external`). A human-hold exit from any other source goes on the atte
 ### Decision 6: Durable per-issue caps park instead of looping (#5290)
 
 Caps are per arm, plus a total dispatch-claim budget per issue. The limits live in one table in
-`src/lifecycle/caps.ts` and can be overridden by env (the live column is not overridable; neither are the two QA FAIL arms):
+`src/lifecycle/caps.ts` and can be overridden by env (the two QA FAIL arms are not overridable):
 
-| Arm | Unit | Limit | Live in shadow | Exit |
-|---|---|---|---|---|
-| QA FAIL rounds | PR | 3 | yes | park |
-| dev no-PR resume | issue | 2 | yes | park |
-| QA stall | issue | 3 | yes | park |
-| red-CI forward-fix | PR | 2 | yes | park |
-| stale re-queue | issue | 2 | no | park |
-| `needs-dev-resume` claims | issue | 4 | no | park |
-| total dispatch claims | issue | 10 | no | park |
-| T4 deep-QA FAILs (`deep-qa-fails`) | PR | 2 | yes | escalate (#5662) |
+| Arm | Unit | Limit | Exit |
+|---|---|---|---|
+| QA FAIL rounds | PR | 3 | park |
+| dev no-PR resume | issue | 2 | park |
+| QA stall | issue | 3 | park |
+| red-CI forward-fix | PR | 2 | park |
+| stale re-queue | issue | 2 | park |
+| `needs-dev-resume` claims | issue | 4 | park |
+| total dispatch claims | issue | 10 | park |
+| T4 deep-QA FAILs (`deep-qa-fails`) | PR | 2 | escalate (#5662) |
 
 - **Exit column (#5662):** an exhausted arm writes `parked` (`park`) or `ready-for-human` (`escalate`).
   Only `deep-qa-fails` escalates: ADR-0015 routes "a second failed deep-QA pass" to the operator, and
@@ -138,8 +138,7 @@ Caps are per arm, plus a total dispatch-claim budget per issue. The limits live 
   `escalated:deep-qa-fails`.
 - **Fail closed on an unreadable ledger (INV-12 exception):** a `qa-fail` edge whose PR-bodies read fails
   skips the cap check, but when the live PR record the seam already reads carries a deep-QA FAIL marker
-  (the seam decides T4 itself) it refuses `fetch-failed` instead of bouncing, in shadow as well as
-  enforce (the arm is `liveInShadow`). An unreadable PR record also refuses. T1-T3 bounces self-heal and
+  (the seam decides T4 itself) it refuses `fetch-failed` instead of bouncing. An unreadable PR record also refuses. T1-T3 bounces self-heal and
   are unaffected. The QA route preflights the same read before its first T4 FAIL side effect, so a
   refusal leaves no comment or marker behind and a retry cannot double-count.
 
@@ -149,9 +148,10 @@ Caps are per arm, plus a total dispatch-claim budget per issue. The limits live 
   `defer` not `1`). One private `guardCaps` step in `src/lifecycle/seam.ts` enforces caps for
   both `advance` (after the legality lookup, so an illegal move refuses instead of parking) and
   `openClaim`.
-- **Live arms:** `liveInShadow` is true for the arms that were enforced before the seam existed
-  (QA FAIL rounds, dev no-PR resume, QA stall, red-CI forward-fix) and false for the arms new with it.
-  See Decision 7.
+- **Every arm parks.** History: while the rollout ran (Decision 7), the table had a fourth column
+  that kept the caps older than the seam (QA FAIL rounds, dev no-PR resume, QA stall, red-CI
+  forward-fix, T4 deep-QA FAILs) parking and let the three arms new with the seam journal only. The
+  column went with shadow (#5770).
 
 - **Counting:**
   - QA FAIL rounds stay counted from `QA-Verdict:` trailers; every other arm counts from the journal.
@@ -169,20 +169,23 @@ Caps are per arm, plus a total dispatch-claim budget per issue. The limits live 
 
 ### Decision 7: Shadow first; enforce on evidence (#5297)
 
-- **Shadow is retired (#5768, operator decision 2026-11-25):** the flip criteria below were met and
-  the switch has said `enforce` since 2026-11-19. The seam has one behaviour: refuse on gate fail,
-  park on cap. **Rollback is a `git revert`, not a mode.** The remaining bullets record how the
-  rollout ran; they are history, and no new code may read or branch on shadow.
-- **Switch:** `lifecycle-seam` in git-tracked `config/orchestrator/lifecycle-rollout.json`. The
-  loader fails closed (#5769): a missing, unreadable or malformed file, a missing key, an unknown
-  value and the retired value `shadow` all mean `enforce`, each logged at error level with its
-  reason. While shadow ran, the seam **always wrote**, journaling `would-refuse:<reason>` /
-  `would-park:<arm>`; dispatch claims were real in shadow.
-- **Live arms park in shadow:** a cap arm with `liveInShadow` (Decision 6) parks exactly as in
-  enforce, returning `parked:<arm>` (or `escalated:<arm>`) and posting the unified comment, so no previously enforced cap
-  regresses. Its park entry carries `mode=shadow live=1` evidence, so the would-park triage for
-  flip criterion 1 excludes it. Only non-live arms write the move and journal `would-park`.
-- **The `enforce` flip** is an operator-merged PR that requires **all three**:
+- **Shadow is retired (#5768, operator decision 2026-11-25).** The seam has one behaviour: refuse
+  on gate fail, park on cap. **Rollback is a `git revert`, not a mode.** There is no switch, no
+  loader and no config file; the seam, the journal, the health panel and the playbooks carry no
+  mode and no would-refuse / would-park reading (#5769, #5770, #5771). No new code may read or
+  branch on shadow.
+
+**History (how the rollout ran; nothing below is current behaviour):**
+
+- **Switch:** `lifecycle-seam` in the git-tracked `config/orchestrator/lifecycle-rollout.json`
+  (deleted by #5771) said `shadow` until 2026-11-19 and `enforce` after. While shadow ran, the seam
+  always wrote, journaling `would-refuse:<reason>` / `would-park:<arm>`; dispatch claims were real.
+  Journal rows from that period can still carry those results; readers treat them as plain refusals
+  and never as parks.
+- **Live arms parked in shadow:** a cap arm marked `liveInShadow` (Decision 6) parked exactly as in
+  enforce, so no cap that predated the seam regressed. Only the other arms wrote the move and
+  journaled `would-park`.
+- **The `enforce` flip** was an operator-merged PR that required all three:
   1. ~7d and ≥100 seam transitions, with every `would-refuse` triaged and zero attributed to a gate
      bug;
   2. a lint baseline of zero, with the deny hook live;
@@ -191,8 +194,8 @@ Caps are per arm, plus a total dispatch-claim budget per issue. The limits live 
   1. seam + CLI + journal + switch, with the lint as a shrink-only ratchet from day one;
   2. dispatcher claims, with workers no longer self-labelling, in the same slice;
   3. the deterministic writers;
-  4. the playbooks, by cluster. The deny hook ships with the last of these.
-- **Cutover:** one `legacy-backfill` claim for each open `in-progress` issue; reconcile handles the
+  4. the playbooks, by cluster. The deny hook shipped with the last of these.
+- **Cutover:** one `legacy-backfill` claim for each open `in-progress` issue; reconcile handled the
   rest; no normalisation script.
 
 ### Decision 8: The autopilot parent loop handles exceptions only (#5307)
@@ -210,8 +213,8 @@ An **exception** is any parent act that no `decide.py` action dictated. It is re
 **per-run ledger** (not the per-issue journal) as a typed `parent-exception` event, with cause
 `invariant-reject | script-error | unrouted-refusal | notes-steer | defect-filed`.
 
-During shadow (Decision 7) the parent still owns every routing decision the seam merely journals; the
-shrink is complete only after `enforce`.
+The shrink is complete: the seam always enforces (Decision 7), so no routing decision is left with the
+parent for the seam to merely journal.
 
 ### Decision 9: Success is measured on the builder-health panel (ADR-0028)
 

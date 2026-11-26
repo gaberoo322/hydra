@@ -202,7 +202,6 @@ function lifecycleStubs(over: LifecycleHealthDeps = {}): LifecycleHealthDeps {
     readRunTurns: async () => [],
     readQaVerdictComments: async () => ({ ok: true, comments: [] }),
     readCapEvents: async () => ({ ok: true, events: [] }),
-    readMode: async () => "shadow",
     ...over,
   };
 }
@@ -768,7 +767,7 @@ describe("lifecycle fields — firstPassQaYield", () => {
 });
 
 describe("lifecycle fields — parkRatePerArm", () => {
-  const ev = (kind: "park" | "would-park" | "claim", arm?: string) => ({
+  const ev = (kind: "park" | "claim", arm?: string) => ({
     kind,
     issue: 1,
     ts: 1,
@@ -776,24 +775,24 @@ describe("lifecycle fields — parkRatePerArm", () => {
     actor: "cli",
   });
 
-  test("zero-fills every cap arm; rate = parks / claims; wouldPark reported alongside", () => {
-    const f = foldParkRate([ev("claim"), ev("claim"), ev("claim"), ev("claim"), ev("park", "qa-stall"), ev("would-park", "qa-stall"), ev("would-park", "total-claims")]);
+  test("zero-fills every cap arm; rate = parks / claims; an arm carries parks and rate only", () => {
+    const f = foldParkRate([ev("claim"), ev("claim"), ev("claim"), ev("claim"), ev("park", "qa-stall")]);
     assert.equal(f.claimsOpened, 4);
     assert.equal(Object.keys(f.arms).length, 8);
-    assert.deepEqual(f.arms["qa-stall"], { parks: 1, wouldPark: 1, rate: 0.25 });
-    assert.deepEqual(f.arms["total-claims"], { parks: 0, wouldPark: 1, rate: 0 });
-    assert.deepEqual(f.arms["stale-requeue"], { parks: 0, wouldPark: 0, rate: 0 });
+    assert.deepEqual(f.arms["qa-stall"], { parks: 1, rate: 0.25 });
+    assert.deepEqual(f.arms["total-claims"], { parks: 0, rate: 0 });
+    assert.deepEqual(f.arms["stale-requeue"], { parks: 0, rate: 0 });
   });
 
-  test("claimsOpened=0 => rate null (dark) but counts still shown; mode is carried", async () => {
+  test("claimsOpened=0 => rate null (dark) but parks still shown; the field carries no rollout mode", async () => {
     const card = await getBuilderHealthScorecard(
       happyDeps({
-        lifecycleHealth: lifecycleStubs({ readCapEvents: async () => ({ ok: true, events: [ev("would-park", "qa-stall")] }) }),
+        lifecycleHealth: lifecycleStubs({ readCapEvents: async () => ({ ok: true, events: [ev("park", "qa-stall")] }) }),
       }),
     );
-    assert.equal(card.parkRatePerArm?.mode, "shadow");
-    assert.equal(card.parkRatePerArm?.arms["qa-stall"].rate, null);
-    assert.equal(card.parkRatePerArm?.arms["qa-stall"].wouldPark, 1);
+    assert.ok(card.parkRatePerArm);
+    assert.deepEqual(Object.keys(card.parkRatePerArm).sort(), ["arms", "baseline", "claimsOpened", "windowDays"]);
+    assert.deepEqual(card.parkRatePerArm.arms["qa-stall"], { parks: 1, rate: null });
   });
 
   test("an index read failure degrades this field to null", async () => {
@@ -803,16 +802,14 @@ describe("lifecycle fields — parkRatePerArm", () => {
     assert.equal(card.parkRatePerArm, null);
   });
 
-  test("capEventRecord mirrors a real cap park, a shadow refusal and a claim-opened; ignores everything else", () => {
+  test("capEventRecord mirrors a real cap park and a claim-opened; ignores everything else", () => {
     const base: LifecycleJournalEntry = {
       v: 1, ts: 10, kind: "transition", from: "in-progress", to: "parked", source: "cli", actor: "a",
       evidence: { pr: "42" }, reason: "cap:qa-stall", rationale: null, result: "parked:qa-stall", written: true,
     };
     assert.deepEqual(capEventRecord(7, base), { kind: "park", issue: 7, ts: 10, arm: "qa-stall", pr: 42, actor: "a" });
-    assert.deepEqual(
-      capEventRecord(7, { ...base, kind: "refused", written: false, result: "shadow-would-park:qa-stall" }),
-      { kind: "would-park", issue: 7, ts: 10, arm: "qa-stall", pr: 42, actor: "a" },
-    );
+    // An unwritten cap refusal is not a park (a pre-#5771 journal row may still carry one).
+    assert.equal(capEventRecord(7, { ...base, kind: "refused", written: false, result: "refused:qa-stall" }), null);
     assert.deepEqual(capEventRecord(7, { ...base, kind: "claim-opened", to: null, reason: null, result: "ok" }), {
       kind: "claim", issue: 7, ts: 10, actor: "a",
     });

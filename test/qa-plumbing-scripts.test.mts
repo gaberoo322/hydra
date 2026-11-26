@@ -1010,9 +1010,9 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
     assert.match(renderParkSummary("parked:qa-fail-rounds", [PARK_COUNTS[1] as CapCount]), /total-claims=4\/10/);
   });
 
-  test("route escalate (shadow): a live-arm park is the same parked:qa-fail-rounds refusal - no shadow-park branch, no caller-side cap comment", async () => {
-    // qa-fail-rounds is a live arm: the shadow seam parks and posts the unified comment itself, so the
-    // route sees the identical refusal it sees in enforce and adds only its own escalation comment.
+  test("route escalate: a park is the parked:qa-fail-rounds refusal - no follow-up park advance, no caller-side cap comment", async () => {
+    // The seam parks the qa-fail-rounds arm and posts the unified comment itself, so the route
+    // adds only its own escalation comment.
     const h = harness({
       ghHandler: withState("OPEN"),
       advanceHandler: refuse("needs-dev-resume", "parked:qa-fail-rounds"),

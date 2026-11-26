@@ -191,8 +191,8 @@ The move of a work item into the operator-only `parked` state when a **Cap Arm**
 _Avoid_: "escalate to ready-for-human" for an off-list cap exhaustion (the deep-QA arm's escalation is the one on-list exit), "block" (`blocked` is a dependency wait, not a cap)
 
 **Live Cap**:
-A **Cap Arm** that **Parks** even while the lifecycle seam runs in shadow mode (`config/orchestrator/lifecycle-rollout.json`). Set by the `liveInShadow` column of `CAP_TABLE`, and true for the arms Hydra enforced before the seam existed: QA FAIL rounds (#4735), dev no-PR resumes (#4808), red-CI forward-fixes and QA stalls. Arms the seam introduced only journal `would-park` until the flip to enforce. A live park in shadow returns the same `parked:<arm>` result as in enforce, and its journal entry is tagged `live=1` so the would-park triage for the enforce flip leaves it out. Introduced by the cap-guard slice (#5421), which amends [[ADR-0047]] Decision 7.
-_Avoid_: a caller-side park (a script that writes `parked` itself after a shadow `wouldPark`), "enforced cap" (enforce is the seam-wide mode, not a property of an arm)
+Retired (#5768). Former name for a **Cap Arm** that parked while the lifecycle seam was still being rolled out. The rollout is over and every **Cap Arm** **Parks**, so "live" distinguishes nothing: write **Cap Arm**. A comment that still says "the seam's `<arm>` Live Cap" means that Cap Arm. The rollout is recorded as history in [[ADR-0047]] Decision 7.
+_Avoid_: a caller-side park (a script that writes `parked` itself; only the seam parks), "enforced cap" (every cap is enforced)
 
 **Roadmap Milestone** — **RETIRED** (#4479):
 A timeline grouping once kept in config/direction/roadmap.md, naming the **Epics** intended to ship in the same window. The roadmap file was deleted with the claw-street-bets target swap (#4479) and nothing replaced it. Retained here only so the term resolves when it appears in older issues and prose.

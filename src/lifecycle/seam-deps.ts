@@ -314,8 +314,11 @@ export async function postIssueComment(repo: string, number: number, body: strin
   }
 }
 
-/** Production deps: real gh, real Redis. */
-export function defaultSeamDeps(repoRoot: string): SeamDeps {
+/**
+ * Production deps: real gh, real Redis. `_repoRoot` is unread since the rollout
+ * config file went (#5771); the parameter stays so no caller changes.
+ */
+export function defaultSeamDeps(_repoRoot: string): SeamDeps {
   return {
     repo: resolveGithubRepo(),
     view: (n) => viewIssue(n),

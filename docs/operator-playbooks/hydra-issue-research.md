@@ -103,8 +103,7 @@ Pick `<next>` (it MUST equal the trailer's `next=`) and `--reason`:
 | Operator answer needed | `needs-info` | `awaiting-answer` |
 | Too large for one slice | `needs-tickets` | `epic-needs-slicing` |
 
-Exit codes: `0` = written (in shadow the JSON may carry `wouldRefuse:<code>`;
-report it, do not retry). `1` = refused or failed: leave the label as is and
+Exit codes: `0` = written. `1` = refused or failed: leave the label as is and
 report the code in the run summary / Friction Report. The research-exit gate
 needs exactly one `Hydra-Research:` line in a comment posted after the issue
 entered `needs-research`, so `research-trailer-next-mismatch`,
