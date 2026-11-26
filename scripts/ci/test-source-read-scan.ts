@@ -34,7 +34,7 @@
  *
  * # Baseline format (Ratchet module, issue #5652)
  *
- * One `counted` baseline (scripts/ci/ratchet.ts, ceiling, stale rows fail) with
+ * One `counted` baseline (scripts/ci/ratchet.ts, ceiling, stale rows hint) with
  * two tab-joined namespaces, spelled only by `readerRow` / `pinRow`:
  *   reader TAB <test file> TAB <kind>   count 1  (a sanctioned code reader)
  *   pins   TAB <test file> TAB <code|prompt>  count n  (shrink-only pin sites)

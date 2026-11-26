@@ -159,13 +159,18 @@ describe("playbook-duplicate-ratchet: the real playbooks", () => {
     assert.match(standard, /^### STD-PLAYBOOK-ONE-HOME\n[\s\S]*?enforced-by: reviewer, scripts\/ci\/playbook-duplicate-ratchet\.ts/m);
   });
 
-  test("measured keys are a bare playbook path or path+TAB+intra, ", async () => {
+  test("measured keys are a bare playbook path or path+TAB+intra", async () => {
     const measured = measureTexts(readTexts(REPO_ROOT));
-        for (const key of Object.keys(measured)) {
+    for (const key of Object.keys(measured)) {
       assert.match(key, /^docs\/operator-playbooks\/[^\t]+\.md(\tintra)?$/, `bad key shape: ${JSON.stringify(key)}`);
     }
     assert.ok(Object.keys(measured).some((k) => k.endsWith("\tintra")), "at least one intra row is measured");
     assert.ok(Object.keys(measured).some((k) => !k.includes("\t")), "at least one bare cross-file row is measured");
+  });
+  test("the real playbooks stay at or under the committed baseline ceiling", async () => {
+    const v = await duplicateRatchet.verdict(REPO_ROOT);
+    assert.deepEqual(v.added, [], v.advice);
+    assert.ok(v.ok, v.advice);
   });
   test("a bare cross-file key never carries the intra suffix (sibling shape)", () => {
     const rows = measureTexts({ "a.md": words("x", 20), "b.md": words("x", 20) });

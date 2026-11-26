@@ -24,8 +24,9 @@ const REQUIRED_RATCHET_FLOOR = 12;
 describe("required ratchets on the live tree", { concurrency: true }, () => {
   for (const row of RATCHETS) {
     if (row.kind !== "ratchet" || row.ratchet.policy.enforcement !== "required") continue;
-    test(row.ratchet.policy.id, { timeout: 180_000 }, async () => {
+    test(row.ratchet.policy.id, { timeout: 180_000 }, async (t) => {
       const v = await row.ratchet.verdict();
+      if (v.ok && v.stale.length > 0) t.diagnostic(v.advice);
       assert.ok(v.ok, v.advice);
     });
   }
