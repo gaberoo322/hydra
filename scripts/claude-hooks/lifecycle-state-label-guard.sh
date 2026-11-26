@@ -5,9 +5,8 @@
 # lifecycle writer seam:
 #   npx tsx scripts/lifecycle.ts advance <issue> <to> [--evidence k=v] [--reason R --rationale T]
 #
-# This hook is the "deny hook" half of ADR-0047 D7 enforce precondition 2 (the
-# other half is the lint baseline at zero). It is LIVE in BOTH shadow and
-# enforce: it never reads the rollout switch.
+# This hook is the "deny hook" ADR-0047 D7 names (its other half is the lint
+# baseline at zero). It is always on: it reads no switch.
 #
 # DENIES, in one shell segment (after the sibling gh-label-delete-guard.sh
 # pipeline: heredoc-body stripping, backslash-continuation collapse, leading

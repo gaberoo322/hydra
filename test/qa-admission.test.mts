@@ -21,7 +21,10 @@ import {
   type FinalVerdict,
 } from "../src/qa/verdict-trailer.ts";
 import {
+  decideRound,
 } from "../src/qa/round-action.ts";
+import { QA_OWNED_CONTEXTS } from "../src/github/check-rollup.ts";
+import { renderCiSummary } from "../src/qa/admission.ts";
 import { decideAdmission } from "../src/qa/admission.ts";
 import { isPromptOnlyChange } from "../src/qa/change-shape.ts";
 
@@ -600,5 +603,37 @@ describe("decideAdmission — the composed admission head (issue #5079, INV-3)",
     assert.equal(r.skipVerdict, null);
     assert.equal(r.promptOnly, false);
     assert.deepEqual(r.redRequired, []);
+  });
+});
+
+describe("deep-qa-gate red is QA-owned, not a CI failure (#5716)", () => {
+  const dqaRed: CheckState = { name: "deep-qa-gate", status: "completed", conclusion: "failure", required: true };
+  const rest: CheckState[] = ["test", "tier-gate"].map((name) => ({ name, status: "completed", conclusion: "success", required: true }));
+  const t4 = (checks: CheckState[]) => decideReviewAdmission({ checks, mergeStateStatus: "BLOCKED", tier: 4 });
+
+  test("QA_OWNED_CONTEXTS is the one home of the name", () => {
+    assert.ok(QA_OWNED_CONTEXTS.has("deep-qa-gate"));
+  });
+
+  test("T4 with only deep-qa-gate red: admit, verdict PASS, pass marker set", () => {
+    const checks = [dqaRed, ...rest];
+    assert.deepEqual(redRequiredChecks(checks), []);
+    assert.equal(t4(checks).action, "admit");
+    assert.equal(classifyVerdict("PASS", checks).verdict, "PASS");
+    const r = decideRound({ tier: 4, verdict: "PASS", reviewVerdict: "PASS", headSha: "a".repeat(40) });
+    assert.ok(r.passMarker, "T4 PASS carries the Deep-QA PASS marker");
+  });
+
+  test("a genuinely red test next to deep-qa-gate still defers T4 / skips T3 and FAILs", () => {
+    const checks = [dqaRed, { ...rest[0], conclusion: "failure" as const }, rest[1]];
+    assert.deepEqual(redRequiredChecks(checks), ["test"]);
+    assert.equal(t4(checks).action, "defer");
+    assert.equal(decideReviewAdmission({ checks, mergeStateStatus: "BLOCKED", tier: 3 }).action, "skip-required-failed");
+    assert.equal(classifyVerdict("PASS", checks).verdict, "FAIL");
+  });
+
+  test("renderCiSummary never reports a red deep-qa-gate as green", () => {
+    const line = renderCiSummary(classifyVerdict("PASS", [dqaRed, ...rest]));
+    assert.equal(line, "**CI:** 2/3 required checks green. Not green: `deep-qa-gate` (awaiting Deep-QA PASS marker).");
   });
 });

@@ -44,7 +44,7 @@ curl http://localhost:4000/api/scheduler/status
 - **Coding standards catalog** — the full rule list is [`CODING_STANDARDS.md`](./CODING_STANDARDS.md); the fences below are the rules whose breach needs production-code rework.
 - **STD-DEPS-APPROVED** — runtime deps are operator-approved only (`express`, `ioredis`, `ws`, `@sentry/node`, `zod`, `pino`); Node stdlib for everything else, and log through `src/logger.ts` (**STD-LOG-PINO-SEAM**), never `pino()` directly.
 - **STD-VERIFY-NEVER-THROW** — merge/grounding/verification code returns result objects and never throws.
-- **STD-CATCH-FAIL-LOUD** — every `catch` logs with context, rethrows, or carries an `/* intentional: reason */` annotation.
+- **STD-CATCH-FAIL-LOUD** — every `catch`/`except`/`>/dev/null` (heredoc Python included) logs with context, rethrows, or carries an `intentional: reason`.
 - **STD-ERROR-TYPED-CODE** — exceptional `throw` sites use a subclass from `src/errors.ts`, and callers discriminate on `err.code`.
 - **STD-REDIS-SEAM** — reach Redis only through `src/redis/<domain>.ts` accessors, never `new Redis()` or `redis/keys`/`redis/kv` imports from outside `src/redis/`.
 - **STD-SCHEMA-SEAM** — validate HTTP request bodies through `src/schemas/<domain>.ts` zod `safeParse`, returning 400 `schema-validation-failed` on failure.

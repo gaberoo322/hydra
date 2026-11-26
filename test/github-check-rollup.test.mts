@@ -6,6 +6,7 @@ import {
   foldRollup,
   isRed,
   isSettled,
+  QA_OWNED_CONTEXTS,
 } from "../src/github/check-rollup.ts";
 
 const run = (name: string, conclusion: string, extra: Record<string, string> = {}) => ({
@@ -152,5 +153,23 @@ describe("parseRollupEntries (#5089 QA round 1)", () => {
     assert.equal(out[0].name, "a");
     assert.equal(out[0].conclusion, undefined);
     assert.equal(out[0].state, "SUCCESS");
+  });
+});
+
+describe("QA-owned contexts (#5716)", () => {
+  const roll = [
+    { name: "test", conclusion: "SUCCESS", completedAt: "2026-09-29T08:00:00Z" },
+    { name: "deep-qa-gate", conclusion: "FAILURE", completedAt: "2026-09-29T08:00:00Z" },
+  ];
+  it("a red deep-qa-gate is not isRed, but still settled and still blocks merge", () => {
+    const f = foldRollup(roll);
+    assert.equal(f.contexts.get("deep-qa-gate")?.status, "red", "fold status itself is unchanged");
+    assert.ok(QA_OWNED_CONTEXTS.has("deep-qa-gate"));
+    assert.equal(isRed(f), false);
+    assert.equal(isSettled(f), true);
+    assert.equal(blocksMerge(f), true);
+  });
+  it("a genuinely red context next to it is still red", () => {
+    assert.equal(isRed(foldRollup([...roll, { name: "tier-gate", conclusion: "FAILURE", completedAt: "2026-09-29T08:00:00Z" }])), true);
   });
 });

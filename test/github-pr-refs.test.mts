@@ -27,10 +27,44 @@ import {
   referencedIssues,
   closedIssues,
   mergedPrReferences,
+  closingIssuesInBody,
+  referencedIssuesInBody,
+  bodyClosesIssue,
   type PrRefRow,
 } from "../src/github/pr-refs.ts";
 
 const PY_SCRIPT = join(import.meta.dirname, "..", "scripts/autopilot/pr-refs.py");
+
+/**
+ * The ONE closing-ref truth table (issue #5763): PR body -> the issues it
+ * closes and the issues it references, both in body order. Every row is run
+ * through the TypeScript predicates AND the Python twin; see the
+ * "truth table" tests below.
+ */
+interface TruthRow {
+  name: string;
+  body: string;
+  closing: number[];
+  referenced: number[];
+  doesNotClose?: number[];
+}
+const TRUTH_TABLE: readonly TruthRow[] = (
+  JSON.parse(readFileSync(join(import.meta.dirname, "fixtures/pr-refs-truth-table.json"), "utf-8")) as {
+    rows: TruthRow[];
+  }
+).rows;
+
+/** Every issue number a row is asked "does this body close N?" about. */
+function probesOf(row: TruthRow): number[] {
+  return [...new Set([...row.closing, ...row.referenced, ...(row.doesNotClose ?? [])])];
+}
+
+/** pr-refs.py's per-body answers for many bodies in ONE spawn (`--bodies`). */
+function pyBodyAnswers(bodies: readonly unknown[]): Array<{ closing: number[]; referenced: number[] }> {
+  const r = spawnSync("python3", [PY_SCRIPT, "--bodies"], { input: JSON.stringify(bodies), encoding: "utf-8" });
+  assert.equal(r.status, 0, `pr-refs.py --bodies exited non-zero: ${r.stderr}`);
+  return JSON.parse(r.stdout) as Array<{ closing: number[]; referenced: number[] }>;
+}
 
 /**
  * Run pr-refs.py's `closing_issues()` over stdin JSON via the `--closing` CLI
@@ -118,13 +152,16 @@ describe("github/pr-refs (issue #4683)", () => {
 
   /**
    * Extract a `NAME = re.compile(r"...", re.IGNORECASE)` (or the one-line,
-   * no-flags form) literal by NAME from the Python source. Returns `null`
+   * no-flags form) literal by NAME from the Python source. The flags may
+   * carry `| re.ASCII` (issue #5763): that flag is what makes the Python
+   * engine read the byte-identical source the way a JS RegExp does, and it is
+   * pinned BEHAVIOURALLY by the truth table's "engine parity" rows below. Returns `null`
    * when the name is not found at all — so a rename/removal on the Python
    * side fails this test loudly rather than passing vacuously.
    */
   function extractPyRegex(src: string, name: string): { source: string; ignoreCase: boolean } | null {
     const re = new RegExp(
-      String.raw`${name}\s*=\s*re\.compile\(\s*r"((?:[^"\\]|\\.)*)"\s*(,\s*re\.IGNORECASE\s*)?,?\s*\)`,
+      String.raw`${name}\s*=\s*re\.compile\(\s*r"((?:[^"\\]|\\.)*)"\s*(,\s*re\.IGNORECASE(?:\s*\|\s*re\.ASCII)?\s*)?,?\s*\)`,
     );
     const m = re.exec(src);
     if (!m) return null;
@@ -394,6 +431,139 @@ describe("github/pr-refs (issue #4683)", () => {
     if (!CLOSE_RE.source.startsWith(String.raw`(?:\b(?:can)?not|n't|n’t|\bnever|\bno[ \t]+longer)[ \t]+`)) {
       assert.fail(`CLOSE_RE must lead with the negation arm: ${CLOSE_RE.source}`);
     }
+  });
+
+  // -------------------------------------------------------------------------
+  // The ONE closing-ref truth table (issue #5763, epic #5762) — per-body
+  // answers, TypeScript and Python driven from the same fixture rows.
+  // -------------------------------------------------------------------------
+
+  test("truth table: covers every row class the epic names", () => {
+    const names = TRUTH_TABLE.map((r) => r.name);
+    assert.equal(new Set(names).size, names.length, "row names must be unique");
+    const bodies = new Set(TRUTH_TABLE.map((r) => r.body));
+    for (const body of [
+      "Closes #5",
+      "Fixes #5",
+      "Resolves #5",
+      "Fixed #5",
+      "Closes: #4",
+      "Closes  #4",
+      "This does not close #26",
+      "Refs #7",
+      "Closes owner/repo#9",
+      "Closes #12",
+      "Closes #123",
+    ]) {
+      assert.ok(bodies.has(body), `truth table must carry a row for ${JSON.stringify(body)}`);
+    }
+    // Every verb form/tense the module's one verb list accepts has a row.
+    for (const verb of ["close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved"]) {
+      assert.ok(
+        TRUTH_TABLE.some((r) => r.body.toLowerCase() === `${verb} #5` && r.closing.length === 1),
+        `truth table must carry a closing row for the verb form "${verb}"`,
+      );
+    }
+  });
+
+  test("truth table: TypeScript closingIssuesInBody / referencedIssuesInBody / bodyClosesIssue match every row", () => {
+    for (const row of TRUTH_TABLE) {
+      assert.deepEqual(closingIssuesInBody(row.body), row.closing, `closing — ${row.name}`);
+      assert.deepEqual(referencedIssuesInBody(row.body), row.referenced, `referenced — ${row.name}`);
+      for (const n of probesOf(row)) {
+        assert.equal(bodyClosesIssue(row.body, n), row.closing.includes(n), `bodyClosesIssue(#${n}) — ${row.name}`);
+      }
+      // The per-body answers are views over the SAME predicates the row-set
+      // exports use: no second verb list, no behaviour fork.
+      assert.deepEqual([...closedIssues([{ body: row.body }])].sort(), [...row.closing].sort(), `closedIssues — ${row.name}`);
+      assert.deepEqual(
+        [...referencedIssues([{ body: row.body }])].sort(),
+        [...row.referenced].sort(),
+        `referencedIssues — ${row.name}`,
+      );
+    }
+  });
+
+  test("truth table: the Python twin gives the same answer as TypeScript on every row", () => {
+    const py = pyBodyAnswers(TRUTH_TABLE.map((r) => r.body));
+    assert.equal(py.length, TRUTH_TABLE.length);
+    TRUTH_TABLE.forEach((row, i) => {
+      // TS vs Python directly: a disagreeing row fails here even if someone
+      // edits the expected columns to match one side.
+      assert.deepEqual(py[i].closing, closingIssuesInBody(row.body), `TS/Python closing disagree — ${row.name}`);
+      assert.deepEqual(py[i].referenced, referencedIssuesInBody(row.body), `TS/Python referenced disagree — ${row.name}`);
+      assert.deepEqual(py[i].closing, row.closing, `Python closing — ${row.name}`);
+      assert.deepEqual(py[i].referenced, row.referenced, `Python referenced — ${row.name}`);
+    });
+  });
+
+  test("truth table: Python body_closes_issue and the row-set CLI selectors agree with the table", () => {
+    // body_closes_issue(body, n) for every probe of every row, in one spawn.
+    const code = [
+      "import importlib.util, json, sys",
+      `spec = importlib.util.spec_from_file_location('pr_refs', ${JSON.stringify(PY_SCRIPT)})`,
+      "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)",
+      "print(json.dumps([[m.body_closes_issue(body, n) for n in probes] for body, probes in json.load(sys.stdin)]))",
+    ].join("\n");
+    const r = spawnSync("python3", ["-I", "-c", code], {
+      input: JSON.stringify(TRUTH_TABLE.map((row) => [row.body, probesOf(row)])),
+      encoding: "utf-8",
+    });
+    assert.equal(r.status, 0, r.stderr);
+    const answers = JSON.parse(r.stdout) as boolean[][];
+    TRUTH_TABLE.forEach((row, i) => {
+      assert.deepEqual(
+        answers[i],
+        probesOf(row).map((n) => bodyClosesIssue(row.body, n)),
+        `TS/Python bodyClosesIssue disagree — ${row.name}`,
+      );
+    });
+    // The pre-existing row-set selectors (`--closing`, `--source body`) run on
+    // the same engine rules: the whole table as one PR list yields the union.
+    const prs = TRUTH_TABLE.map((row) => ({ body: row.body }));
+    assert.deepEqual(pyClosingNumbers(prs), [...closedIssues(prs)].sort((a, b) => a - b));
+    const body = spawnSync("python3", [PY_SCRIPT, "--source", "body"], { input: JSON.stringify(prs), encoding: "utf-8" });
+    assert.equal(body.status, 0, body.stderr);
+    assert.deepEqual(
+      body.stdout.trim().split(/\s+/).filter(Boolean).map(Number),
+      [...referencedIssues(prs)].sort((a, b) => a - b),
+    );
+  });
+
+  test("per-body predicates never throw on a null/undefined/non-string body, in either language", () => {
+    for (const body of [null, undefined, ""]) {
+      assert.deepEqual(closingIssuesInBody(body), []);
+      assert.deepEqual(referencedIssuesInBody(body), []);
+      assert.equal(bodyClosesIssue(body, 5), false);
+    }
+    // A truthy non-string that slipped past the types (untyped JSON) is
+    // treated like no body — the same answer the Python twin gives below.
+    for (const junk of [5, 0, true, {}, [], ["Closes #5"], { body: "Closes #5" }]) {
+      const body = junk as unknown as string;
+      assert.deepEqual(closingIssuesInBody(body), [], `closing — ${JSON.stringify(junk)}`);
+      assert.deepEqual(referencedIssuesInBody(body), [], `referenced — ${JSON.stringify(junk)}`);
+      assert.equal(bodyClosesIssue(body, 5), false, `bodyClosesIssue — ${JSON.stringify(junk)}`);
+    }
+    assert.equal(bodyClosesIssue("Closes #5", Number.NaN), false);
+    assert.equal(bodyClosesIssue("Closes #5", -5), false);
+    assert.deepEqual(pyBodyAnswers([null, "", 5, { body: "Closes #5" }]), [
+      { closing: [], referenced: [] },
+      { closing: [], referenced: [] },
+      { closing: [], referenced: [] },
+      { closing: [], referenced: [] },
+    ]);
+    // Unparsable / non-list stdin: prints nothing, exits 0 (fail-open).
+    for (const input of ["not json", '{"body":"Closes #5"}']) {
+      const r = spawnSync("python3", [PY_SCRIPT, "--bodies"], { input, encoding: "utf-8" });
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.stdout, "");
+    }
+  });
+
+  test("referencedIssuesInBody()[0] is the FIRST issue the body references, in body order", () => {
+    assert.equal(referencedIssuesInBody("Refs #30. Closes #10.")[0], 30);
+    assert.equal(referencedIssuesInBody("Does not close #26 — #63 does. Closes #63")[0], 26);
+    assert.equal(referencedIssuesInBody("no refs here")[0], undefined);
   });
 
   test("merged rule inherits the negation guard; the (#N) title-anchor arm is unchanged", () => {

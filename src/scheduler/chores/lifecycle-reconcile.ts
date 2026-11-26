@@ -4,7 +4,7 @@
  * One of the Housekeeping chore family (`src/scheduler/chores/`): an hourly,
  * intrinsically idempotent tick that journals out-of-seam label changes as
  * `external`, fires record-checked `qa-passed` exits and the zero-state
- * backstop through the seam, and persists the enforce-readiness report the
+ * backstop through the seam, and persists the reconcile report the
  * attention feed and `scripts/lifecycle.ts reconcile --report` read. The pass
  * itself lives in `src/lifecycle/reconcile.ts`; this module only wires the
  * production deps. NEVER THROWS: any fault folds to a logged `null`.

@@ -417,7 +417,7 @@ async function runHousekeeping(
       // Issue #5316 (ADR-0047): lifecycle reconcile pass. Journals out-of-seam
       // label edits as `external` (never reverting them), fires record-checked
       // qa-passed exits and the zero-state backstop through the seam, flags
-      // issues with 2+ state labels, and persists the enforce-readiness report
+      // issues with 2+ state labels, and persists the reconcile report
       // the attention feed reads. No Redis time-guard — every write is
       // diff-first and idempotent, so an hourly tick over a settled board is a
       // no-op. Never throws — faults fold to a logged null.

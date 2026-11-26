@@ -15,7 +15,6 @@ import {
   qaBounce,
   recordsNeeded,
   type GateInput,
-  type LifecycleMode,
   type QaLivePr,
   type SeamDeps,
   type TimedBody,
@@ -169,11 +168,10 @@ interface World {
   prBodies: Array<string | TimedBody>;
 }
 
-function world(mode: LifecycleMode, pr: QaLivePr, prBodies: Array<string | TimedBody> = []): World {
+function world(pr: QaLivePr, prBodies: Array<string | TimedBody> = []): World {
   const w: World = { journal: [], edits: [], comments: [], labels: ["needs-qa"], pr, prBodies, deps: undefined as unknown as SeamDeps };
   w.deps = {
     repo: "o/r",
-    mode: async () => mode,
     view: async (n) => ({ ok: true, row: { number: n, title: "t", url: "", createdAt: "", labels: [...w.labels], body: "", state: "OPEN" } }),
     edit: async (issue, l) => {
       w.edits.push({ issue, remove: l.remove, add: l.add });
@@ -208,64 +206,53 @@ function world(mode: LifecycleMode, pr: QaLivePr, prBodies: Array<string | Timed
 
 describe("advance needs-qa -> verdict targets", () => {
   test("PASS in enforce: writes qa-passed (never in-progress)", async () => {
-    const w = world("enforce", live({ timedBodies: [timed(trailer("PASS"))] }));
+    const w = world(live({ timedBodies: [timed(trailer("PASS"))] }));
     const res = await advance({ issue: 10, to: "qa-passed", evidence: { pr: "7" }, actor: "hydra-qa" }, w.deps);
     assert.equal(res.ok, true);
     assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["qa-passed"] }]);
   });
 
   test("enforce without a trailer at head refuses qa-verdict-missing and writes nothing", async () => {
-    const w = world("enforce", live());
+    const w = world(live());
     const res = await advance({ issue: 10, to: "qa-passed", evidence: { pr: "7" } }, w.deps);
     assert.deepEqual({ ok: res.ok, code: (res as { code?: string }).code }, { ok: false, code: "qa-verdict-missing" });
     assert.deepEqual(w.edits, []);
   });
 
-  test("shadow without a trailer still writes and journals shadow-would-refuse", async () => {
-    const w = world("shadow", live());
-    const res = await advance({ issue: 10, to: "qa-passed", evidence: { pr: "7" } }, w.deps);
-    assert.equal(res.ok, true);
-    assert.equal((res as { wouldRefuse?: string }).wouldRefuse, "qa-verdict-missing");
-    assert.equal(w.journal.at(-1)!.result, "shadow-would-refuse:qa-verdict-missing");
-  });
-
   test("a 1st reviewed FAIL bounces to needs-dev-resume with no cap park", async () => {
-    const w = world("enforce", live({ timedBodies: [timed(failBody(1))] }), [failBody(1)]);
+    const w = world(live({ timedBodies: [timed(failBody(1))] }), [failBody(1)]);
     const res = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7" } }, w.deps);
     assert.equal(res.ok, true);
-    assert.equal((res as { wouldPark?: string }).wouldPark, undefined);
     assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["needs-dev-resume"] }]);
   });
 
   const T4_MARK = "Verifier-Core deep-QA: FAIL";
 
-  for (const mode of ["enforce", "shadow"] as const) {
-    test(`${mode}: a T4 FAIL (deep-QA marker on the live PR record) with unreadable PR bodies refuses fetch-failed and writes nothing`, async () => {
-      const w = world(mode, live({ bodies: [T4_MARK], timedBodies: [timed(failBody(1)), timed(T4_MARK)] }), [failBody(1)]);
-      w.deps.fetch.prBodies = async () => ({ ok: false });
-      const res = (await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7" } }, w.deps)) as { ok: boolean; code?: string };
-      assert.deepEqual({ ok: res.ok, code: res.code }, { ok: false, code: "fetch-failed" });
-      assert.deepEqual(w.edits, []);
-    });
+  test("a T4 FAIL (deep-QA marker on the live PR record) with unreadable PR bodies refuses fetch-failed and writes nothing", async () => {
+    const w = world(live({ bodies: [T4_MARK], timedBodies: [timed(failBody(1)), timed(T4_MARK)] }), [failBody(1)]);
+    w.deps.fetch.prBodies = async () => ({ ok: false });
+    const res = (await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7" } }, w.deps)) as { ok: boolean; code?: string };
+    assert.deepEqual({ ok: res.ok, code: res.code }, { ok: false, code: "fetch-failed" });
+    assert.deepEqual(w.edits, []);
+  });
 
-    test(`sibling shape: ${mode}, non-T4 (no marker on the live record), unreadable PR bodies still bounces`, async () => {
-      const w = world(mode, live({ timedBodies: [timed(failBody(1))] }), [failBody(1)]);
-      w.deps.fetch.prBodies = async () => ({ ok: false });
-      const res = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7" } }, w.deps);
-      assert.equal(res.ok, true);
-      assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["needs-dev-resume"] }]);
-    });
-  }
+  test("sibling shape: non-T4 (no marker on the live record), unreadable PR bodies still bounces", async () => {
+    const w = world(live({ timedBodies: [timed(failBody(1))] }), [failBody(1)]);
+    w.deps.fetch.prBodies = async () => ({ ok: false });
+    const res = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7" } }, w.deps);
+    assert.equal(res.ok, true);
+    assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["needs-dev-resume"] }]);
+  });
 
   test("a caller-supplied t4 evidence flag has no effect: the seam decides T4 from the record", async () => {
-    const w = world("enforce", live({ timedBodies: [timed(failBody(1))] }), [failBody(1)]);
+    const w = world(live({ timedBodies: [timed(failBody(1))] }), [failBody(1)]);
     w.deps.fetch.prBodies = async () => ({ ok: false });
     const res = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7", t4: "1" } }, w.deps);
     assert.equal(res.ok, true);
   });
 
   test("FAIL with the PR CLOSED unmerged routes to ready-for-agent", async () => {
-    const w = world("enforce", live({ state: "CLOSED", timedBodies: [timed(failBody(1))] }), [failBody(1)]);
+    const w = world(live({ state: "CLOSED", timedBodies: [timed(failBody(1))] }), [failBody(1)]);
     const res = await advance({ issue: 10, to: "ready-for-agent", evidence: { pr: "7" } }, w.deps);
     assert.equal(res.ok, true);
     assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["ready-for-agent"] }]);
@@ -277,7 +264,7 @@ describe("the 3rd reviewed FAIL parks through the seam (INV-5, INV-6)", () => {
   const liveThree = () => live({ timedBodies: [timed(failBody(3))] });
 
   test("enforce: parks needs-qa -> parked in the same call with the unified comment; needs-dev-resume is never written", async () => {
-    const w = world("enforce", liveThree(), three);
+    const w = world(liveThree(), three);
     const res = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7" }, actor: "hydra-qa" }, w.deps);
     assert.deepEqual(
       { ok: res.ok, code: (res as { code?: string }).code, written: (res as { written?: boolean }).written },
@@ -288,23 +275,8 @@ describe("the 3rd reviewed FAIL parks through the seam (INV-5, INV-6)", () => {
     assert.ok(!w.labels.includes("ready-for-human"));
   });
 
-  test("shadow: qa-fail-rounds is a live arm - parks exactly as in enforce, the park entry tagged mode=shadow live=1", async () => {
-    const w = world("shadow", liveThree(), three);
-    const res = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7" }, actor: "hydra-qa" }, w.deps);
-    assert.deepEqual(
-      { ok: res.ok, code: (res as { code?: string }).code, written: (res as { written?: boolean }).written },
-      { ok: false, code: "parked:qa-fail-rounds", written: true },
-    );
-    assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["parked"] }]);
-    assert.equal(w.comments.filter((c) => c.number === 10 && c.body.includes("## Hydra cap park")).length, 1, "unified comment exactly once");
-    const park = w.journal.find((e) => e.result === "parked:qa-fail-rounds")!;
-    assert.equal(park.evidence.mode, "shadow");
-    assert.equal(park.evidence.live, "1");
-    assert.ok(!w.journal.some((e) => e.result.startsWith("shadow-would-park")), "a live park is not a would-park");
-  });
-
-  test("the playbook's explicit shadow follow-up (needs-dev-resume -> parked, cap: reason) is a legal transition", async () => {
-    const w = world("shadow", liveThree(), three);
+  test("an explicit follow-up park (needs-dev-resume -> parked, cap: reason) is a legal transition", async () => {
+    const w = world(liveThree(), three);
     w.labels = ["needs-dev-resume"];
     const res = await advance({ issue: 10, to: "parked", reason: "cap:qa-fail-rounds", rationale: "3 reviewed FAIL rounds" }, w.deps);
     assert.equal(res.ok, true);
@@ -313,7 +285,7 @@ describe("the 3rd reviewed FAIL parks through the seam (INV-5, INV-6)", () => {
 
   test("a CI-only FAIL round (no findings table) never counts toward the cap", async () => {
     const ciOnly = (r: number) => trailer("FAIL-pending-CI", r);
-    const w = world("enforce", live({ timedBodies: [timed(ciOnly(3))] }), [ciOnly(1), ciOnly(2), ciOnly(3)]);
+    const w = world(live({ timedBodies: [timed(ciOnly(3))] }), [ciOnly(1), ciOnly(2), ciOnly(3)]);
     const res = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7" } }, w.deps);
     assert.equal(res.ok, true);
     assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["needs-dev-resume"] }]);
@@ -327,7 +299,7 @@ describe("the 3rd reviewed FAIL parks through the seam (INV-5, INV-6)", () => {
       { body: "Hydra-Cap-Reset: by=op ts=2026-11-04T09:00:00Z", tsMs: resetTs },
       { body: failBody(3), tsMs: resetTs + 1000 },
     ];
-    const w = world("enforce", liveThree(), bodies);
+    const w = world(liveThree(), bodies);
     const res = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7" } }, w.deps);
     assert.equal(res.ok, true);
     assert.equal(w.edits[0].add[0], "needs-dev-resume");
@@ -345,21 +317,21 @@ describe("QA-FAIL round-1 fixes (#5317 PR #5377)", () => {
   });
 
   test("defer arm: trailer-less advance in enforce routes by live PR state (red without the defer gate)", async () => {
-    const w = world("enforce", live());
+    const w = world(live());
     const res = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7", defer: "1" }, actor: "hydra-qa" }, w.deps);
     assert.equal(res.ok, true);
     assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["needs-dev-resume"] }]);
-    const w2 = world("enforce", live({ state: "CLOSED" }));
+    const w2 = world(live({ state: "CLOSED" }));
     assert.equal((await advance({ issue: 10, to: "ready-for-agent", evidence: { pr: "7", defer: "1" }, actor: "hydra-qa" }, w2.deps)).ok, true);
   });
 
   test("defer evidence never admits qa-passed, a wrong lane, or a merged PR; no defer still needs a trailer", async () => {
-    const w = world("enforce", live());
+    const w = world(live());
     const r1 = await advance({ issue: 10, to: "qa-passed", evidence: { pr: "7", defer: "1" }, actor: "hydra-qa" }, w.deps);
     assert.equal((r1 as { code?: string }).code, "qa-verdict-mismatch");
     const r2 = await advance({ issue: 10, to: "ready-for-agent", evidence: { pr: "7", defer: "1" }, actor: "hydra-qa" }, w.deps);
     assert.equal((r2 as { code?: string }).code, "qa-verdict-mismatch");
-    const wm = world("enforce", live({ state: "MERGED" }));
+    const wm = world(live({ state: "MERGED" }));
     const r3 = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7", defer: "1" }, actor: "hydra-qa" }, wm.deps);
     assert.equal((r3 as { code?: string }).code, "pr-merged");
     const r4 = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7" } }, w.deps);
@@ -369,11 +341,11 @@ describe("QA-FAIL round-1 fixes (#5317 PR #5377)", () => {
 
   test("closed-PR FAIL edge runs the qa-fail-rounds cap (3rd FAIL parks); a defer never does", async () => {
     const three = [failBody(1), failBody(2), failBody(3)];
-    const w = world("enforce", live({ state: "CLOSED", timedBodies: [timed(failBody(3))] }), three);
+    const w = world(live({ state: "CLOSED", timedBodies: [timed(failBody(3))] }), three);
     const res = await advance({ issue: 10, to: "ready-for-agent", evidence: { pr: "7" }, actor: "hydra-qa" }, w.deps);
     assert.equal((res as { code?: string }).code, "parked:qa-fail-rounds");
     assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["parked"] }]);
-    const wd = world("enforce", live({ state: "CLOSED" }), three);
+    const wd = world(live({ state: "CLOSED" }), three);
     const rd = await advance({ issue: 10, to: "ready-for-agent", evidence: { pr: "7", defer: "1" }, actor: "hydra-qa" }, wd.deps);
     assert.equal(rd.ok, true);
   });
@@ -382,13 +354,13 @@ describe("QA-FAIL round-1 fixes (#5317 PR #5377)", () => {
 describe("QA-FAIL round-3 fixes (#5317 PR #5377)", () => {
   test("defer=1 is accepted only from actor hydra-qa (red without the actor check)", async () => {
     for (const actor of [undefined, "cli", "hydra-dev"]) {
-      const w = world("enforce", live());
+      const w = world(live());
       const res = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7", defer: "1" }, ...(actor ? { actor } : {}) }, w.deps);
       assert.equal((res as { code?: string }).code, "defer-actor-not-allowed", `actor=${actor}`);
       assert.deepEqual(w.edits, []);
     }
     // sibling shape: hydra-qa keeps its old verdict
-    const ok = world("enforce", live());
+    const ok = world(live());
     const res = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7", defer: "1" }, actor: "hydra-qa" }, ok.deps);
     assert.equal(res.ok, true);
   });
@@ -402,7 +374,7 @@ describe("QA-FAIL round-3 fixes (#5317 PR #5377)", () => {
   });
 
   test("missing needs-qa entry time falls back to the timeline (red without the fallback)", async () => {
-    const w = world("enforce", live({ timedBodies: [timed(trailer("PASS"))] }));
+    const w = world(live({ timedBodies: [timed(trailer("PASS"))] }));
     w.deps.fetch.stateEntry = async () => ({ ok: true, value: { enteredAtMs: null } });
     w.deps.fetch.timeline = async () => ({
       ok: true,
@@ -414,7 +386,7 @@ describe("QA-FAIL round-3 fixes (#5317 PR #5377)", () => {
   });
 
   test("sibling: no entry time anywhere (journal AND timeline) still refuses state-entry-unknown", async () => {
-    const w = world("enforce", live({ timedBodies: [timed(trailer("PASS"))] }));
+    const w = world(live({ timedBodies: [timed(trailer("PASS"))] }));
     w.deps.fetch.stateEntry = async () => ({ ok: true, value: { enteredAtMs: null } });
     const res = await advance({ issue: 10, to: "qa-passed", evidence: { pr: "7" }, actor: "hydra-qa" }, w.deps);
     assert.equal((res as { code?: string }).code, "state-entry-unknown");
@@ -438,7 +410,7 @@ describe("qaBounce: the seam picks a QA FAIL's exit from one live read (#5659)",
 
   test("OPEN -> needs-dev-resume, CLOSED -> ready-for-agent, each with exactly one live read", async () => {
     for (const [state, to] of [["OPEN", "needs-dev-resume"], ["CLOSED", "ready-for-agent"]] as const) {
-      const w = world("enforce", failed(), [failBody(1)]);
+      const w = world(failed(), [failBody(1)]);
       const c = counted(w, [state]);
       assert.deepEqual(await qaBounce(input, w.deps), { ok: true, to });
       assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: [to] }]);
@@ -447,14 +419,14 @@ describe("qaBounce: the seam picks a QA FAIL's exit from one live read (#5659)",
   });
 
   test("a MERGED PR is the pr-merged code and writes nothing", async () => {
-    const w = world("enforce", failed(), [failBody(1)]);
+    const w = world(failed(), [failBody(1)]);
     counted(w, ["MERGED"]);
     assert.deepEqual(await qaBounce(input, w.deps), { ok: false, code: "pr-merged" });
     assert.deepEqual(w.edits, []);
   });
 
   test("a PR that closes between the old two reads cannot mismatch: the one read decides", async () => {
-    const w = world("enforce", failed(), [failBody(1)]);
+    const w = world(failed(), [failBody(1)]);
     const c = counted(w, ["OPEN", "CLOSED"]);
     assert.deepEqual(await qaBounce(input, w.deps), { ok: true, to: "needs-dev-resume" });
     assert.equal(c.reads(), 1, "no second read exists to disagree");
@@ -463,7 +435,7 @@ describe("qaBounce: the seam picks a QA FAIL's exit from one live read (#5659)",
 
   test("the third reviewed FAIL parks with the arm counts the park comment renders", async () => {
     const three = [failBody(1), failBody(2), failBody(3)];
-    const w = world("enforce", live({ timedBodies: [timed(failBody(3))] }), three);
+    const w = world(live({ timedBodies: [timed(failBody(3))] }), three);
     const res = await qaBounce(input, w.deps);
     assert.equal(res.ok, false);
     const parked = res as { code: string; counts?: ReadonlyArray<{ arm: string; count: number }> };
@@ -474,9 +446,9 @@ describe("qaBounce: the seam picks a QA FAIL's exit from one live read (#5659)",
   });
 
   test("defer evidence is the trailer-less bounce; an unreadable PR state refuses fetch-failed and a crash never throws", async () => {
-    const w = world("enforce", live());
+    const w = world(live());
     assert.deepEqual(await qaBounce({ ...input, defer: true }, w.deps), { ok: true, to: "needs-dev-resume" });
-    const wf = world("enforce", failed(), [failBody(1)]);
+    const wf = world(failed(), [failBody(1)]);
     wf.deps.fetch.qaLive = async () => ({ ok: false });
     assert.deepEqual(await qaBounce(input, wf.deps), { ok: false, code: "fetch-failed" });
     wf.deps.fetch.qaLive = async () => {
@@ -496,14 +468,14 @@ describe("the 2nd T4 deep-QA FAIL escalates through the deep-qa-fails Cap Arm (#
   const input = { issue: 10, pr: 7, actor: "hydra-qa" };
 
   test("the first T4 FAIL bounces", async () => {
-    const w = world("enforce", live({ timedBodies: [timed(deepFail(1))] }), [deepFail(1)]);
+    const w = world(live({ timedBodies: [timed(deepFail(1))] }), [deepFail(1)]);
     assert.deepEqual(await qaBounce(input, w.deps), { ok: true, to: "needs-dev-resume" });
     assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["needs-dev-resume"] }]);
   });
 
   test("the second escalates to ready-for-human with one unified cap comment, journaled cap:deep-qa-fails", async () => {
     const two = [deepFail(1, shaOf(1)), deepFail(2, shaOf(2))];
-    const w = world("enforce", live({ timedBodies: [timed(deepFail(2))] }), two);
+    const w = world(live({ timedBodies: [timed(deepFail(2))] }), two);
     const res = await qaBounce(input, w.deps);
     assert.equal(res.ok, false);
     const out = res as { code: string; counts?: ReadonlyArray<{ arm: string; count: number }> };
@@ -517,13 +489,6 @@ describe("the 2nd T4 deep-QA FAIL escalates through the deep-qa-fails Cap Arm (#
     assert.equal(entry.result, "escalated:deep-qa-fails");
   });
 
-  test("shadow mode escalates too: deep-qa-fails is a live arm", async () => {
-    const w = world("shadow", live({ timedBodies: [timed(deepFail(2))] }), [deepFail(1, shaOf(1)), deepFail(2, shaOf(2))]);
-    const res = await qaBounce(input, w.deps);
-    assert.equal((res as { code?: string }).code, "escalated:deep-qa-fails");
-    assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["ready-for-human"] }]);
-  });
-
   test("a FAIL after an operator reset counts as the first again and bounces", async () => {
     const resetTs = Date.parse("2026-11-04T09:00:00Z");
     const bodies: TimedBody[] = [
@@ -532,14 +497,14 @@ describe("the 2nd T4 deep-QA FAIL escalates through the deep-qa-fails Cap Arm (#
       { body: "Hydra-Cap-Reset: by=op ts=2026-11-04T09:00:00Z", tsMs: resetTs },
       { body: deepFail(3, shaOf(3)), tsMs: resetTs + 1000 },
     ];
-    const w = world("enforce", live({ timedBodies: [timed(deepFail(3))] }), bodies);
+    const w = world(live({ timedBodies: [timed(deepFail(3))] }), bodies);
     assert.deepEqual(await qaBounce(input, w.deps), { ok: true, to: "needs-dev-resume" });
     assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["needs-dev-resume"] }]);
   });
 
   test("with both arms over their limits, the escalate row wins over the park row", async () => {
     const three = [deepFail(1, shaOf(1)), deepFail(2, shaOf(2)), deepFail(3, shaOf(3))];
-    const w = world("enforce", live({ timedBodies: [timed(deepFail(3))] }), three);
+    const w = world(live({ timedBodies: [timed(deepFail(3))] }), three);
     const res = await qaBounce(input, w.deps);
     assert.equal((res as { code?: string }).code, "escalated:deep-qa-fails");
     assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["ready-for-human"] }]);
@@ -547,14 +512,14 @@ describe("the 2nd T4 deep-QA FAIL escalates through the deep-qa-fails Cap Arm (#
 
   test("T1-T3 FAILs carry no marker: the 3rd reviewed FAIL still parks, never escalates", async () => {
     const three = [failBody(1), failBody(2), failBody(3)];
-    const w = world("enforce", live({ timedBodies: [timed(failBody(3))] }), three);
+    const w = world(live({ timedBodies: [timed(failBody(3))] }), three);
     assert.equal(((await qaBounce(input, w.deps)) as { code?: string }).code, "parked:qa-fail-rounds");
     assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["parked"] }]);
   });
 
   test("a retried FAIL on the same head sha is one deep-QA FAIL, not two (retry cannot double-count)", async () => {
     const dup = [deepFail(1), deepFail(1)];
-    const w = world("enforce", live({ timedBodies: [timed(deepFail(1))] }), dup);
+    const w = world(live({ timedBodies: [timed(deepFail(1))] }), dup);
     assert.deepEqual(await qaBounce(input, w.deps), { ok: true, to: "needs-dev-resume" });
     assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["needs-dev-resume"] }]);
   });
@@ -562,7 +527,7 @@ describe("the 2nd T4 deep-QA FAIL escalates through the deep-qa-fails Cap Arm (#
   test("a T3 PR quoting the marker literal twice in prose bounces on its first FAIL, never escalates", async () => {
     const quote = `we discuss ${MARK} in prose`;
     const bodies = [quote, `${quote} again`, failBody(1)];
-    const w = world("enforce", live({ timedBodies: [timed(failBody(1))] }), bodies);
+    const w = world(live({ timedBodies: [timed(failBody(1))] }), bodies);
     assert.deepEqual(await qaBounce(input, w.deps), { ok: true, to: "needs-dev-resume" });
     assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["needs-dev-resume"] }]);
   });

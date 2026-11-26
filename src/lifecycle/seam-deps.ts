@@ -1,14 +1,11 @@
 /**
  * Lifecycle seam deps (ADR-0047 Decision 3; issue #5618).
  *
- * The rollout switch (`loadLifecycleMode`), the injectable `SeamDeps` surface and
- * its production binding `defaultSeamDeps` (gh record fetchers + Redis journal).
+ * The injectable `SeamDeps` surface and its production binding `defaultSeamDeps` (gh record fetchers + Redis journal).
  * Pure adapters: this module knows nothing about the transition spine, so
  * `seam.ts`, `claim.ts`, `operator.ts`, `park.ts` and `reconcile.ts` all depend on
  * it and it depends on none of them.
  */
-import { readFile as fsReadFile } from "node:fs/promises";
-import { join } from "node:path";
 import { logger } from "../logger.ts";
 import {
   closeIssue,
@@ -57,63 +54,11 @@ import {
 import type { TimedBody, TimelineLabelEvent } from "./caps.ts";
 
 // ---------------------------------------------------------------------------
-// Rollout switch
-// ---------------------------------------------------------------------------
-
-const LIFECYCLE_ROLLOUT_CONFIG_PATH = "config/orchestrator/lifecycle-rollout.json";
-export type LifecycleMode = "shadow" | "enforce";
-type ModeReason = "config-missing" | "key-missing" | "value-malformed";
-
-export interface ResolvedMode {
-  mode: LifecycleMode;
-  /** Why the mode fell back to shadow; null when the file said so explicitly. */
-  reason: ModeReason | null;
-}
-
-/** Pure and total over unknown input: anything but the literal `'enforce'` is shadow. */
-export function resolveLifecycleMode(raw: unknown): ResolvedMode {
-  if (raw === undefined) return { mode: "shadow", reason: "config-missing" };
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
-    return { mode: "shadow", reason: "value-malformed" };
-  }
-  const obj = raw as Record<string, unknown>;
-  if (!("lifecycle-seam" in obj)) return { mode: "shadow", reason: "key-missing" };
-  const v = obj["lifecycle-seam"];
-  if (v === "enforce") return { mode: "enforce", reason: null };
-  if (v === "shadow") return { mode: "shadow", reason: null };
-  return { mode: "shadow", reason: "value-malformed" };
-}
-
-export async function loadLifecycleMode(
-  repoRoot: string,
-  deps: { readFile?: (path: string) => Promise<string> } = {},
-): Promise<ResolvedMode> {
-  const read = deps.readFile ?? ((p: string) => fsReadFile(p, "utf8"));
-  let text: string;
-  try {
-    text = await read(join(repoRoot, LIFECYCLE_ROLLOUT_CONFIG_PATH));
-  } catch (err) {
-    const code = (err as { code?: unknown } | null)?.code;
-    if (code !== "ENOENT") {
-      logger.warn({ err }, "[lifecycle] rollout config unreadable; defaulting to shadow");
-    }
-    return resolveLifecycleMode(undefined);
-  }
-  try {
-    return resolveLifecycleMode(JSON.parse(text));
-  } catch (err) {
-    logger.warn({ err }, "[lifecycle] rollout config malformed; defaulting to shadow");
-    return { mode: "shadow", reason: "value-malformed" };
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Deps
 // ---------------------------------------------------------------------------
 
 export interface SeamDeps {
   repo: string;
-  mode: () => Promise<LifecycleMode>;
   view: (issue: number) => Promise<IssueViewResult>;
   edit: (
     issue: number,
@@ -296,6 +241,16 @@ async function fetchBlockerRefs(repo: string, refs: number[]): Promise<Fetched<B
 }
 
 /**
+ * Fold a raw `statusCheckRollup` to the one verdict the `qa-passed` exit reads.
+ * The single home of that fold: `fetchQaLive` calls it and the tests exercise
+ * it directly, so a drift here fails them.
+ */
+export function foldQaLiveChecks(rawRollup: unknown, required: readonly string[]): QaLivePr["checks"] {
+  const fold = foldRollup(parseRollupEntries(rawRollup), { required });
+  return !isSettled(fold) ? "pending" : isRed(fold) ? "red" : "green";
+}
+
+/**
  * A PR read live at head for the `qa-passed` exit decision: state, draft,
  * `mergeStateStatus`, head sha, the REQUIRED checks folded to one verdict, and
  * the comment + review bodies (they carry the `QA-Verdict:` trailers). Required
@@ -314,8 +269,7 @@ async function fetchQaLive(repo: string, prNumber: number): Promise<Fetched<QaLi
     const required = await listRequiredStatusContextsOrNull("lifecycle", { repo });
     let checks: QaLivePr["checks"] = "unknown";
     if (required !== null) {
-      const fold = foldRollup(parseRollupEntries(d.statusCheckRollup), { required });
-      checks = !isSettled(fold) ? "pending" : isRed(fold) ? "red" : "green";
+      checks = foldQaLiveChecks(d.statusCheckRollup, required);
     }
     const bodies = (list: unknown): string[] =>
       Array.isArray(list) ? list.map((c) => String((c as { body?: unknown } | null)?.body ?? "")) : [];
@@ -360,11 +314,13 @@ export async function postIssueComment(repo: string, number: number, body: strin
   }
 }
 
-/** Production deps: real gh, real Redis, mode read from the git-tracked config. */
-export function defaultSeamDeps(repoRoot: string): SeamDeps {
+/**
+ * Production deps: real gh, real Redis. `_repoRoot` is unread since the rollout
+ * config file went (#5771); the parameter stays so no caller changes.
+ */
+export function defaultSeamDeps(_repoRoot: string): SeamDeps {
   return {
     repo: resolveGithubRepo(),
-    mode: async () => (await loadLifecycleMode(repoRoot)).mode,
     view: (n) => viewIssue(n),
     edit: (n, labels) => editIssueLabels(n, labels),
     close: (n, reason) => closeIssue(n, reason),

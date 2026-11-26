@@ -20,7 +20,8 @@
  * classification with every write skipped.
  */
 import { logger } from "../logger.ts";
-import { declaresEpicChildren } from "../github/blockers.ts";
+import { isZeroStateExempt } from "../github/blockers.ts";
+import { bodyClosesIssue } from "../github/pr-refs.ts";
 import type { IssueReadResult, IssueRow } from "../github/issues.ts";
 import type {
   JournalWriteResult,
@@ -28,7 +29,6 @@ import type {
 } from "../redis/lifecycle-journal.ts";
 import { latestResetMs, resetsCapsOnExit } from "./caps.ts";
 import {
-  bodyClosesIssue,
   classifyQaPassedExit,
   parsePrEvidence,
   type Fetched,
@@ -84,7 +84,6 @@ export interface ReconcileOptions {
 export interface ReconcileReport {
   ts: number;
   repo: string;
-  mode: "shadow" | "enforce" | null;
   dryRun: boolean;
   scanned: { open: number; recentlyClosed: number };
   invalid: Array<{ number: number; labels: string[] }>;
@@ -114,8 +113,6 @@ export interface ReconcileReport {
    */
   prCovered: { promoted: number; ambiguous: number; claimHeld: number; refused: number; skippedQaFail: number };
   seamTransitions: number;
-  wouldRefuseByReason: Record<string, number>;
-  wouldParkByArm: Record<string, number>;
   errors: string[];
 }
 
@@ -123,7 +120,6 @@ export function emptyReport(repo: string, ts: number, dryRun: boolean): Reconcil
   return {
     ts,
     repo,
-    mode: null,
     dryRun,
     scanned: { open: 0, recentlyClosed: 0 },
     invalid: [],
@@ -135,21 +131,12 @@ export function emptyReport(repo: string, ts: number, dryRun: boolean): Reconcil
     qaExits: { "needs-dev-resume": 0, "needs-qa": 0, closed: 0, "ready-for-agent": 0, none: 0, unresolved: 0 },
     prCovered: { promoted: 0, ambiguous: 0, claimHeld: 0, refused: 0, skippedQaFail: 0 },
     seamTransitions: 0,
-    wouldRefuseByReason: {},
-    wouldParkByArm: {},
     errors: [],
   };
 }
 
-const SHADOW_REFUSE_PREFIX = "shadow-would-refuse:";
-const SHADOW_PARK_PREFIX = "shadow-would-park:";
-
-function bump(map: Record<string, number>, key: string): void {
-  map[key] = (map[key] ?? 0) + 1;
-}
-
 /**
- * Fold a journal's 7-day window into the report's seam-transition / would-refuse / would-park counts.
+ * Fold a journal's 7-day window into the report's seam-transition count.
  * Scope (INV-10, deliberately narrowed): only OPEN issues' journals are tallied; issues closed
  * inside the window are not counted because no journal-wide SCAN accessor exists.
  */
@@ -157,21 +144,11 @@ function tallyJournal(report: ReconcileReport, entries: readonly LifecycleJourna
   for (const e of entries) {
     if (typeof e.ts !== "number" || e.ts < now - REPORT_WINDOW_MS) continue;
     if (e.kind === "transition") report.seamTransitions++;
-    if (e.kind === "refused" && typeof e.result === "string") {
-      if (e.result.startsWith(SHADOW_REFUSE_PREFIX)) bump(report.wouldRefuseByReason, e.result.slice(SHADOW_REFUSE_PREFIX.length));
-      if (e.result.startsWith(SHADOW_PARK_PREFIX)) bump(report.wouldParkByArm, e.result.slice(SHADOW_PARK_PREFIX.length));
-    }
   }
 }
 
-/** True when the zero-state backstop must leave this issue alone (ADR-0047 D2). */
-export function isZeroStateExempt(issue: Pick<IssueRow, "labels" | "body">): boolean {
-  return (
-    declaresEpicChildren(issue.body) ||
-    issue.labels.includes("keep-open") ||
-    issue.labels.some((l) => l.startsWith("wayfinder:"))
-  );
-}
+/** True when the zero-state backstop must leave this issue alone (ADR-0047 D2) — the one definition lives in `src/github/blockers.ts`. */
+export { isZeroStateExempt };
 
 /**
  * The qa-passed exit's PR, resolved from pointers and never guessed: the `pr`
@@ -249,7 +226,6 @@ export async function runReconcile(deps: ReconcileDeps, opts: ReconcileOptions =
   const now = deps.seam.now();
   const report = emptyReport(repo, now, dryRun);
   try {
-    report.mode = await deps.seam.mode();
     const open = await deps.listOpenIssues();
     if (open.ok === false) {
       report.errors.push("open-issues-read-failed");

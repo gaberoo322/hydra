@@ -1,0 +1,1 @@
+- refactor: one isEntrypoint seam replaces sixteen hand-rolled CLI isMain guards under scripts/ (#5728)

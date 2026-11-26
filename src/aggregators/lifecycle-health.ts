@@ -13,8 +13,7 @@
  *   - `firstPassQaYield` — PRs whose earliest in-window `QA-Verdict:` trailer
  *     is round 1 and PASS, from trailers only (never labels).
  *   - `parkRatePerArm` — parks / claims opened per cap arm from the
- *     `hydra:lifecycle:cap-events:<repo>` index, plus would-park counts and the
- *     rollout mode (shadow-era parks are 0 by construction).
+ *     `hydra:lifecycle:cap-events:<repo>` index.
  *
  * The folds are pure and exported for tests; the readers are overridable via
  * `LifecycleHealthDeps` so tests need no Redis and no gh (STD-VERIFY-NEVER-THROW:
@@ -26,7 +25,6 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
 import { CAP_ARMS, type CapArm } from "../lifecycle/caps.ts";
-import { loadLifecycleMode, type LifecycleMode } from "../lifecycle/index.ts";
 import { listCapEvents, type CapEventRecord, type ListCapEventsResult } from "../redis/lifecycle-journal.ts";
 import { listAutopilotRunsSince } from "../redis/autopilot-runs.ts";
 import { readRunTurns, sanitizeParentExceptions, type TurnParentException, type TurnRow } from "../autopilot/turn-row.ts";
@@ -77,13 +75,11 @@ export interface FirstPassQaYieldMetric {
 
 export interface ParkArmCounts {
   parks: number;
-  wouldPark: number;
   /** parks / claimsOpened; `null` when no claim was opened. */
   rate: number | null;
 }
 
 export interface ParkRatePerArmMetric {
-  mode: LifecycleMode;
   claimsOpened: number;
   arms: Record<CapArm, ParkArmCounts>;
   windowDays: number;
@@ -112,14 +108,13 @@ export interface ParentExceptionFold {
 
 export interface LifecycleHealthDeps {
   now?: Date;
-  /** Repo root for the baselines + rollout config files. */
+  /** Repo root the baselines file is read from. */
   repoRoot?: string;
   readFile?: (path: string) => Promise<string>;
   githubRepo?: string;
   readRunTurns?: (sinceEpochSeconds: number) => Promise<RunTurns[]>;
   readQaVerdictComments?: (sinceIso: string) => Promise<QaVerdictCommentsResult>;
   readCapEvents?: (sinceMs: number) => Promise<ListCapEventsResult>;
-  readMode?: () => Promise<LifecycleMode>;
 }
 
 // ---------------------------------------------------------------------------
@@ -230,7 +225,7 @@ export function foldParkRate(
   events: readonly CapEventRecord[],
 ): { claimsOpened: number; arms: Record<CapArm, ParkArmCounts> } {
   const arms = {} as Record<CapArm, ParkArmCounts>;
-  for (const arm of CAP_ARMS) arms[arm] = { parks: 0, wouldPark: 0, rate: null };
+  for (const arm of CAP_ARMS) arms[arm] = { parks: 0, rate: null };
   let claimsOpened = 0;
   for (const e of events) {
     if (e.kind === "claim") {
@@ -240,7 +235,6 @@ export function foldParkRate(
     const slot = e.arm !== undefined ? arms[e.arm as CapArm] : undefined;
     if (!slot) continue;
     if (e.kind === "park") slot.parks += 1;
-    else if (e.kind === "would-park") slot.wouldPark += 1;
   }
   for (const arm of CAP_ARMS) {
     arms[arm].rate = claimsOpened === 0 ? null : arms[arm].parks / claimsOpened;
@@ -367,15 +361,13 @@ export async function computeParkRatePerArm(
 ): Promise<ParkRatePerArmMetric> {
   const now = (deps.now ?? new Date()).getTime();
   const repo = resolveGithubRepo(deps.githubRepo);
-  const repoRoot = deps.repoRoot ?? defaultRepoRoot();
-  const [res, mode, baselines] = await Promise.all([
+  const [res, baselines] = await Promise.all([
     (deps.readCapEvents ?? ((since: number) => listCapEvents(repo, since)))(now - windowDays * DAY_MS),
-    (deps.readMode ?? (async () => (await loadLifecycleMode(repoRoot)).mode))(),
     loadBuilderHealthBaselines(deps),
   ]);
   if (res.ok === false) throw new RedisSeamError(res.error);
   const { claimsOpened, arms } = foldParkRate(res.events);
-  return { mode, claimsOpened, arms, windowDays, baseline: baselines.parkRatePerArm };
+  return { claimsOpened, arms, windowDays, baseline: baselines.parkRatePerArm };
 }
 
 // ---------------------------------------------------------------------------

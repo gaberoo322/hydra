@@ -5,18 +5,17 @@
  * `runVerifiedAction` (src/api/autopilot-board.ts). Spine order is fixed:
  *
  *   re-read (viewIssue) -> derive state -> human-hold refuse -> legality ->
- *   fetch records (injected) -> pure gate -> mode branch -> ONE gh write ->
+ *   fetch records (injected) -> pure gate -> refuse on fail -> ONE gh write ->
  *   re-read verify -> journal append
  *
  * Never throws and never falls back to a direct label write: a failed fetch is
  * a `fetch-failed` refusal, a failed write is `write-failed:<gh-code>`, a
  * post-write mismatch is `write-unverified`. Every external effect (gh, Redis,
- * clock, mode) is an injectable dep so the whole spine is testable offline.
+ * clock) is an injectable dep so the whole spine is testable offline.
  *
- * Shadow vs enforce: in `shadow` a failing/illegal (non-human-hold) transition
- * STILL writes and journals ONE `refused` entry `shadow-would-refuse:<code>`
- * (`written:true`); in `enforce` it journals `refused:<code>` (`written:false`).
- * Human-hold exits are refused in BOTH modes, before the mode branch.
+ * One behaviour (ADR-0047 Decision 7): a failing or illegal transition writes
+ * nothing and journals `refused:<code>` (`written:false`); an over-cap attempt
+ * parks instead of moving. Human-hold exits are refused before any gate runs.
  */
 import { logger } from "../logger.ts";
 import type { IssueViewResult } from "../github/issue-actions.ts";
@@ -39,7 +38,6 @@ import {
   countDeepQaFailsAfterReset,
   countReviewedFailRoundsAfterReset,
   evaluateCaps,
-  isLiveArm,
   isJournalMiss,
   latestResetMs,
   resolveCapLimits,
@@ -50,7 +48,7 @@ import {
   type TimelineLabelEvent,
 } from "./caps.ts";
 import { parkForCap } from "./park.ts";
-import type { LifecycleMode, SeamDeps } from "./seam-deps.ts";
+import type { SeamDeps } from "./seam-deps.ts";
 import {
   findTransition,
   isHumanHold,
@@ -153,37 +151,6 @@ function parkEntryProbe(deps: SeamDeps, over: NonNullable<CapEvaluation["over"]>
   };
 }
 
-export function shadowParkEntry(
-  deps: SeamDeps,
-  over: NonNullable<CapEvaluation["over"]>,
-  from: string | null,
-  pr: number | null,
-  actor: string,
-): LifecycleJournalEntry {
-  return {
-    v: 1,
-    ts: deps.now(),
-    kind: "refused",
-    from,
-    to: "parked",
-    source: "cli",
-    actor,
-    evidence: {
-      arm: over.arm,
-      count: String(over.count),
-      limit: String(over.limit),
-      source: over.source,
-      ...(pr !== null ? { pr: String(pr) } : {}),
-    },
-    reason: `cap:${over.arm}`,
-    rationale: null,
-    result: `shadow-would-park:${over.arm}`,
-    written: false,
-  };
-}
-
-type CapOver = NonNullable<CapEvaluation["over"]>;
-
 interface CapGuardAttempt {
   issue: number;
   /** The single re-read state label, or null when none / ambiguous. */
@@ -199,10 +166,9 @@ type CapGuard =
       /** The cap exit landed (a park or an escalation); `code` is `parked:<arm>` or `escalated:<arm>`. */
       parked: { code: CapExitCode; written: boolean; counts: readonly CapCount[] };
       stamp?: undefined;
-      shadowOver?: undefined;
       prBodiesUnreadable?: undefined;
     }
-  | { parked: null; stamp: CapStamp; shadowOver: CapOver | null; prBodiesUnreadable: boolean };
+  | { parked: null; stamp: CapStamp; prBodiesUnreadable: boolean };
 
 /**
  * Whether the live PR record carries a Verifier-Core deep-QA FAIL marker, i.e. the PR is T4. The seam decides
@@ -217,43 +183,36 @@ async function recordShowsDeepQaFail(deps: SeamDeps, pr: number): Promise<boolea
 }
 
 /**
- * The ONE cap step (ADR-0047 D6/D7). Checks the caps for `attempt`, then:
- *  - enforce, over cap: park (`parkForCap`);
- *  - shadow, over a LIVE arm (`liveInShadow`): park exactly as in enforce, the park
- *    entry tagged `mode=shadow live=1` so the would-park triage can exclude it;
- *  - shadow, over a non-live arm: no park; the caller journals `would-park`.
+ * The ONE cap step (ADR-0047 D6/D7). Checks the caps for `attempt`; over cap it
+ * takes the arm's exit (`parkForCap`) instead of letting the attempt proceed.
  * A skipped check (fetch failure, INV-12) never parks.
  */
-export async function guardCaps(a: CapGuardAttempt, deps: SeamDeps, mode: LifecycleMode): Promise<CapGuard> {
+export async function guardCaps(a: CapGuardAttempt, deps: SeamDeps): Promise<CapGuard> {
   const check: CapCheck =
     a.attempt === null ? { status: "skipped" } : await checkCaps(deps, a.issue, a.attempt, a.pr);
   const stamp = new CapStamp(check);
   const over = check.status === "checked" ? check.evaluation.over : null;
   const prBodiesUnreadable = check.status === "skipped" && check.prBodiesUnreadable === true;
-  if (check.status !== "checked" || over === null) return { parked: null, stamp, shadowOver: null, prBodiesUnreadable };
-  const live = mode !== "enforce" && isLiveArm(over.arm);
-  if (mode === "enforce" || live) {
-    const park = await parkForCap(
-      {
-        issue: a.issue,
-        from: a.from,
-        over,
-        counts: check.evaluation.counts,
-        pr: a.pr,
-        actor: a.actor,
-        evidence: { ...stamp.extra(parkEntryProbe(deps, over)), ...(live ? { mode: "shadow", live: "1" } : {}) },
-      },
-      deps,
-    );
-    return {
-      parked: {
-        code: capExitOf(over.arm) === "escalate" ? `escalated:${over.arm}` : `parked:${over.arm}`,
-        written: park.written,
-        counts: check.evaluation.counts,
-      },
-    };
-  }
-  return { parked: null, stamp, shadowOver: over, prBodiesUnreadable };
+  if (check.status !== "checked" || over === null) return { parked: null, stamp, prBodiesUnreadable };
+  const park = await parkForCap(
+    {
+      issue: a.issue,
+      from: a.from,
+      over,
+      counts: check.evaluation.counts,
+      pr: a.pr,
+      actor: a.actor,
+      evidence: stamp.extra(parkEntryProbe(deps, over)),
+    },
+    deps,
+  );
+  return {
+    parked: {
+      code: capExitOf(over.arm) === "escalate" ? `escalated:${over.arm}` : `parked:${over.arm}`,
+      written: park.written,
+      counts: check.evaluation.counts,
+    },
+  };
 }
 
 /** The cap attempt an edge's `cap` field implies for this call, or null when it does not count. */
@@ -283,8 +242,8 @@ export interface AdvanceInput {
   /**
    * Optional compare-and-set precondition (#5318 INV-5): when given and the
    * re-read single state label differs (or is absent/ambiguous), `advance`
-   * refuses `from-mismatch` BEFORE any write, in BOTH modes. A stale caller
-   * premise (a snapshot-driven writer) is not a gate the shadow switch may bypass.
+   * refuses `from-mismatch` BEFORE any write: a stale caller premise (a
+   * snapshot-driven writer) never moves an issue.
    */
   from?: string;
 }
@@ -295,13 +254,8 @@ export type AdvanceResult =
       issue: number;
       from: string | null;
       to: LifecycleState;
-      mode: LifecycleMode;
-      /** Set in shadow when the transition would have been refused in enforce. */
-      wouldRefuse?: string;
       /** The seam's own post-write re-read (no extra gh read for callers). */
       observed: { state: string; labels: string[] };
-      /** Set in shadow when a cap check would have parked the issue in enforce. */
-      wouldPark?: string;
       /** Set when the issue already sat in `to`: nothing was written (#5584 INV-1). */
       noop?: true;
     }
@@ -309,7 +263,6 @@ export type AdvanceResult =
       ok: false;
       issue: number;
       code: string;
-      mode: LifecycleMode | null;
       written: boolean;
       /** A `parked:<arm>` or `escalated:<arm>` refusal carries the arm counts `parkForCap` rendered, so every caller sees why. */
       counts?: readonly CapCount[];
@@ -355,11 +308,10 @@ export function normaliseCloseReason(raw: string | undefined): string | undefine
 export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<AdvanceResult> {
   const issue = input.issue;
   if (!isLifecycleState(input.to)) {
-    return { ok: false, issue, code: "unknown-target-state", mode: null, written: false };
+    return { ok: false, issue, code: "unknown-target-state", written: false };
   }
   const to: LifecycleState = input.to;
   const closeReason = normaliseCloseReason(input.closeReason);
-  const mode = await deps.mode();
   let stamp = new CapStamp(null);
   const gateEvidence = input.evidence ?? {};
   const jr = async (e: LifecycleJournalEntry): Promise<void> => journalEntry(deps, issue, stamp.apply(e));
@@ -368,13 +320,13 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
   const before = await deps.view(issue);
   if (before.ok === false) {
     await jr(entry(deps, { kind: "refused", result: "refused:fetch-failed", written: false }, input));
-    return { ok: false, issue, code: "fetch-failed", mode, written: false };
+    return { ok: false, issue, code: "fetch-failed", written: false };
   }
 
   // 1a. a PR number re-reads as an issue row: refuse before any write or journal append (#5584 INV-4).
   if (isPullRequestUrl(before.row.url)) {
     logger.warn({ issue }, "[lifecycle] advance refused: not an issue (pull request)");
-    return { ok: false, issue, code: "not-an-issue", mode, written: false };
+    return { ok: false, issue, code: "not-an-issue", written: false };
   }
 
   // 2. derive state
@@ -387,28 +339,28 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
       ? stateLabels[0]
       : null;
 
-  // 2a. idempotent self-move: the issue already sits in `to`. Nothing to gate or write, in BOTH
-  //     modes; a `--from` that disagrees still refuses below, and a self-move is not a hold exit
+  // 2a. idempotent self-move: the issue already sits in `to`. Nothing to gate or write;
+  //     a `--from` that disagrees still refuses below, and a self-move is not a hold exit
   //     (#5584 INV-1/INV-2). A seam rule, not a table edge (INV-3).
   if (!isClosed && stateLabels.length === 1 && from === to && (input.from === undefined || input.from === from)) {
     await jr(entry(deps, { kind: "transition", from, result: "noop", written: false }, input));
-    return { ok: true, issue, from, to, mode, noop: true, observed: observedOf(before) };
+    return { ok: true, issue, from, to, noop: true, observed: observedOf(before) };
   }
 
-  // 3. human-hold exit: refused in BOTH modes, before the mode branch.
+  // 3. human-hold exit: always refused, before legality and the gate.
   if (!isClosed && stateLabels.some((s) => isHumanHold(s))) {
     await jr(
       entry(deps, { kind: "refused", from: stateLabels.join(","), result: "refused:human-hold-exit", written: false }, input),
     );
-    return { ok: false, issue, code: "human-hold-exit", mode, written: false };
+    return { ok: false, issue, code: "human-hold-exit", written: false };
   }
-  // A closed issue has nothing to advance: refused in both modes.
+  // A closed issue has nothing to advance.
   if (isClosed) {
     await jr(entry(deps, { kind: "refused", from, result: "refused:issue-closed", written: false }, input));
-    return { ok: false, issue, code: "issue-closed", mode, written: false };
+    return { ok: false, issue, code: "issue-closed", written: false };
   }
 
-  // 3a. caller premise (--from): refused in both modes, before any write (#5318 INV-5).
+  // 3a. caller premise (--from): refused before any write (#5318 INV-5).
   if (input.from !== undefined && from !== input.from) {
     await jr(
       entry(
@@ -417,7 +369,7 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
         input,
       ),
     );
-    return { ok: false, issue, code: "from-mismatch", mode, written: false };
+    return { ok: false, issue, code: "from-mismatch", written: false };
   }
 
   // 3b. legality lookup comes BEFORE the cap step, so an illegal move refuses
@@ -425,24 +377,20 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
   const transition = from === null ? undefined : findTransition(from as LifecycleState, to);
 
   // 3c. cap step: an edge carrying `cap` runs the ONE guardCaps step; over cap it parks
-  //     INSTEAD of writing the move (enforce, or a live arm in shadow).
-  let shadowOver: CapOver | null = null;
-  let shadowOverPr: number | null = null;
+  //     INSTEAD of writing the move.
   if (stateLabels.length === 1 && transition?.cap !== undefined) {
     const edge = capAttemptForEdge(transition.cap, gateEvidence);
     if (edge !== null) {
-      const guard = await guardCaps({ issue, from, attempt: edge.attempt, pr: edge.pr, actor: input.actor }, deps, mode);
+      const guard = await guardCaps({ issue, from, attempt: edge.attempt, pr: edge.pr, actor: input.actor }, deps);
       if (guard.parked !== null) {
-        return { ok: false, issue, code: guard.parked.code, mode, written: guard.parked.written, counts: guard.parked.counts };
+        return { ok: false, issue, code: guard.parked.code, written: guard.parked.written, counts: guard.parked.counts };
       }
       if (guard.prBodiesUnreadable && edge.attempt.kind === "qa-fail" && edge.pr !== null && (await recordShowsDeepQaFail(deps, edge.pr))) {
-        // Fail closed for a T4 PR (decided here, from the live PR record) in BOTH modes: deep-qa-fails is a live arm, and an uncounted T4 FAIL bounce could loop past its escalation. T1-T3 bounces self-heal.
+        // Fail closed for a T4 PR (decided here, from the live PR record): an uncounted T4 FAIL bounce could loop past its deep-qa-fails escalation. T1-T3 bounces self-heal.
         await jr(entry(deps, { kind: "refused", from, result: "refused:fetch-failed", written: false }, input));
-        return { ok: false, issue, code: "fetch-failed", mode, written: false };
+        return { ok: false, issue, code: "fetch-failed", written: false };
       }
       stamp = guard.stamp;
-      shadowOver = guard.shadowOver;
-      shadowOverPr = edge.pr;
     }
   }
 
@@ -511,10 +459,10 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
     verdict = evaluateGate(transition.gate, gateInput, records);
   }
 
-  // 6. mode branch
-  if (!verdict.ok && mode === "enforce") {
+  // 6. refuse on gate fail: nothing is written
+  if (!verdict.ok) {
     await jr(entry(deps, { kind: "refused", from, result: `refused:${verdict.code}`, written: false }, input));
-    return { ok: false, issue, code: verdict.code, mode, written: false };
+    return { ok: false, issue, code: verdict.code, written: false };
   }
 
   // 7. ONE gh write
@@ -526,7 +474,7 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
   if (write.ok === false) {
     const code = `write-failed:${write.code}`;
     await jr(entry(deps, { kind: "refused", from, result: code, written: false }, input));
-    return { ok: false, issue, code, mode, written: false };
+    return { ok: false, issue, code, written: false };
   }
 
   // 8. re-read verify
@@ -538,32 +486,16 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
       : after.row.labels.includes(to) && removed.every((s) => !after.row.labels.includes(s)));
   if (!verified) {
     await jr(entry(deps, { kind: "refused", from, result: "write-unverified", written: true }, input));
-    return { ok: false, issue, code: "write-unverified", mode, written: true };
+    return { ok: false, issue, code: "write-unverified", written: true };
   }
 
   // 9. journal (after verify, so `result` reflects what GitHub shows)
-  if (verdict.ok) {
-    await jr(entry(deps, { kind: "transition", from, result: "ok", written: true }, input));
-  } else {
-    await jr(
-      entry(deps, { kind: "refused", from, result: `shadow-would-refuse:${verdict.code}`, written: true }, input),
-    );
-  }
-  if (shadowOver !== null) await jr(shadowParkEntry(deps, shadowOver, from, shadowOverPr, input.actor ?? "cli"));
+  await jr(entry(deps, { kind: "transition", from, result: "ok", written: true }, input));
   if (to === "closed") {
     const exp = await deps.journal.expireOnClose(deps.repo, issue);
     if (exp.ok === false) logger.error({ issue, error: exp.error }, "[lifecycle] journal expire failed");
   }
-  return {
-    ok: true,
-    issue,
-    from,
-    to,
-    mode,
-    ...(verdict.ok ? {} : { wouldRefuse: verdict.code }),
-    observed: observedOf(after),
-    ...(shadowOver !== null ? { wouldPark: shadowOver.arm } : {}),
-  };
+  return { ok: true, issue, from, to, observed: observedOf(after) };
 }
 
 export function observedOf(after: IssueViewResult): { state: string; labels: string[] } {

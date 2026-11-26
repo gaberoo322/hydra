@@ -773,7 +773,12 @@ describe("suite-count-check --update-baseline on an unreadable baseline (#5107)"
     const dir = mkdtempSync(join(tmpdir(), "suite-count-corrupt-"));
     try {
       mkdirSync(join(dir, "scripts", "test"), { recursive: true });
+      mkdirSync(join(dir, "scripts", "lib"), { recursive: true });
       mkdirSync(join(dir, "test", "fixtures"), { recursive: true });
+      copyFileSync(
+        fileURLToPath(new URL("../scripts/lib/entrypoint.mjs", import.meta.url)),
+        join(dir, "scripts", "lib", "entrypoint.mjs"),
+      );
       copyFileSync(
         join(fileURLToPath(new URL("../scripts/test/suite-count-check.mjs", import.meta.url))),
         join(dir, "scripts", "test", "suite-count-check.mjs"),

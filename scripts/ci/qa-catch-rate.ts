@@ -85,6 +85,7 @@
  * `gh` calls to assemble a real window and prints the aggregate as JSON.
  */
 
+import { isEntrypoint } from "../lib/entrypoint.mjs";
 import {
   isFailVerdict,
   parseQaVerdictErrors,
@@ -379,22 +380,8 @@ export function computeCatchRate(
 // never overcounts it — the rate this yields is a conservative floor, never
 // an inflated one).
 // ---------------------------------------------------------------------------
-const isMain = (() => {
-  try {
-    return (
-      typeof process !== "undefined" &&
-      Array.isArray(process.argv) &&
-      typeof import.meta.url === "string" &&
-      process.argv[1] !== undefined &&
-      import.meta.url === `file://${process.argv[1]}`
-    );
-  } catch {
-    /* intentional: import.meta may be unavailable under some loaders; treat as not-main */
-    return false;
-  }
-})();
 
-if (isMain) {
+if (isEntrypoint(import.meta.url)) {
   const { execFileSync } = await import("node:child_process");
 
   const parseArg = (flag: string, fallback: string): string => {

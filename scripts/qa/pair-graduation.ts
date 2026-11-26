@@ -27,6 +27,7 @@
  *   npx tsx scripts/qa/pair-graduation.ts --from-inputs x.json
  */
 
+import { isEntrypoint } from "../lib/entrypoint.mjs";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { parseQaShadowLines, type ParsedQaShadowLine } from "../../src/qa/shadow-fold.ts";
@@ -404,20 +405,8 @@ function readCohortTrip(repoRoot: string): GraduationInputs["cohortTrip"] {
   }
 }
 
-const isMain = (() => {
-  try {
-    return (
-      Array.isArray(process.argv) &&
-      process.argv[1] !== undefined &&
-      import.meta.url === `file://${process.argv[1]}`
-    );
-  } catch {
-    /* intentional: import.meta unavailable outside a module host — not the CLI */
-    return false;
-  }
-})();
 
-if (isMain) {
+if (isEntrypoint(import.meta.url)) {
   const arg = (flag: string): string | null => {
     const i = process.argv.indexOf(flag);
     return i === -1 || i === process.argv.length - 1 ? null : (process.argv[i + 1] as string);

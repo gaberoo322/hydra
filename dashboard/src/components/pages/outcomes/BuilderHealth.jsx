@@ -455,20 +455,14 @@ function LifecycleRow({ parentExc, firstPass, parkRate }) {
                   <span
                     key={arm}
                     className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 font-mono"
-                    title={`${c.parks} parks, ${c.wouldPark} would-park`}
+                    title={`${c.parks} parks`}
                   >
                     {arm} {c.rate != null ? pct(c.rate, 1) : "—"}
-                    {parkRate.mode === "shadow" && c.wouldPark > 0 ? ` (${c.wouldPark} would-park)` : ""}
                   </span>
                 ))}
               </div>
               <div className="text-xs text-zinc-500 mt-1">
                 {parkRate.claimsOpened} claims, {parkRate.windowDays}d
-                {parkRate.mode === "shadow" && (
-                  <span className="ml-2 text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-zinc-700/50 text-zinc-400">
-                    shadow
-                  </span>
-                )}
               </div>
             </>
           ) : (

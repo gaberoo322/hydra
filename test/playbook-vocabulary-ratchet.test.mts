@@ -98,10 +98,10 @@ describe("playbook-vocabulary-ratchet: each banned shape is detected", () => {
 
 describe("playbook-vocabulary-ratchet: the Historical: exemption", () => {
   test("a line marked Historical: is exempt from every shape", () => {
-    const body = "not yet at src/gate.ts:42 in hydra-betting, the Untouchable Core, see #1945, kept for legacy, EMIT_CAP, INV-9, tracked as a follow-up, Step 0.6";
+    const body = "not yet at src/gate.ts:42 in hydra-betting, the Untouchable Core, see #1945, kept for legacy, six EMIT_CAP, INV-9, tracked as a follow-up, Step 0.6";
     assert.deepEqual(
       new Set(findHits(PB, body, AVOID).map((h: { shape: string }) => h.shape)),
-      new Set(SHAPES.filter((s: string) => s !== "shell-lines")),
+      new Set(SHAPES.filter((s: string) => s !== "shell-lines" && s !== "mktemp-no-trap")),
     );
     assert.deepEqual(hits(`Historical: ${body}`), []);
   });
@@ -245,7 +245,7 @@ describe("playbook-vocabulary-ratchet: issue-cite, back-compat and shell-lines s
 
   test("new shapes sit after the original four so existing hit order is unchanged", () => {
     assert.deepEqual(SHAPES.slice(0, 4), ["status", "line-cite", "target", "avoid-term"]);
-    assert.deepEqual(SHAPES.slice(4), ["issue-cite", "back-compat", "shell-lines", "symbol-cite", "invariant-cite", "process-meta", "step-cite"]);
+    assert.deepEqual(SHAPES.slice(4), ["issue-cite", "back-compat", "shell-lines", "symbol-cite", "invariant-cite", "process-meta", "step-cite", "mktemp-no-trap", "count-before-const"]);
   });
 });
 
@@ -349,6 +349,56 @@ describe("playbook-vocabulary-ratchet: the real playbooks", () => {
   test("the standard the report points at defines the playbook rules", () => {
     const standard = readFileSync(join(REPO_ROOT, STANDARD_REL), "utf8");
     assert.match(standard, /^### STD-PLAYBOOK-CURRENT-BEHAVIOUR$/m);
+  });
+});
+
+describe("playbook-vocabulary-ratchet: the mktemp-no-trap shape", () => {
+  const mk = (text: string): string[] => hits(text, "mktemp-no-trap");
+
+  test("a mktemp call in a fenced shell block with no trap is one hit per call", () => {
+    assert.deepEqual(
+      mk(["```bash", 'A=$(mktemp)', 'run > "$A" || exit', 'rm -f "$A"', 'B=$(mktemp -d)', "```"].join("\n")),
+      ["2 mktemp-no-trap mktemp", "5 mktemp-no-trap mktemp"],
+    );
+  });
+
+  test("a trap anywhere in the same block discharges every mktemp, including mktemp -d", () => {
+    assert.deepEqual(mk(["```bash", 'A=$(mktemp -d)', "trap 'rm -rf \"$A\"' EXIT", "```"].join("\n")), []);
+    assert.deepEqual(mk(["```sh", "trap 'rm -f \"$A\"' EXIT", 'A=$(mktemp)', "```"].join("\n")), []);
+  });
+
+  test("a trap in another block does not discharge this block", () => {
+    assert.deepEqual(
+      mk(["```bash", "trap true EXIT", "```", "", "```bash", "A=$(mktemp)", "```"].join("\n")),
+      ["6 mktemp-no-trap mktemp"],
+    );
+  });
+
+  test("prose, non-shell fences and a Historical: line are silent", () => {
+    assert.deepEqual(mk("Use mktemp for scratch files."), []);
+    assert.deepEqual(mk(["```text", "A=$(mktemp)", "```"].join("\n")), []);
+    assert.deepEqual(mk(["```bash", "Historical: A=$(mktemp)", "```"].join("\n")), []);
+  });
+});
+
+describe("playbook-vocabulary-ratchet: the count-before-const shape", () => {
+  const cnt = (text: string): string[] => hits(text, "count-before-const");
+
+  test("a cardinal word or digit run before a constant, with or without a backtick, is a hit", () => {
+    assert.deepEqual(cnt("the six `VERIFIER_CORE_PATHS` files, Two EMIT_CAP rows and 12 `SOME_LIST`."), [
+      "1 count-before-const six `VERIFIER_CORE_PATHS",
+      "1 count-before-const Two EMIT_CAP",
+      "1 count-before-const 12 `SOME_LIST",
+    ]);
+  });
+
+  test("a filename stem, a one-segment constant and a #NNNN digit run are silent", () => {
+    assert.deepEqual(cnt("one CONTEXT.md, see 4729 E2BIG, per #4729 EMIT_CAP and one HTTP OK."), []);
+  });
+
+  test("a fenced block and a Historical: line are skipped", () => {
+    assert.deepEqual(cnt(["```text", "six EMIT_CAP", "```"].join("\n")), []);
+    assert.deepEqual(cnt("Historical: six EMIT_CAP"), []);
   });
 });
 

@@ -1,0 +1,1 @@
+- docs: burn the hydra-autopilot playbook invariant-cite and back-compat vocabulary baseline rows to 0 (#5724)

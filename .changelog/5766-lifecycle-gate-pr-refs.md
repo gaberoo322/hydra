@@ -1,0 +1,1 @@
+- fix: the lifecycle pr-open/close gates and reconcile's PR candidate filter ask the PR refs module whether a body closes an issue; a negated ref ("does not close #N") no longer satisfies them, the colon form ("Closes: #N") and zero-padded refs now do (#5766)

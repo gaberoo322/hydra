@@ -145,7 +145,9 @@ export function capEventsIndexKey(repo: string): string {
   return `hydra:lifecycle:cap-events:${repo}`;
 }
 
-export type CapEventKind = "park" | "would-park" | "claim";
+export type CapEventKind = "park" | "claim";
+
+const CAP_EVENT_KINDS: ReadonlySet<string> = new Set<CapEventKind>(["park", "claim"]);
 
 export interface CapEventRecord {
   kind: CapEventKind;
@@ -158,25 +160,16 @@ export interface CapEventRecord {
 
 /**
  * Pure: classify one journal entry as a cap event, or `null` when it is not
- * one. A cap exit (`to=parked` or `ready-for-human`, reason `cap:<arm>`) is a `park`; a shadow
- * refusal (`result` `shadow-would-park:<arm>`) is a `would-park`; a
- * `claim-opened` entry is a `claim` (the park-rate denominator).
+ * one. A WRITTEN cap exit (`to=parked` or `ready-for-human`, reason
+ * `cap:<arm>`) is a `park`; a `claim-opened` entry is a `claim` (the park-rate
+ * denominator). Anything else is `null`, including a journal row from before
+ * ADR-0047 Decision 7's retirement whose `result` names a retired kind.
  */
 export function capEventRecord(issue: number, entry: LifecycleJournalEntry): CapEventRecord | null {
   const pr = Number(entry.evidence?.pr);
   const prPart = Number.isInteger(pr) && pr > 0 ? { pr } : {};
   if (entry.kind === "claim-opened") {
     return { kind: "claim", issue, ts: entry.ts, actor: entry.actor };
-  }
-  if (typeof entry.result === "string" && entry.result.startsWith("shadow-would-park:")) {
-    return {
-      kind: "would-park",
-      issue,
-      ts: entry.ts,
-      arm: entry.result.slice("shadow-would-park:".length),
-      ...prPart,
-      actor: entry.actor,
-    };
   }
   if ((entry.to === "parked" || entry.to === "ready-for-human") && entry.written === true && typeof entry.reason === "string" && entry.reason.startsWith("cap:")) {
     return { kind: "park", issue, ts: entry.ts, arm: entry.reason.slice("cap:".length), ...prPart, actor: entry.actor };
@@ -188,14 +181,20 @@ export type ListCapEventsResult =
   | { ok: true; events: CapEventRecord[] }
   | { ok: false; error: string };
 
-/** Cap events with `ts >= sinceMs`, oldest first; malformed members are skipped (logged). */
+/**
+ * Cap events with `ts >= sinceMs`, oldest first; malformed members are skipped
+ * (logged). A well-formed member whose `kind` is not a current
+ * {@link CapEventKind} is dropped without a log: the index kept a third kind
+ * until #5771 and those members age out with the 30d retention.
+ */
 export async function listCapEvents(repo: string, sinceMs: number): Promise<ListCapEventsResult> {
   try {
     const raw: string[] = await getRedisConnection().zrangebyscore(capEventsIndexKey(repo), sinceMs, "+inf");
     const events: CapEventRecord[] = [];
     for (const row of raw) {
       try {
-        events.push(JSON.parse(row) as CapEventRecord);
+        const record = JSON.parse(row) as CapEventRecord | null;
+        if (record !== null && typeof record === "object" && CAP_EVENT_KINDS.has(record.kind)) events.push(record);
       } catch (parseErr) {
         logger.error({ err: parseErr }, "[lifecycle-journal] skipping malformed cap-event member");
       }

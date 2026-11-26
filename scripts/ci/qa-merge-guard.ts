@@ -32,6 +32,7 @@
  * Prints the result JSON on stdout. Exit 0 = allowed, 1 = denied, 2 = usage error.
  */
 
+import { isEntrypoint } from "../lib/entrypoint.mjs";
 import {
   isFailVerdict,
   parseQaFixCommitTrailer,
@@ -273,22 +274,8 @@ export function runQaMergeGuard(
 // CLI — REST `gh api` only.
 // ---------------------------------------------------------------------------
 
-const isMain = (() => {
-  try {
-    return (
-      typeof process !== "undefined" &&
-      Array.isArray(process.argv) &&
-      typeof import.meta.url === "string" &&
-      process.argv[1] !== undefined &&
-      import.meta.url === `file://${process.argv[1]}`
-    );
-  } catch {
-    /* intentional: import.meta may be unavailable under some loaders; treat as not-main */
-    return false;
-  }
-})();
 
-if (isMain) {
+if (isEntrypoint(import.meta.url)) {
   const { execFileSync } = await import("node:child_process");
 
   const parseArg = (flag: string, fallback: string): string => {

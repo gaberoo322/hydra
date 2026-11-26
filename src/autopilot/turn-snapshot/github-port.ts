@@ -74,6 +74,8 @@ export interface TurnSnapshotGithub {
   listOpenIssueBoardRows(limit: number): Promise<GhJsonRead>;
   /** Open issues with `number,labels` — the untriaged-orphan backstop read (ADR-0043 slice 2). */
   listOpenIssueLabelRows(limit: number): Promise<GhJsonRead>;
+  /** Open issues with `number,labels,body` — the untriaged-orphan collector's read (the body feeds `isZeroStateExempt`). */
+  listOpenIssueLabelBodyRows(limit: number): Promise<GhJsonRead>;
   // --- slice 3 (#4931): grill/dev-ready picks, Candidate Exclusions, active dev_orch ---
   /** Open `ready-for-agent` issues with {@link READY_FOR_AGENT_ISSUE_FIELDS} — the grill-candidate AND Candidate Exclusion pool. */
   listReadyForAgentIssues(limit: number): Promise<GhJsonRead>;
@@ -269,6 +271,9 @@ export function createTurnSnapshotGithub(opts: TurnSnapshotGithubOptions = {}): 
     },
     async listOpenIssueLabelRows(limit) {
       return parseJsonRead(await read(["issue", "list", "--repo", repo, "--state", "open", "--limit", String(limit), "--json", "number,labels"]));
+    },
+    async listOpenIssueLabelBodyRows(limit) {
+      return parseJsonRead(await read(["issue", "list", "--repo", repo, "--state", "open", "--limit", String(limit), "--json", "number,labels,body"]));
     },
     async listReadyForAgentIssues(limit) {
       return parseJsonRead(

@@ -157,6 +157,20 @@ export function declaresEpicChildren(body: string | null | undefined): boolean {
 }
 
 /**
+ * True when the ADR-0047 D2 zero-state backstop must leave an open issue alone:
+ * it declares Epic children ({@link declaresEpicChildren}), carries `keep-open`,
+ * or carries a `wayfinder:*` label. The ONE definition — reconcile's relabel
+ * backstop and the Turn Snapshot's untriaged-orphan count both call it.
+ */
+export function isZeroStateExempt(issue: { readonly labels: readonly string[]; readonly body?: string | null }): boolean {
+  return (
+    declaresEpicChildren(issue.body) ||
+    issue.labels.includes("keep-open") ||
+    issue.labels.some((l) => l.startsWith("wayfinder:"))
+  );
+}
+
+/**
  * Pull the STRICT blocker `#N` refs from a markdown body — the numbers this
  * issue declares it is blocked by / depends on, deduped, in order of first
  * appearance, MINUS every ref the SAME body declares as its Epic (issue #4823,

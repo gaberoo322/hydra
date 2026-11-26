@@ -172,7 +172,7 @@ fi
 # copy of the state-label vocabulary) is gone: the stale lists come from a Turn
 # Snapshot read one turn after it was stored, so each advance passes
 # `--from <listed state>` and the seam's compare-and-set refuses `from-mismatch`
-# (in shadow AND enforce, before any write) when the issue has since moved on,
+# (before any write) when the issue has since moved on,
 # notably QA PASS landing it in `qa-passed`. ANY non-zero exit (a refusal code,
 # `from-mismatch`, `parked:*`, `write-failed:*`) skips the issue: there is NO
 # fallback to a direct label write.
