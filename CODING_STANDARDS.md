@@ -166,6 +166,4 @@ enforced-by: scripts/ci/playbook-vocabulary-ratchet.ts
 
 Move only rows for changed files. A row a manifest test forces counts as changed. Never commit a blanket writer's output. A raised or seeded row needs a PR-body line `Baseline-raise: <fixture-path> <row-key> — <reason>`. An undisclosed raise, or a row for a file outside the diff, is a medium finding, reviewer-fixable as ADR-0046 class A.
 
-A ceiling Ratchet passes when a measurement falls below its baseline: the verdict carries a `(hint)` naming the baseline file and the lowerable rows, and lowering them is optional. Only a raised or new row fails. A Ratchet whose baseline must equal the tree opts in with `stale: "fail"` plus a written `staleReason` in its policy (`scripts/ci/ratchet.ts`); the default is the ceiling.
-
 enforced-by: reviewer, scripts/ci/baseline-raise-check.ts (advisory)

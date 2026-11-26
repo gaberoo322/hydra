@@ -140,12 +140,12 @@ describe("test-source-read ratchet (measure against a tmp root, INV-3)", () => {
     assert.match(added.advice, /--write-baseline --allow-grow/);
   });
 
-  it("a row whose file stopped reading code, or vanished, is stale and fails", async () => {
+  it("a row whose file stopped reading code, or vanished, is stale and only hints", async () => {
     const v = await verdictFor(
       { "a.test.mts": "export {};\n" },
       { [readerRow("test/a.test.mts", "behaviour")]: 1, [readerRow("test/gone.test.mts", "behaviour")]: 1 },
     );
-    assert.equal(v.ok, false);
+    assert.equal(v.ok, true, v.advice);
     assert.deepEqual(v.stale, [readerRow("test/a.test.mts", "behaviour"), readerRow("test/gone.test.mts", "behaviour")]);
   });
 
@@ -161,6 +161,6 @@ describe("test-source-read ratchet (measure against a tmp root, INV-3)", () => {
     assert.deepEqual(grew.added, [pinRow("test/a.test.mts", "code")]);
     const shrank = await verdictFor({ "a.test.mts": READER }, { ...kind, [pinRow("test/a.test.mts", "code")]: 1 });
     assert.deepEqual(shrank.stale, [pinRow("test/a.test.mts", "code")]);
-    assert.equal(shrank.ok, false);
+    assert.equal(shrank.ok, true, shrank.advice);
   });
 });

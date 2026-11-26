@@ -499,12 +499,12 @@ describe("prose-drift: verification never throws on unreadable inputs", () => {
     });
   });
 
-  test("verdict names a STALE baseline row and fails (stale: fail)", async () => {
+  test("verdict names a stale baseline row as a hint and passes", async () => {
     const seeded = `${JSON.stringify(["docs/live.md:path:src/fixed.ts", ...LIVE_ROWS])}\n`;
     await withFixture(scannableTree(seeded), async (root) => {
       gitTrack(root);
       const v = await proseDriftRatchet.verdict(root);
-      strictEqual(v.ok, false);
+      strictEqual(v.ok, true, v.advice);
       deepStrictEqual(v.added, []);
       deepStrictEqual(v.stale, ["docs/live.md:path:src/fixed.ts"]);
     });
