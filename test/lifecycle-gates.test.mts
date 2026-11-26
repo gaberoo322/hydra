@@ -1,8 +1,8 @@
 /**
- * Lifecycle gate predicates (pure) and the writer-seam spine under shadow /
- * enforce with injected deps — no gh, no Redis (ADR-0047, issue #5310).
+ * Lifecycle gate predicates (pure) and the writer-seam spine with injected
+ * deps — no gh, no Redis (ADR-0047, issue #5310).
  */
-import { test, describe, mock } from "node:test";
+import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import * as gatesModule from "../src/lifecycle/gates.ts";
@@ -31,8 +31,6 @@ import {
   evaluateGate,
   openClaim,
   releaseClaim,
-  resolveLifecycleMode,
-  loadLifecycleMode,
   type BlockerRecord,
   type ClaimRecord,
   type CommentRecord,
@@ -40,11 +38,9 @@ import {
   type GateInput,
   type GateRecords,
   type SeamDeps,
-  type LifecycleMode,
 } from "../src/lifecycle/index.ts";
 import { isUnsanctionedHoldExit } from "../src/lifecycle/hold-exit.ts";
 import type { LifecycleJournalEntry } from "../src/redis/lifecycle-journal.ts";
-import { logger } from "../src/logger.ts";
 
 function gi(over: Partial<GateInput> = {}): GateInput {
   return { issue: 10, from: "in-progress", to: "needs-qa", flags: [], evidence: {}, ...over };
@@ -208,65 +204,6 @@ describe("gate predicates (INV-7, INV-8)", () => {
   });
 });
 
-describe("mode resolution (INV-12)", () => {
-  test("is total and fails closed: every input enforces, and only the literal 'enforce' carries no reason", () => {
-    assert.deepEqual(resolveLifecycleMode(undefined), { mode: "enforce", reason: "config-missing" });
-    assert.deepEqual(resolveLifecycleMode(null), { mode: "enforce", reason: "value-malformed" });
-    assert.deepEqual(resolveLifecycleMode([]), { mode: "enforce", reason: "value-malformed" });
-    assert.deepEqual(resolveLifecycleMode({}), { mode: "enforce", reason: "key-missing" });
-    assert.deepEqual(resolveLifecycleMode({ "lifecycle-seam": "ENFORCE" }), { mode: "enforce", reason: "value-malformed" });
-    assert.deepEqual(resolveLifecycleMode({ "lifecycle-seam": 1 }), { mode: "enforce", reason: "value-malformed" });
-    assert.deepEqual(resolveLifecycleMode({ "lifecycle-seam": "shadow" }), { mode: "enforce", reason: "shadow-retired" });
-    assert.deepEqual(resolveLifecycleMode({ "lifecycle-seam": "enforce" }), { mode: "enforce", reason: null });
-  });
-
-  test("loader maps a missing file, an unreadable file and bad JSON to enforce, and the committed file says enforce", async () => {
-    const errSpy = mock.method(logger, "error", () => {});
-    try {
-      const enoent = async () => { throw Object.assign(new Error("nope"), { code: "ENOENT" }); };
-      const eacces = async () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); };
-      assert.deepEqual(await loadLifecycleMode("/x", { readFile: enoent }), { mode: "enforce", reason: "config-missing" });
-      assert.deepEqual(await loadLifecycleMode("/x", { readFile: eacces }), { mode: "enforce", reason: "config-unreadable" });
-      assert.deepEqual(await loadLifecycleMode("/x", { readFile: async () => "{oops" }), { mode: "enforce", reason: "value-malformed" });
-      assert.equal(errSpy.mock.callCount(), 3);
-      const real = await loadLifecycleMode(process.cwd());
-      assert.deepEqual(real, { mode: "enforce", reason: null });
-      assert.equal(errSpy.mock.callCount(), 3, "an explicit enforce is silent");
-    } finally {
-      errSpy.mock.restore();
-    }
-  });
-
-  const FALLBACKS: Array<{ name: string; reason: string; readFile: (path: string) => Promise<string> }> = [
-    { name: "no config", reason: "config-missing", readFile: async () => { throw Object.assign(new Error("nope"), { code: "ENOENT" }); } },
-    { name: "an unreadable config", reason: "config-unreadable", readFile: async () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); } },
-    { name: "a malformed config", reason: "value-malformed", readFile: async () => "{oops" },
-    { name: "a config without the key", reason: "key-missing", readFile: async () => "{}" },
-    { name: "an unknown value", reason: "value-malformed", readFile: async () => JSON.stringify({ "lifecycle-seam": "audit" }) },
-    { name: "the retired literal 'shadow'", reason: "shadow-retired", readFile: async () => JSON.stringify({ "lifecycle-seam": "shadow" }) },
-  ];
-  for (const f of FALLBACKS) {
-    test(`${f.name}: the loader logs the reason loudly and the seam refuses on gate fail with no write`, async () => {
-      const errSpy = mock.method(logger, "error", () => {});
-      try {
-        const h = harness(["needs-triage"], "shadow");
-        h.deps.mode = async () => (await loadLifecycleMode("/x", { readFile: f.readFile })).mode;
-        const res = await advance({ issue: 10, to: "in-progress" }, h.deps);
-        assert.deepEqual(res, { ok: false, issue: 10, code: "illegal-transition", mode: "enforce", written: false });
-        assert.equal(h.edits.length, 0);
-        assert.equal(h.journal[0].result, "refused:illegal-transition");
-        assert.equal(h.journal[0].written, false);
-        assert.ok(errSpy.mock.callCount() >= 1, "the fallback is logged");
-        for (const call of errSpy.mock.calls) {
-          assert.equal((call.arguments[0] as { reason?: string }).reason, f.reason);
-        }
-      } finally {
-        errSpy.mock.restore();
-      }
-    });
-  }
-});
-
 // ---------------------------------------------------------------------------
 // Seam spine with injected deps
 // ---------------------------------------------------------------------------
@@ -282,7 +219,6 @@ interface Harness {
 
 function harness(
   labels: string[],
-  mode: LifecycleMode,
   opts: {
     viewFails?: boolean;
     writeFails?: boolean;
@@ -302,7 +238,6 @@ function harness(
   });
   h.deps = {
     repo: "o/r",
-    mode: async () => mode,
     view: async () => (opts.viewFails ? { ok: false, code: "gh-failed" } : { ok: true, row: row() }),
     edit: async (issue, l) => {
       h.edits.push({ issue, ...l });
@@ -342,10 +277,10 @@ function harness(
 
 describe("seam spine (INV-3..6)", () => {
   test("legal ungated transition writes ONE edit, verifies and journals kind=transition", async () => {
-    const h = harness(["ready-for-agent", "enhancement"], "shadow");
+    const h = harness(["ready-for-agent", "enhancement"]);
     const res = await advance({ issue: 10, to: "in-progress" }, h.deps);
     assert.deepEqual(res, {
-      ok: true, issue: 10, from: "ready-for-agent", to: "in-progress", mode: "shadow",
+      ok: true, issue: 10, from: "ready-for-agent", to: "in-progress",
       observed: { state: "OPEN", labels: ["enhancement", "in-progress"] },
     });
     assert.deepEqual(h.edits, [{ issue: 10, remove: ["ready-for-agent"], add: ["in-progress"] }]);
@@ -356,112 +291,93 @@ describe("seam spine (INV-3..6)", () => {
     assert.deepEqual(h.state.labels.sort(), ["enhancement", "in-progress"]);
   });
 
-  test("shadow: an illegal transition STILL writes and journals one refused row", async () => {
-    const h = harness(["needs-triage"], "shadow");
+  test("an illegal transition is refused with no write", async () => {
+    const h = harness(["needs-triage"]);
     const res = await advance({ issue: 10, to: "in-progress" }, h.deps);
-    assert.equal(res.ok, true);
-    assert.equal(res.ok && res.wouldRefuse, "illegal-transition");
-    assert.equal(h.edits.length, 1);
-    assert.equal(h.journal.length, 1);
-    assert.equal(h.journal[0].kind, "refused");
-    assert.equal(h.journal[0].result, "shadow-would-refuse:illegal-transition");
-    assert.equal(h.journal[0].written, true);
-  });
-
-  test("enforce: the same transition is refused with no write", async () => {
-    const h = harness(["needs-triage"], "enforce");
-    const res = await advance({ issue: 10, to: "in-progress" }, h.deps);
-    assert.deepEqual(res, { ok: false, issue: 10, code: "illegal-transition", mode: "enforce", written: false });
+    assert.deepEqual(res, { ok: false, issue: 10, code: "illegal-transition", written: false });
     assert.equal(h.edits.length, 0);
     assert.equal(h.journal[0].result, "refused:illegal-transition");
     assert.equal(h.journal[0].written, false);
   });
 
-  for (const mode of ["shadow", "enforce"] as const) {
-    for (const hold of ["ready-for-human", "parked", "hitl-grill", "needs-info"]) {
-      test(`human-hold exit from ${hold} is refused in ${mode} with no write (INV-3)`, async () => {
-        const h = harness([hold], mode);
-        const res = await advance({ issue: 10, to: "ready-for-agent", reason: "scoped", rationale: "x" }, h.deps);
-        assert.equal(res.ok, false);
-        assert.equal("code" in res ? res.code : null, "human-hold-exit");
-        assert.equal(h.edits.length, 0);
-        assert.equal(h.closes.length, 0);
-        assert.equal(h.journal[0].kind, "refused");
-        assert.equal(h.journal[0].result, "refused:human-hold-exit");
-      });
-    }
-  }
-
-  // #5318 INV-5: the optional --from compare-and-set refuses BEFORE any write in both modes.
-  for (const mode of ["shadow", "enforce"] as const) {
-    test(`--from mismatch (live qa-passed, caller premise in-progress) is refused from-mismatch in ${mode} with no write`, async () => {
-      const h = harness(["qa-passed"], mode);
-      const res = await advance({ issue: 10, to: "ready-for-agent", from: "in-progress" }, h.deps);
-      assert.deepEqual(res, { ok: false, issue: 10, code: "from-mismatch", mode, written: false });
+  for (const hold of ["ready-for-human", "parked", "hitl-grill", "needs-info"]) {
+    test(`human-hold exit from ${hold} is refused with no write (INV-3)`, async () => {
+      const h = harness([hold]);
+      const res = await advance({ issue: 10, to: "ready-for-agent", reason: "scoped", rationale: "x" }, h.deps);
+      assert.equal(res.ok, false);
+      assert.equal("code" in res ? res.code : null, "human-hold-exit");
       assert.equal(h.edits.length, 0);
+      assert.equal(h.closes.length, 0);
       assert.equal(h.journal[0].kind, "refused");
-      assert.equal(h.journal[0].result, "refused:from-mismatch");
-    });
-
-    test(`--from refuses a double-state set and a state-less issue in ${mode}`, async () => {
-      for (const labels of [["in-progress", "needs-qa"], [] as string[]]) {
-        const h = harness(labels, mode);
-        const res = await advance({ issue: 10, to: "ready-for-agent", from: "in-progress" }, h.deps);
-        assert.equal(res.ok, false);
-        assert.equal("code" in res ? res.code : null, "from-mismatch");
-        assert.equal(h.edits.length, 0);
-      }
+      assert.equal(h.journal[0].result, "refused:human-hold-exit");
     });
   }
+
+  // #5318 INV-5: the optional --from compare-and-set refuses BEFORE any write.
+  test("--from mismatch (live qa-passed, caller premise in-progress) is refused from-mismatch with no write", async () => {
+    const h = harness(["qa-passed"]);
+    const res = await advance({ issue: 10, to: "ready-for-agent", from: "in-progress" }, h.deps);
+    assert.deepEqual(res, { ok: false, issue: 10, code: "from-mismatch", written: false });
+    assert.equal(h.edits.length, 0);
+    assert.equal(h.journal[0].kind, "refused");
+    assert.equal(h.journal[0].result, "refused:from-mismatch");
+  });
+
+  test("--from refuses a double-state set and a state-less issue", async () => {
+    for (const labels of [["in-progress", "needs-qa"], [] as string[]]) {
+      const h = harness(labels);
+      const res = await advance({ issue: 10, to: "ready-for-agent", from: "in-progress" }, h.deps);
+      assert.equal(res.ok, false);
+      assert.equal("code" in res ? res.code : null, "from-mismatch");
+      assert.equal(h.edits.length, 0);
+    }
+  });
 
   test("--from matching the live single state proceeds exactly like the unconditional advance", async () => {
-    const h = harness(["in-progress"], "shadow");
+    const h = harness(["in-progress"]);
     const res = await advance({ issue: 10, to: "ready-for-agent", from: "in-progress" }, h.deps);
     assert.equal(res.ok, true);
     assert.equal(h.edits.length, 1);
   });
 
   test("blocked -> needs-qa is a legal reconcile edge gated on an open PR (#5318 INV-10)", async () => {
-    const h = harness(["blocked"], "enforce");
+    const h = harness(["blocked"]);
     const noPr = await advance({ issue: 10, to: "needs-qa", from: "blocked" }, h.deps);
     assert.equal(noPr.ok, false, "without pr evidence the pr-open gate refuses");
     assert.notEqual("code" in noPr ? noPr.code : null, "illegal-transition");
   });
 
   test("a failed re-read refuses fetch-failed and never writes (INV-4)", async () => {
-    const h = harness(["ready-for-agent"], "shadow", { viewFails: true });
+    const h = harness(["ready-for-agent"], { viewFails: true });
     const res = await advance({ issue: 10, to: "in-progress" }, h.deps);
     assert.equal("code" in res ? res.code : null, "fetch-failed");
     assert.equal(h.edits.length, 0);
   });
 
   test("a failed gh write yields write-failed:<code>, written=false", async () => {
-    const h = harness(["ready-for-agent"], "shadow", { writeFails: true });
+    const h = harness(["ready-for-agent"], { writeFails: true });
     const res = await advance({ issue: 10, to: "in-progress" }, h.deps);
-    assert.deepEqual(res, { ok: false, issue: 10, code: "write-failed:gh-failed", mode: "shadow", written: false });
+    assert.deepEqual(res, { ok: false, issue: 10, code: "write-failed:gh-failed", written: false });
     assert.equal(h.journal[0].result, "write-failed:gh-failed");
   });
 
   test("a write GitHub does not reflect yields write-unverified", async () => {
-    const h = harness(["ready-for-agent"], "shadow", { noApply: true });
+    const h = harness(["ready-for-agent"], { noApply: true });
     const res = await advance({ issue: 10, to: "in-progress" }, h.deps);
     assert.equal("code" in res ? res.code : null, "write-unverified");
     assert.equal("written" in res ? res.written : null, true);
     assert.equal(h.journal[0].result, "write-unverified");
   });
 
-  test("a gated transition's fetch failure is a would-refuse in shadow and a refusal in enforce", async () => {
-    const shadow = harness(["in-progress"], "shadow");
-    const s = await advance({ issue: 10, to: "needs-qa", evidence: { pr: "55" } }, shadow.deps);
-    assert.equal(s.ok && s.wouldRefuse, "fetch-failed");
-    const enforce = harness(["in-progress"], "enforce");
+  test("a gated transition's fetch failure is a refusal with no write", async () => {
+    const enforce = harness(["in-progress"]);
     const e = await advance({ issue: 10, to: "needs-qa", evidence: { pr: "55" } }, enforce.deps);
     assert.equal("code" in e ? e.code : null, "fetch-failed");
     assert.equal(enforce.edits.length, 0);
   });
 
   test("pr-open passes with a matching open PR", async () => {
-    const h = harness(["in-progress"], "enforce", { pr: { number: 55, state: "OPEN", body: "Closes #10" } });
+    const h = harness(["in-progress"], { pr: { number: 55, state: "OPEN", body: "Closes #10" } });
     const res = await advance({ issue: 10, to: "needs-qa", evidence: { pr: "55" } }, h.deps);
     assert.equal(res.ok, true);
     assert.equal(h.journal[0].kind, "transition");
@@ -469,13 +385,13 @@ describe("seam spine (INV-3..6)", () => {
   });
 
   test("dispatch with needs-design-concept and no artifact is refused in enforce", async () => {
-    const h = harness(["ready-for-agent", "needs-design-concept"], "enforce", { dc: { exists: false, status: "" } });
+    const h = harness(["ready-for-agent", "needs-design-concept"], { dc: { exists: false, status: "" } });
     const res = await advance({ issue: 10, to: "in-progress" }, h.deps);
     assert.equal("code" in res ? res.code : null, "design-concept-missing");
   });
 
   test("closing uses ONE close call, verifies CLOSED, and starts journal retention", async () => {
-    const h = harness(["in-progress"], "enforce", { pr: { number: 55, state: "MERGED", body: "Closes #10" } });
+    const h = harness(["in-progress"], { pr: { number: 55, state: "MERGED", body: "Closes #10" } });
     const res = await advance({ issue: 10, to: "closed", evidence: { pr: "55" } }, h.deps);
     assert.equal(res.ok, true);
     assert.deepEqual(h.closes, [{ issue: 10, reason: "completed" }]);
@@ -483,8 +399,8 @@ describe("seam spine (INV-3..6)", () => {
     assert.deepEqual(h.expired, [10]);
   });
 
-  test("a closed issue is refused in both modes; an unknown target is a usage refusal", async () => {
-    const h = harness(["in-progress"], "shadow");
+  test("a closed issue is refused; an unknown target is a usage refusal", async () => {
+    const h = harness(["in-progress"]);
     h.state.state = "CLOSED";
     const res = await advance({ issue: 10, to: "needs-qa" }, h.deps);
     assert.equal("code" in res ? res.code : null, "issue-closed");
@@ -492,18 +408,15 @@ describe("seam spine (INV-3..6)", () => {
     assert.equal("code" in bad ? bad.code : null, "unknown-target-state");
   });
 
-  test("two state labels are invalid: shadow writes and removes both, enforce refuses", async () => {
-    const shadow = harness(["needs-qa", "in-progress"], "shadow");
-    const s = await advance({ issue: 10, to: "needs-dev-resume" }, shadow.deps);
-    assert.equal(s.ok && s.wouldRefuse, "state-ambiguous");
-    assert.deepEqual(shadow.edits[0].remove.sort(), ["in-progress", "needs-qa"]);
-    const enforce = harness(["needs-qa", "in-progress"], "enforce");
+  test("two state labels are invalid: the move is refused state-ambiguous with no write", async () => {
+    const enforce = harness(["needs-qa", "in-progress"]);
     const e = await advance({ issue: 10, to: "needs-dev-resume" }, enforce.deps);
     assert.equal("code" in e ? e.code : null, "state-ambiguous");
+    assert.equal(enforce.edits.length, 0);
   });
 
   test("a judgment transition needs reason + rationale in enforce", async () => {
-    const h = harness(["needs-triage"], "enforce");
+    const h = harness(["needs-triage"]);
     const bad = await advance({ issue: 10, to: "needs-research" }, h.deps);
     assert.equal("code" in bad ? bad.code : null, "reason-required");
     const ok = await advance({ issue: 10, to: "needs-research", reason: "unknown-root-cause", rationale: "cause unclear" }, h.deps);
@@ -513,7 +426,7 @@ describe("seam spine (INV-3..6)", () => {
 
 describe("claim / release (INV-11)", () => {
   test("claim journals claim-opened and changes no label; a held claim is reported", async () => {
-    const h = harness(["in-progress"], "shadow");
+    const h = harness(["in-progress"]);
     const res = await openClaim({ issue: 10, dispatchId: "d1", class: "dev_orch", run: "r1" }, h.deps);
     assert.equal(res.ok, true);
     assert.equal(h.journal[0].kind, "claim-opened");
@@ -529,7 +442,7 @@ describe("claim / release (INV-11)", () => {
   });
 
   test("release journals claim-closed with the prior dispatch", async () => {
-    const h = harness(["in-progress"], "shadow");
+    const h = harness(["in-progress"]);
     const deps: SeamDeps = {
       ...h.deps,
       journal: {
@@ -546,7 +459,7 @@ describe("claim / release (INV-11)", () => {
 
 describe("QA round-1 fixes (#5310)", () => {
   test("close reason 'not-planned' (artifact spelling) is normalised and gated like 'not planned'", async () => {
-    const h = harness(["in-progress"], "enforce");
+    const h = harness(["in-progress"]);
     const refused = await advance({ issue: 10, to: "closed", closeReason: "not-planned" }, h.deps);
     assert.equal("code" in refused ? refused.code : null, "evidence-required:superseded-by");
     const ok = await advance({ issue: 10, to: "closed", closeReason: "not-planned", evidence: { "superseded-by": "#99" } }, h.deps);
@@ -555,7 +468,7 @@ describe("QA round-1 fixes (#5310)", () => {
   });
 
   test("sibling: an unknown close reason is still refused and 'completed' still needs a merged PR", async () => {
-    const h = harness(["in-progress"], "enforce");
+    const h = harness(["in-progress"]);
     const weird = await advance({ issue: 10, to: "closed", closeReason: "weird" }, h.deps);
     assert.equal("code" in weird ? weird.code : null, "close-reason-not-allowed");
     const noPr = await advance({ issue: 10, to: "closed", closeReason: "Completed" }, h.deps);
@@ -563,7 +476,7 @@ describe("QA round-1 fixes (#5310)", () => {
   });
 
   test("release forwards --dispatch ownership and surfaces an owner mismatch", async () => {
-    const h = harness(["in-progress"], "shadow");
+    const h = harness(["in-progress"]);
     const seen: string[] = [];
     const deps: SeamDeps = {
       ...h.deps,
@@ -584,10 +497,10 @@ describe("QA round-1 fixes (#5310)", () => {
 
 describe("operator ruling round 4 (#5310): label-less issues", () => {
   test("enforce: a label-less issue moving to needs-triage passes the gate and writes", async () => {
-    const h = harness(["enhancement"], "enforce");
+    const h = harness(["enhancement"]);
     const res = await advance({ issue: 10, to: "needs-triage" }, h.deps);
     assert.deepEqual(res, {
-      ok: true, issue: 10, from: null, to: "needs-triage", mode: "enforce",
+      ok: true, issue: 10, from: null, to: "needs-triage",
       observed: { state: "OPEN", labels: ["enhancement", "needs-triage"] },
     });
     assert.deepEqual(h.edits, [{ issue: 10, remove: [], add: ["needs-triage"] }]);
@@ -596,34 +509,28 @@ describe("operator ruling round 4 (#5310): label-less issues", () => {
   });
 
   test("enforce: a label-less issue moving anywhere else is refused state-missing with no write", async () => {
-    const h = harness(["enhancement"], "enforce");
+    const h = harness(["enhancement"]);
     const res = await advance({ issue: 10, to: "in-progress" }, h.deps);
-    assert.deepEqual(res, { ok: false, issue: 10, code: "state-missing", mode: "enforce", written: false });
+    assert.deepEqual(res, { ok: false, issue: 10, code: "state-missing", written: false });
     assert.equal(h.edits.length, 0);
     assert.equal(h.journal[0].result, "refused:state-missing");
   });
 
   test("enforce: more than one state label is refused state-ambiguous, even toward needs-triage", async () => {
-    const h = harness(["needs-qa", "in-progress"], "enforce");
+    const h = harness(["needs-qa", "in-progress"]);
     const res = await advance({ issue: 10, to: "needs-triage" }, h.deps);
-    assert.deepEqual(res, { ok: false, issue: 10, code: "state-ambiguous", mode: "enforce", written: false });
+    assert.deepEqual(res, { ok: false, issue: 10, code: "state-ambiguous", written: false });
     assert.equal(h.edits.length, 0);
   });
 
-  test("shadow: a label-less non-triage move writes through and reports wouldRefuse state-missing", async () => {
-    const h = harness([], "shadow");
-    const res = await advance({ issue: 10, to: "ready-for-agent" }, h.deps);
-    assert.equal(res.ok && res.wouldRefuse, "state-missing");
-    assert.equal(h.journal[0].result, "shadow-would-refuse:state-missing");
-  });
 });
 
 // ---------------------------------------------------------------------------
 // operatorAdvance / operatorReopen (ADR-0047 Decision 3, issue #5313)
 // ---------------------------------------------------------------------------
 
-function operatorHarness(labels: string[], mode: LifecycleMode, opts: { state?: string } = {}) {
-  const h = harness(labels, mode);
+function operatorHarness(labels: string[], opts: { state?: string } = {}) {
+  const h = harness(labels);
   if (opts.state) h.state.state = opts.state;
   const indexed: Array<{ issue: number; e: LifecycleJournalEntry }> = [];
   const persisted: number[] = [];
@@ -643,28 +550,26 @@ function operatorHarness(labels: string[], mode: LifecycleMode, opts: { state?: 
 }
 
 describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, INV-8)", () => {
-  for (const mode of ["shadow", "enforce"] as const) {
-    test(`exits a human-hold state in ${mode} while advance() still refuses it`, async () => {
-      const o = operatorHarness(["parked", "enhancement"], mode);
-      const refused = await advance({ issue: 10, to: "ready-for-agent" }, o.h.deps);
-      assert.equal(refused.ok, false);
-      assert.equal((refused as any).code, "human-hold-exit");
+  test("exits a human-hold state while advance() still refuses it", async () => {
+    const o = operatorHarness(["parked", "enhancement"]);
+    const refused = await advance({ issue: 10, to: "ready-for-agent" }, o.h.deps);
+    assert.equal(refused.ok, false);
+    assert.equal((refused as any).code, "human-hold-exit");
 
-      const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
-      assert.equal(res.ok, true);
-      assert.deepEqual(o.h.edits.at(-1), { issue: 10, remove: ["parked"], add: ["ready-for-agent"] });
-      const last = o.h.journal.at(-1)!;
-      assert.equal(last.kind, "transition");
-      assert.equal(last.source, "operator-route");
-      assert.equal(last.actor, "board:promote");
-      assert.equal(last.from, "parked");
-      // The sanctioned exit is never indexed as an unsanctioned hold exit.
-      assert.equal(o.indexed.length, 0);
-    });
-  }
+    const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+    assert.equal(res.ok, true);
+    assert.deepEqual(o.h.edits.at(-1), { issue: 10, remove: ["parked"], add: ["ready-for-agent"] });
+    const last = o.h.journal.at(-1)!;
+    assert.equal(last.kind, "transition");
+    assert.equal(last.source, "operator-route");
+    assert.equal(last.actor, "board:promote");
+    assert.equal(last.from, "parked");
+    // The sanctioned exit is never indexed as an unsanctioned hold exit.
+    assert.equal(o.indexed.length, 0);
+  });
 
   test("agent-owned targets are illegal from the board, journaled as refused operator-route", async () => {
-    const o = operatorHarness(["needs-triage"], "shadow");
+    const o = operatorHarness(["needs-triage"]);
     for (const to of ["in-progress", "qa-passed", "parked"]) {
       const res = await operatorAdvance({ issue: 10, to, actor: "board:relabel" }, o.h.deps);
       assert.equal(res.ok, false, to);
@@ -675,13 +580,13 @@ describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, IN
   });
 
   test("repairs state-missing and state-ambiguous in ONE edit; journal from is comma-joined / null", async () => {
-    const none = operatorHarness(["enhancement"], "enforce");
+    const none = operatorHarness(["enhancement"]);
     const r0 = await operatorAdvance({ issue: 10, to: "needs-triage", actor: "board:relabel" }, none.h.deps);
     assert.equal(r0.ok, true);
     assert.deepEqual(none.h.edits, [{ issue: 10, remove: [], add: ["needs-triage"] }]);
     assert.equal(none.h.journal[0].from, null);
 
-    const many = operatorHarness(["needs-triage", "in-progress", "bug"], "enforce");
+    const many = operatorHarness(["needs-triage", "in-progress", "bug"]);
     const r2 = await operatorAdvance({ issue: 10, to: "blocked", actor: "board:relabel" }, many.h.deps);
     assert.equal(r2.ok, true);
     assert.equal(many.h.edits.length, 1);
@@ -691,7 +596,7 @@ describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, IN
   });
 
   test("closing an already-closed issue is idempotent ok: no write, no journal, no expire", async () => {
-    const o = operatorHarness(["hitl-grill"], "enforce", { state: "CLOSED" });
+    const o = operatorHarness(["hitl-grill"], { state: "CLOSED" });
     const res = await operatorAdvance({ issue: 10, to: "closed", actor: "board:close" }, o.h.deps);
     assert.equal(res.ok, true);
     assert.equal(o.h.closes.length, 0);
@@ -700,7 +605,7 @@ describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, IN
   });
 
   test("close performs no label write and retains labels; a closed issue is refused", async () => {
-    const o = operatorHarness(["hitl-grill"], "enforce");
+    const o = operatorHarness(["hitl-grill"]);
     const res = await operatorAdvance({ issue: 10, to: "closed", closeReason: "not-planned", actor: "board:close" }, o.h.deps);
     assert.equal(res.ok, true);
     assert.deepEqual(o.h.closes, [{ issue: 10, reason: "not planned" }]);
@@ -723,7 +628,7 @@ describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, IN
     }
 
     test("removing parked posts exactly one issue marker and journals capReset=posted", async () => {
-      const o = operatorHarness(["parked"], "enforce");
+      const o = operatorHarness(["parked"]);
       const posted = recording(o);
       const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
       assert.equal(res.ok, true);
@@ -734,7 +639,7 @@ describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, IN
     });
 
     test("leaving ready-for-human posts exactly one marker; leaving to closed posts none (#5661)", async () => {
-      const o = operatorHarness(["ready-for-human"], "enforce");
+      const o = operatorHarness(["ready-for-human"]);
       const posted = recording(o);
       const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
       assert.equal(res.ok, true);
@@ -742,7 +647,7 @@ describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, IN
       assert.match(posted[0].body, /^Hydra-Cap-Reset: by=board:promote ts=\S+$/);
       assert.equal(o.h.journal.at(-1)!.evidence.capReset, "posted");
 
-      const c = operatorHarness(["ready-for-human"], "enforce");
+      const c = operatorHarness(["ready-for-human"]);
       const cPosted = recording(c);
       const closedRes = await operatorAdvance({ issue: 10, to: "closed", actor: "board:close" }, c.h.deps);
       assert.equal(closedRes.ok, true);
@@ -750,7 +655,7 @@ describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, IN
     });
 
     test("leaving hitl-grill posts no marker (#5661 INV-5)", async () => {
-      const o = operatorHarness(["hitl-grill"], "enforce");
+      const o = operatorHarness(["hitl-grill"]);
       const posted = recording(o);
       const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
       assert.equal(res.ok, true);
@@ -758,7 +663,7 @@ describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, IN
     });
 
     test("a failed post leaves the transition ok and journals capReset=failed:<code>", async () => {
-      const o = operatorHarness(["parked"], "enforce");
+      const o = operatorHarness(["parked"]);
       recording(o, "gh-failed");
       const res = await operatorAdvance({ issue: 10, to: "needs-triage", actor: "board:relabel" }, o.h.deps);
       assert.equal(res.ok, true);
@@ -768,7 +673,7 @@ describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, IN
     });
 
     test("a failed post on a ready-for-human exit leaves the transition ok and journals capReset=failed:<code> (#5661 INV-2)", async () => {
-      const o = operatorHarness(["ready-for-human"], "enforce");
+      const o = operatorHarness(["ready-for-human"]);
       const order: string[] = [];
       const origEdit = o.h.deps.edit;
       o.h.deps.edit = async (...a: Parameters<typeof origEdit>) => { order.push("edit"); return origEdit(...a); };
@@ -782,7 +687,7 @@ describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, IN
     });
 
     test("the marker posts BEFORE the label write, so no claimable window sees the old reset point", async () => {
-      const o = operatorHarness(["parked"], "enforce");
+      const o = operatorHarness(["parked"]);
       const order: string[] = [];
       const origEdit = o.h.deps.edit;
       o.h.deps.edit = async (...a: Parameters<typeof origEdit>) => { order.push("edit"); return origEdit(...a); };
@@ -793,7 +698,7 @@ describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, IN
     });
 
     test("a refused label write after the marker journals capReset on the refusal (INV-4)", async () => {
-      const o = operatorHarness(["parked"], "enforce");
+      const o = operatorHarness(["parked"]);
       recording(o);
       o.h.deps.edit = async () => ({ ok: false, code: "gh-failed" as never, stderr: "x" });
       const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
@@ -804,7 +709,7 @@ describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, IN
     });
 
     test("a refused write with no park removal journals no capReset (sibling shape)", async () => {
-      const o = operatorHarness(["hitl-grill"], "enforce");
+      const o = operatorHarness(["hitl-grill"]);
       o.h.deps.edit = async () => ({ ok: false, code: "gh-failed" as never, stderr: "x" });
       const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
       assert.equal(res.ok, false);
@@ -812,7 +717,7 @@ describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, IN
     });
 
     test("a non-park transition keeps its single write and posts no marker (sibling shape)", async () => {
-      const o = operatorHarness(["hitl-grill"], "enforce");
+      const o = operatorHarness(["hitl-grill"]);
       const order: string[] = [];
       const origEdit = o.h.deps.edit;
       o.h.deps.edit = async (...a: Parameters<typeof origEdit>) => { order.push("edit"); return origEdit(...a); };
@@ -822,14 +727,14 @@ describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, IN
     });
 
     test("no marker when parked was not present or the destination is closed", async () => {
-      const o = operatorHarness(["hitl-grill"], "enforce");
+      const o = operatorHarness(["hitl-grill"]);
       const posted = recording(o);
       const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
       assert.equal(res.ok, true);
       assert.equal(posted.length, 0);
       assert.equal(o.h.journal.at(-1)!.evidence.capReset, undefined);
 
-      const c = operatorHarness(["parked"], "enforce");
+      const c = operatorHarness(["parked"]);
       const cPosted = recording(c);
       const closedRes = await operatorAdvance({ issue: 10, to: "closed", actor: "board:close" }, c.h.deps);
       assert.equal(closedRes.ok, true);
@@ -838,7 +743,7 @@ describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, IN
   });
 
   test("a failed re-read refuses fetch-failed with no write", async () => {
-    const h = harness(["parked"], "enforce", { viewFails: true });
+    const h = harness(["parked"], { viewFails: true });
     const res = await operatorAdvance({ issue: 10, to: "needs-triage", actor: "board:relabel" }, h.deps);
     assert.equal((res as any).code, "fetch-failed");
     assert.equal(h.edits.length, 0);
@@ -847,7 +752,7 @@ describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, IN
 
 describe("operatorReopen (#5313 INV-8)", () => {
   test("reopens, PERSISTS the journal, then journals from closed with source operator-route", async () => {
-    const o = operatorHarness(["needs-triage"], "enforce", { state: "CLOSED" });
+    const o = operatorHarness(["needs-triage"], { state: "CLOSED" });
     const res = await operatorReopen({ issue: 10, actor: "board:reopen" }, o.h.deps);
     assert.equal(res.ok, true);
     assert.deepEqual(o.reopens, [10]);
@@ -858,7 +763,7 @@ describe("operatorReopen (#5313 INV-8)", () => {
   });
 
   test("reopening an already-OPEN issue is idempotent ok with the observed state: no write, persist or journal", async () => {
-    const o = operatorHarness(["needs-triage"], "enforce");
+    const o = operatorHarness(["needs-triage"]);
     const res = await operatorReopen({ issue: 10, actor: "board:reopen" }, o.h.deps);
     assert.equal(res.ok, true);
     assert.equal((res as any).observed.state, "OPEN");
@@ -868,28 +773,28 @@ describe("operatorReopen (#5313 INV-8)", () => {
   });
 
   test("a reopen the re-read does not confirm is write-unverified", async () => {
-    const o = operatorHarness(["needs-triage"], "enforce", { state: "CLOSED" });
+    const o = operatorHarness(["needs-triage"], { state: "CLOSED" });
     o.h.deps.reopen = async () => ({ ok: true });
     const res = await operatorReopen({ issue: 10, actor: "board:reopen" }, o.h.deps);
     assert.equal((res as any).code, "write-unverified");
   });
 });
 
-describe("shadow-mode CLI human-hold exit (#5313 round 3)", () => {
-  test("a shadow-journaled refused+written exit from a hold state is indexed via the single append point", async () => {
-    const o = operatorHarness([], "shadow");
-    const shadowExit: LifecycleJournalEntry = {
+describe("a refused-but-written CLI human-hold exit (#5313)", () => {
+  test("a refused+written (write-unverified) exit from a hold state is indexed via the single append point", async () => {
+    const o = operatorHarness([]);
+    const unverifiedExit: LifecycleJournalEntry = {
       v: 1, ts: 5, kind: "refused", from: "parked", to: "ready-for-agent", source: "cli",
-      actor: "cli", evidence: {}, reason: null, rationale: null, result: "shadow-would-refuse:illegal-transition", written: true,
+      actor: "cli", evidence: {}, reason: null, rationale: null, result: "write-unverified", written: true,
     };
-    assert.equal(isUnsanctionedHoldExit(shadowExit), true);
-    await journalEntry(o.h.deps, 10, shadowExit);
+    assert.equal(isUnsanctionedHoldExit(unverifiedExit), true);
+    await journalEntry(o.h.deps, 10, unverifiedExit);
     assert.equal(o.indexed.length, 1);
-    assert.equal(o.indexed[0].e, shadowExit);
+    assert.equal(o.indexed[0].e, unverifiedExit);
   });
 
-  test("sibling: advance() from a hold state is refused human-hold-exit with written:false in shadow, and is NOT indexed", async () => {
-    const o = operatorHarness(["parked", "enhancement"], "shadow");
+  test("sibling: advance() from a hold state is refused human-hold-exit with written:false, and is NOT indexed", async () => {
+    const o = operatorHarness(["parked", "enhancement"]);
     const res = await advance({ issue: 10, to: "ready-for-agent" }, o.h.deps);
     assert.equal(res.ok, false);
     assert.equal(o.h.journal.at(-1)!.written, false);
@@ -911,7 +816,7 @@ describe("journalEntry — the single append point indexes unsanctioned hold exi
   };
 
   test("an external hold exit is appended AND indexed; operator-route and refused rows are not", async () => {
-    const o = operatorHarness([], "enforce");
+    const o = operatorHarness([]);
     await journalEntry(o.h.deps, 10, base);
     await journalEntry(o.h.deps, 10, { ...base, source: "operator-route", kind: "transition" });
     await journalEntry(o.h.deps, 10, { ...base, kind: "refused", written: false });
@@ -928,19 +833,19 @@ describe("journalEntry — cap events need no selector; the hold-exit selector i
     actor: "x", evidence: { pr: "42" }, reason: "cap:qa-stall", rationale: null, result: "ok", written: true,
   };
 
-  test("claim-opened, cap park and shadow would-park append with a hold-exit-only selector (indexing is the seam's job)", async () => {
-    const o = operatorHarness([], "enforce");
+  test("claim-opened, a cap park and a cap refusal append with a hold-exit-only selector (indexing is the seam's job)", async () => {
+    const o = operatorHarness([]);
     const selectors: unknown[] = [];
     o.h.deps.journal.append = async (_r, _i, _e, idx) => { selectors.push(idx); return { ok: true }; };
     await journalEntry(o.h.deps, 10, { ...base, kind: "claim-opened", to: null, reason: null });
     await journalEntry(o.h.deps, 10, base);
-    await journalEntry(o.h.deps, 10, { ...base, kind: "refused", written: false, result: "shadow-would-park:qa-stall" });
+    await journalEntry(o.h.deps, 10, { ...base, kind: "refused", written: false, result: "refused:fetch-failed" });
     assert.equal(selectors.length, 3);
     for (const sel of selectors) assert.deepEqual(Object.keys(sel as object), ["holdExit"]);
   });
 
   test("sibling: the hold-exit selector is still set for an unsanctioned hold exit", async () => {
-    const o = operatorHarness([], "enforce");
+    const o = operatorHarness([]);
     let sel: { holdExit?: boolean } | undefined;
     o.h.deps.journal.append = async (_r, _i, _e, idx) => { sel = idx as typeof sel; return { ok: true }; };
     await journalEntry(o.h.deps, 10, { ...base, kind: "external", from: "ready-for-human", to: "ready-for-agent", source: "external", reason: null });
@@ -1055,7 +960,7 @@ describe("research-exit gate", () => {
   const ADV = { issue: 10, to: "needs-triage", evidence: EV, reason: "needs-retriage", rationale: "r" };
 
   test("seam enforce: a missing trailer is refused with no write", async () => {
-    const h = harness(["needs-research"], "enforce", { comment: cmt({ body: "no trailer" }), entry: 1000 });
+    const h = harness(["needs-research"], { comment: cmt({ body: "no trailer" }), entry: 1000 });
     const res = await advance(ADV, h.deps);
     assert.equal("code" in res ? res.code : null, "research-trailer-missing");
     assert.equal(h.edits.length, 0);
@@ -1063,16 +968,17 @@ describe("research-exit gate", () => {
     assert.equal(h.journal[0].written, false);
   });
 
-  test("seam shadow: a stale trailer still writes and journals shadow-would-refuse", async () => {
-    const h = harness(["needs-research"], "shadow", { comment: cmt({ createdAtMs: 500 }), entry: 1000 });
+  test("seam: a stale trailer is refused with no write", async () => {
+    const h = harness(["needs-research"], { comment: cmt({ createdAtMs: 500 }), entry: 1000 });
     const res = await advance(ADV, h.deps);
-    assert.equal(res.ok && res.wouldRefuse, "research-trailer-stale");
-    assert.equal(h.edits.length, 1);
-    assert.equal(h.journal[0].result, "shadow-would-refuse:research-trailer-stale");
+    assert.equal("code" in res ? res.code : null, "research-trailer-stale");
+    assert.equal(h.edits.length, 0);
+    assert.equal(h.journal[0].result, "refused:research-trailer-stale");
+    assert.equal(h.journal[0].written, false);
   });
 
   test("seam enforce: happy path journals a transition carrying the comment evidence", async () => {
-    const h = harness(["needs-research"], "enforce", { comment: cmt(), entry: 1000 });
+    const h = harness(["needs-research"], { comment: cmt(), entry: 1000 });
     const res = await advance(ADV, h.deps);
     assert.equal(res.ok, true);
     assert.equal(h.journal[0].kind, "transition");
@@ -1081,11 +987,11 @@ describe("research-exit gate", () => {
   });
 
   test("seam enforce: fetch failures fail closed", async () => {
-    const noComment = harness(["needs-research"], "enforce", { entry: 1000 });
+    const noComment = harness(["needs-research"], { entry: 1000 });
     const r0 = await advance(ADV, noComment.deps);
     assert.equal("code" in r0 ? r0.code : null, "fetch-failed");
     assert.equal(noComment.edits.length, 0);
-    const noEntry = harness(["needs-research"], "enforce", { comment: cmt() });
+    const noEntry = harness(["needs-research"], { comment: cmt() });
     const res = await advance(ADV, noEntry.deps);
     assert.equal("code" in res ? res.code : null, "fetch-failed");
     assert.equal(noEntry.edits.length, 0);
@@ -1094,10 +1000,10 @@ describe("research-exit gate", () => {
   test("seam enforce: -> ready-for-agent reads scope from the re-read body", async () => {
     const adv = { ...ADV, to: "ready-for-agent", reason: "research-complete" };
     const rec = cmt({ body: TRAILER(10, "ready-for-agent") });
-    const bare = harness(["needs-research"], "enforce", { comment: rec, entry: 1000, body: "none" });
+    const bare = harness(["needs-research"], { comment: rec, entry: 1000, body: "none" });
     const r1 = await advance(adv, bare.deps);
     assert.equal("code" in r1 ? r1.code : null, "scope-section-missing");
-    const scoped = harness(["needs-research"], "enforce", { comment: rec, entry: 1000, body: SCOPED_BODY });
+    const scoped = harness(["needs-research"], { comment: rec, entry: 1000, body: SCOPED_BODY });
     assert.equal((await advance(adv, scoped.deps)).ok, true);
   });
 });
@@ -1177,7 +1083,7 @@ describe("reconcile caller edges are really gated (#5459 INV-9)", () => {
 
 describe("seam wiring for the reconcile-edge gates (#5459 INV-6)", () => {
   test("claim-released reads the claim through journal.readClaim", async () => {
-    const h = harness(["in-progress"], "enforce");
+    const h = harness(["in-progress"]);
     let reads = 0;
     h.deps.journal.readClaim = async () => {
       reads++;
@@ -1191,13 +1097,13 @@ describe("seam wiring for the reconcile-edge gates (#5459 INV-6)", () => {
     assert.equal(reads, 2);
   });
   test("claim-released: a failed claim read fails closed", async () => {
-    const h = harness(["in-progress"], "enforce");
+    const h = harness(["in-progress"]);
     h.deps.journal.readClaim = async () => ({ ok: false, code: "redis-failed" }) as never;
     const res = await advance({ issue: 10, to: "needs-dev-resume" }, h.deps);
     assert.equal("code" in res ? res.code : null, "fetch-failed");
   });
   test("unblocked hands fetch.blockers exactly the body's clearance refs", async () => {
-    const h = harness(["blocked"], "enforce", { body: BLOCKED_BODY });
+    const h = harness(["blocked"], { body: BLOCKED_BODY });
     let seen: number[] = [];
     h.deps.fetch.blockers = async (refs): Promise<Fetched<BlockerRecord[]>> => {
       seen = refs;
@@ -1207,37 +1113,32 @@ describe("seam wiring for the reconcile-edge gates (#5459 INV-6)", () => {
     assert.equal(res.ok, true);
     assert.deepEqual(seen, [100, 101]);
   });
-  test("unblocked without a blockers fetcher fails closed (enforce) / would-refuse (shadow)", async () => {
-    const enf = harness(["blocked"], "enforce", { body: BLOCKED_BODY });
+  test("unblocked without a blockers fetcher fails closed with no write", async () => {
+    const enf = harness(["blocked"], { body: BLOCKED_BODY });
     const r1 = await advance({ issue: 10, to: "ready-for-agent" }, enf.deps);
     assert.equal("code" in r1 ? r1.code : null, "fetch-failed");
-    const sh = harness(["blocked"], "shadow", { body: BLOCKED_BODY });
-    const r2 = await advance({ issue: 10, to: "ready-for-agent" }, sh.deps);
-    assert.equal(r2.ok && r2.wouldRefuse, "fetch-failed");
-    assert.equal(sh.edits.length, 1);
+    assert.equal(enf.edits.length, 0);
   });
 });
 
 describe("self-move no-op, PR guard and merged-PR fold (#5584)", () => {
-  for (const mode of ["shadow", "enforce"] as const) {
-    test(`a self-move is a no-op success in ${mode}: no edit, one noop journal row`, async () => {
-      const h = harness(["needs-triage", "enhancement"], mode);
-      const res = await advance({ issue: 10, to: "needs-triage" }, h.deps);
-      assert.deepEqual(res, {
-        ok: true, issue: 10, from: "needs-triage", to: "needs-triage", mode, noop: true,
-        observed: { state: "OPEN", labels: ["needs-triage", "enhancement"] },
-      });
-      assert.equal(h.edits.length, 0);
-      assert.equal(h.closes.length, 0);
-      assert.equal(h.journal.length, 1);
-      assert.equal(h.journal[0].kind, "transition");
-      assert.equal(h.journal[0].result, "noop");
-      assert.equal(h.journal[0].written, false);
+  test("a self-move is a no-op success: no edit, one noop journal row", async () => {
+    const h = harness(["needs-triage", "enhancement"]);
+    const res = await advance({ issue: 10, to: "needs-triage" }, h.deps);
+    assert.deepEqual(res, {
+      ok: true, issue: 10, from: "needs-triage", to: "needs-triage", noop: true,
+      observed: { state: "OPEN", labels: ["needs-triage", "enhancement"] },
     });
-  }
+    assert.equal(h.edits.length, 0);
+    assert.equal(h.closes.length, 0);
+    assert.equal(h.journal.length, 1);
+    assert.equal(h.journal[0].kind, "transition");
+    assert.equal(h.journal[0].result, "noop");
+    assert.equal(h.journal[0].written, false);
+  });
 
   test("a human-hold self-move is a no-op and is not journaled as a hold exit", async () => {
-    const h = harness(["hitl-grill"], "enforce");
+    const h = harness(["hitl-grill"]);
     const res = await advance({ issue: 10, to: "hitl-grill" }, h.deps);
     assert.equal(res.ok && res.noop, true);
     assert.equal(h.edits.length, 0);
@@ -1246,7 +1147,7 @@ describe("self-move no-op, PR guard and merged-PR fold (#5584)", () => {
   });
 
   test("a closed issue still refuses issue-closed", async () => {
-    const h = harness(["needs-triage"], "enforce");
+    const h = harness(["needs-triage"]);
     h.state.state = "CLOSED";
     const res = await advance({ issue: 10, to: "needs-triage" }, h.deps);
     assert.equal(res.ok, false);
@@ -1254,7 +1155,7 @@ describe("self-move no-op, PR guard and merged-PR fold (#5584)", () => {
   });
 
   test("a mismatched --from beats the no-op", async () => {
-    const h = harness(["needs-triage"], "enforce");
+    const h = harness(["needs-triage"]);
     const res = await advance({ issue: 10, to: "needs-triage", from: "ready-for-agent" }, h.deps);
     assert.equal(res.ok, false);
     assert.equal((res as any).code, "from-mismatch");
@@ -1262,30 +1163,28 @@ describe("self-move no-op, PR guard and merged-PR fold (#5584)", () => {
   });
 
   test("zero and multiple state labels are not no-ops", async () => {
-    const none = await advance({ issue: 10, to: "ready-for-agent" }, harness(["enhancement"], "enforce").deps);
+    const none = await advance({ issue: 10, to: "ready-for-agent" }, harness(["enhancement"]).deps);
     assert.equal((none as any).code, "state-missing");
-    const many = await advance({ issue: 10, to: "needs-triage" }, harness(["needs-triage", "in-progress"], "enforce").deps);
+    const many = await advance({ issue: 10, to: "needs-triage" }, harness(["needs-triage", "in-progress"]).deps);
     assert.equal(many.ok && "noop" in many, false);
   });
 
-  for (const mode of ["shadow", "enforce"] as const) {
-    test(`a PR number refuses not-an-issue in ${mode}: no edit, no journal row`, async () => {
-      const h = harness(["needs-triage"], mode, { url: "https://github.com/o/r/pull/10" });
-      const res = await advance({ issue: 10, to: "needs-triage" }, h.deps);
-      assert.deepEqual(res, { ok: false, issue: 10, code: "not-an-issue", mode, written: false });
-      assert.equal(h.edits.length, 0);
-      assert.equal(h.journal.length, 0);
-      const op = operatorHarness(["needs-triage"], mode);
-      op.h.deps.view = async () => ({
-        ok: true,
-        row: { number: 10, title: "t", url: "https://github.com/o/r/pull/10", createdAt: "", body: "", labels: ["needs-triage"], state: "OPEN" },
-      });
-      const opRes = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, op.h.deps);
-      assert.equal((opRes as any).code, "not-an-issue");
-      assert.equal(op.h.edits.length, 0);
-      assert.equal(op.h.journal.length, 0);
+  test("a PR number refuses not-an-issue: no edit, no journal row", async () => {
+    const h = harness(["needs-triage"], { url: "https://github.com/o/r/pull/10" });
+    const res = await advance({ issue: 10, to: "needs-triage" }, h.deps);
+    assert.deepEqual(res, { ok: false, issue: 10, code: "not-an-issue", written: false });
+    assert.equal(h.edits.length, 0);
+    assert.equal(h.journal.length, 0);
+    const op = operatorHarness(["needs-triage"]);
+    op.h.deps.view = async () => ({
+      ok: true,
+      row: { number: 10, title: "t", url: "https://github.com/o/r/pull/10", createdAt: "", body: "", labels: ["needs-triage"], state: "OPEN" },
     });
-  }
+    const opRes = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, op.h.deps);
+    assert.equal((opRes as any).code, "not-an-issue");
+    assert.equal(op.h.edits.length, 0);
+    assert.equal(op.h.journal.length, 0);
+  });
 
   test("isPullRequestUrl distinguishes issue and pull URLs", () => {
     assert.equal(isPullRequestUrl("https://github.com/o/r/issues/10"), false);

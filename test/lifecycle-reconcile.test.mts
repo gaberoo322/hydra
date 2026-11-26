@@ -55,7 +55,7 @@ function live(over: Partial<QaLivePr> = {}): QaLivePr {
 const PASS_TRAILER = (pr: number, sha = HEAD.slice(0, 12)) =>
   `QA-Verdict: PASS pr=${pr} round=1 sha=${sha} blockers=0 max_severity=none`;
 
-function world(mode: "shadow" | "enforce" = "enforce") {
+function world() {
   const w = {
     issues: new Map<number, Issue>(),
     closedRows: [] as number[],
@@ -90,7 +90,6 @@ function world(mode: "shadow" | "enforce" = "enforce") {
   });
   const seam: SeamDeps = {
     repo: "o/r",
-    mode: async () => mode,
     view: async (n) => {
       const i = w.issues.get(n);
       return i ? { ok: true, row: row(n, i) } : { ok: false, code: "gh-failed" };
@@ -354,7 +353,7 @@ describe("qa-passed exits (INV-3, INV-4, INV-13)", () => {
   });
 
   test("the qa-exit gate verifies the requested target against the live PR", async () => {
-    const { w, add } = world("enforce");
+    const { w, add } = world();
     add(40, ["qa-passed"]);
     w.lives.set(400, live({ number: 400, mergeStateStatus: "DIRTY" }));
     const res = await advance({ issue: 40, to: "needs-qa", evidence: { pr: "400" }, actor: "reconcile" }, w.deps.seam);
@@ -572,21 +571,18 @@ describe("external close and reopen (INV-9)", () => {
 });
 
 describe("report, dry-run and never-throw (INV-10, INV-11)", () => {
-  test("the report is persisted with the enforce-readiness fields", async () => {
+  test("the report is persisted with the seam-activity fields and no rollout-mode fields", async () => {
     const { w, add, journal } = world();
     add(100, ["ready-for-agent"]);
     journal(100).push(
       je({ to: "ready-for-agent", ts: NOW - 1000 }),
-      je({ kind: "refused", to: "in-progress", result: "shadow-would-refuse:design-concept-missing", ts: NOW - 2000 }),
-      je({ kind: "refused", to: "parked", result: "shadow-would-park:total-claims", written: false, ts: NOW - 3000 }),
-      je({ kind: "refused", to: "parked", result: "shadow-would-refuse:old", ts: NOW - 30 * 24 * 3_600_000 }),
+      je({ kind: "refused", to: "in-progress", result: "refused:design-concept-missing", written: false, ts: NOW - 2000 }),
+      je({ to: "in-progress", ts: NOW - 30 * 24 * 3_600_000 }),
     );
     const report = await runReconcile(w.deps);
     assert.equal(w.reports.length, 1);
     assert.equal(report.seamTransitions, 1);
-    assert.deepEqual(report.wouldRefuseByReason, { "design-concept-missing": 1 });
-    assert.deepEqual(report.wouldParkByArm, { "total-claims": 1 });
-    assert.equal(report.mode, "enforce");
+    for (const k of ["mode", "wouldRefuseByReason", "wouldParkByArm"]) assert.ok(!(k in report), k);
     assert.equal(report.scanned.open, 1);
     assert.deepEqual(report.errors, []);
     for (const k of ["invalid", "zeroStateRelabeled", "zeroStateExempt", "externalEntries", "capResetsPosted", "qaExits"] as const) {
