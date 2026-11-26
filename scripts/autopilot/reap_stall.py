@@ -68,7 +68,7 @@ from reap_state import _append_log
 # any more. `dev-nopr-resume` is a Live Cap in the lifecycle seam: it counts the
 # `claim-closed outcome=no-pr` journal entries reap's claim release writes
 # (reap.py releases BEFORE this handler runs, INV-4) and parks the issue at the
-# NEXT resume claim, in shadow and enforce alike. This handler therefore keeps no
+# NEXT resume claim. This handler therefore keeps no
 # comment-marker counter, writes no `ready-for-human` and no `parked` of its own.
 
 # The `needs-dev-resume` label already exists on gaberoo322/hydra (created

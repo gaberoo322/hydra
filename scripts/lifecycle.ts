@@ -91,7 +91,7 @@ function parseIssue(raw: string | undefined): number | null {
 /**
  * `reconcile` (ADR-0047 D5, #5316): no flag runs one live pass and prints its
  * report; `--dry-run` classifies with every write skipped; `--report` prints the
- * last persisted report (the enforce-readiness data) without scanning.
+ * last persisted report without scanning.
  */
 async function runReconcileVerb(flags: Record<string, string>): Promise<number> {
   if (flags.report === "true") {

@@ -1750,7 +1750,7 @@ const RAW_ENTRIES = [
         command: "npx tsx scripts/lifecycle.ts reconcile --report",
         label: "Read the latest reconcile report",
         preconditions: [],
-        consequence: "prints every invalid issue and the enforce-readiness counts without scanning or changing anything",
+        consequence: "prints every invalid issue and the reconcile report counts without scanning or changing anything",
       },
     ],
     rationale:

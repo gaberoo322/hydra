@@ -186,6 +186,23 @@ describe("lifecycle-journal Redis seam (issue #5310)", () => {
     for (const n of [31, 32, 33, 34, 35]) await redis.del(lifecycleJournalKey(REPO, n));
   });
 
+  test("rows persisted before #5771 still read: a retired journal result is opaque, a retired cap-event kind is dropped", async () => {
+    const now = 1_760_000_000_000;
+    // A journal row written while the rollout ran; nothing interprets its result any more.
+    const old = entry({ ts: now, kind: "refused", written: false, to: "parked", reason: "cap:total-claims", result: "shadow-would-park:total-claims" });
+    assert.ok((await appendLifecycleEntry(REPO, ISSUE, old)).ok);
+    assert.equal(await redis.zcard(capEventsIndexKey(REPO)), 0, "a retired result is not indexed as a cap event");
+    const read = await readLifecycleJournal(REPO, ISSUE);
+    assert.ok(read.ok);
+    assert.deepEqual(read.entries, [old]);
+    // An index member written by the pre-#5771 accessor, next to a current one.
+    await redis.zadd(capEventsIndexKey(REPO), now, JSON.stringify({ kind: "would-park", issue: 61, ts: now, arm: "total-claims", actor: "cli" }));
+    await redis.zadd(capEventsIndexKey(REPO), now + 1, JSON.stringify({ kind: "park", issue: 62, ts: now + 1, arm: "qa-stall", actor: "cli" }));
+    const listed = await listCapEvents(REPO, now);
+    assert.ok(listed.ok);
+    assert.deepEqual(listed.events.map((x) => [x.kind, x.issue]), [["park", 62]]);
+  });
+
   test("a real parkForCap append lands a kind=park member in the cap-events index (#5324)", async () => {
     const now = 1_760_000_000_000;
     let labels = ["ready-for-agent"];

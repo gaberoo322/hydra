@@ -2004,7 +2004,6 @@
           "file config/direction/tech-preferences.md",
           "file config/direction/vision.md",
           "file config/orchestrator/builder-health-baselines.json",
-          "file config/orchestrator/lifecycle-rollout.json",
           "file config/orchestrator/qa-rollout.json",
           "file config/orchestrator/vision.md"
         ],
