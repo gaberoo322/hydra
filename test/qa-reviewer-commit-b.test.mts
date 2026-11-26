@@ -347,7 +347,7 @@ describe("assessCommitGraduation (INV-10)", () => {
   });
 });
 
-describe("playbook step 9.4 class-B pins (INV-5, INV-6, INV-13)", () => {
+describe("playbook step 9.4 class-B pins (INV-5, INV-6, INV-13; the mechanics are tested in qa-reviewer-commit.test.mts, #5712)", () => {
   const start = PLAYBOOK.indexOf("### 9.4 Reviewer commit");
   const step94 = PLAYBOOK.slice(start, PLAYBOOK.indexOf("\n### ", start + 10));
 
@@ -355,30 +355,10 @@ describe("playbook step 9.4 class-B pins (INV-5, INV-6, INV-13)", () => {
     assert.ok(/### 9\.4 Reviewer commit \(class A\) and class B/.test(step94));
   });
 
-  test("class B is a separate commit with its own trailer", () => {
-    assert.ok(step94.includes('-m "QA-Fix: B"'));
-    assert.ok(step94.includes('-m "QA-Fix: A"'));
+  test("the prose keeps separate A and B trailers, never a combined one, and no force push", () => {
+    assert.ok(step94.includes("QA-Fix: A") && step94.includes("QA-Fix: B"));
     assert.ok(!/QA-Fix: A,? ?B|QA-Fix: AB/.test(step94), "never a combined trailer");
-  });
-
-  test("case-count-check runs before the class-B commit", () => {
-    assert.ok(step94.includes("qa-commit-checks.ts\" case-count-check"));
-    assert.ok(step94.indexOf("case-count-check") < step94.indexOf('-m "QA-Fix: B"'));
-  });
-
-  test("a class-B round runs exactly one proof, based on $FIXED_SHA", () => {
-    const branch = step94.slice(
-      step94.indexOf('[ "$RC_HAS_B" = 1 ]; then\n    node'),
-      step94.indexOf("elif", step94.indexOf('[ "$RC_HAS_B" = 1 ]; then\n    node')),
-    );
-    assert.ok(branch.includes('--base "$FIXED_SHA" --head HEAD'));
-    assert.ok(!branch.includes("$REVIEWED_HEAD"));
-  });
-
-  test("the qa-fixes list names every reviewer commit and still adds no force push", () => {
-    assert.ok(step94.includes("RC_SHAS"));
     assert.ok(!/--force|force-with-lease/.test(step94.replace(/never force-push/g, "")));
-    assert.ok(!/\+refs|\+HEAD/.test(step94));
   });
 
   test("the playbook has no step 9.5: route owns the trailer inputs", () => {
@@ -407,15 +387,5 @@ describe("commit graduation: harvest source (QA round 1 finding 1)", () => {
     const src = readFileSync(join(ROOT, "scripts", "qa", "commit-graduation.ts"), "utf8");
     assert.ok(!src.includes("fixture?.inputs?.prs"));
     assert.ok(!src.includes("fixture?.metrics?.pending"));
-  });
-});
-
-describe("hydra-qa step 9.4: a reviewer-added new test file (QA round 1 finding 2)", () => {
-  test("the case-count loop skips a file absent at the reviewed head instead of refusing the round", () => {
-    assert.ok(/git cat-file -e "\$REVIEWED_HEAD:\$p"[^\n]*\|\| continue/.test(PLAYBOOK));
-  });
-
-  test("sibling shape: an existing file still fails closed when its before-copy cannot be read", () => {
-    assert.ok(PLAYBOOK.includes('git show "$REVIEWED_HEAD:$p" > "$BEFORE_FILE" 2>/dev/null || { RC_OK=0;'));
   });
 });
