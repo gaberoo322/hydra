@@ -115,7 +115,6 @@ export const claudeCliSeamRatchet = defineRatchet({
   baseline: "scripts/ci/claude-cli-seam-baseline.json",
   shape: "set",
   polarity: "ceiling",
-  stale: "fail",
   enforcement: "advisory",
   measure: (root) =>
     seamMeasure(root, {

@@ -142,12 +142,12 @@ describe("playbook-vocabulary-ratchet: ratchet policy and rows", () => {
     assert.deepEqual(countByShape(found[PB]), { status: 2, "line-cite": 1 });
   });
 
-  test("one required counted ceiling ratchet, stale rows fail, on its own baseline", () => {
+  test("one required counted ceiling ratchet, stale rows hint, on its own baseline", () => {
     const p = vocabularyRatchet.policy;
     assert.equal(p.id, "playbook-vocabulary-ratchet");
     assert.equal(p.shape, "counted");
     assert.equal(p.polarity, "ceiling");
-    assert.equal(p.stale, "fail");
+    assert.notEqual(p.stale, "fail");
     assert.equal(p.enforcement, "required");
     assert.match(p.baseline, /playbook-vocabulary-baseline\.json$/);
   });

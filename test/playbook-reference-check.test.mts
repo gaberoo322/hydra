@@ -201,12 +201,12 @@ describe("playbook-reference-check: what is deliberately not a reference", () =>
 });
 
 describe("playbook-reference-check: ratchet policy", () => {
-  test("one required set ceiling ratchet, stale rows fail, on its own baseline", () => {
+  test("one required set ceiling ratchet, stale rows hint, on its own baseline", () => {
     const p = referenceRatchet.policy;
     assert.equal(p.id, "playbook-reference-check");
     assert.equal(p.shape, "set");
     assert.equal(p.polarity, "ceiling");
-    assert.equal(p.stale, "fail");
+    assert.notEqual(p.stale, "fail");
     assert.equal(p.enforcement, "required");
     assert.equal(p.baseline, "scripts/ci/playbook-reference-baseline.json");
   });

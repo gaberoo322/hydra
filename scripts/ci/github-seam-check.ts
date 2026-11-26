@@ -157,7 +157,6 @@ export const githubSeamRatchet = defineRatchet({
   baseline: "scripts/ci/github-seam-baseline.json",
   shape: "set",
   polarity: "ceiling",
-  stale: "fail",
   enforcement: "advisory",
   measure: (root) =>
     seamMeasure(root, {

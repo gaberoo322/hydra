@@ -378,7 +378,6 @@ export const testSourceReadRatchet = defineRatchet({
   baseline: BASELINE_REL,
   shape: "counted",
   polarity: "ceiling",
-  stale: "fail",
   enforcement: "required",
   measure: measureSourceReads,
 });

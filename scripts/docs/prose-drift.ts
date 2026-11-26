@@ -857,7 +857,6 @@ export const proseDriftRatchet = defineRatchet({
   baseline: BASELINE_FILE,
   shape: "set",
   polarity: "ceiling",
-  stale: "fail",
   enforcement: "required",
   async measure(root) {
     const offenders = scanProseDrift(root);

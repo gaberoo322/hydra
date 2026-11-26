@@ -44,6 +44,18 @@ describe("ratchet registry", () => {
     assert.deepEqual(listBaselineFixtures(ROOT), RATCHETS.map(rowBaseline).sort());
   });
 
+  test("a ratchet row declares stale: fail only with a written staleReason", () => {
+    for (const row of RATCHETS) {
+      if (row.kind !== "ratchet") continue;
+      const p = row.ratchet.policy;
+      if (p.stale !== "fail") continue;
+      assert.ok(
+        typeof p.staleReason === "string" && p.staleReason.trim().length > 0,
+        `${p.id}: stale: "fail" needs a non-empty staleReason (the default is the ceiling: a below-ceiling measurement passes with a hint)`,
+      );
+    }
+  });
+
   test("row ids and baseline paths are unique", () => {
     const ids = RATCHETS.map(rowId);
     const baselines = RATCHETS.map(rowBaseline);

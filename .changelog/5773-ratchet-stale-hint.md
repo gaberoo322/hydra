@@ -1,0 +1,1 @@
+- refactor: a Ratchet measurement below its ceiling passes with a hint instead of failing as stale (#5773)

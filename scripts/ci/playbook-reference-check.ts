@@ -416,7 +416,6 @@ export const referenceRatchet = defineRatchet({
   baseline: "scripts/ci/playbook-reference-baseline.json",
   shape: "set",
   polarity: "ceiling",
-  stale: "fail",
   enforcement: "required",
   measure: async (root) => measureRows(root),
   help: [

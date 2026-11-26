@@ -327,7 +327,6 @@ export const testSubjectRatchet = defineRatchet({
   baseline: "test/fixtures/test-subject-baseline.json",
   shape: "counted",
   polarity: "ceiling",
-  stale: "fail",
   enforcement: "required",
   measure: async (root: string) =>
     Object.fromEntries(Object.entries(buildSubjectCounts(join(root, "test"))).filter(([, n]) => n >= 2)),
