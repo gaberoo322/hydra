@@ -24,7 +24,6 @@
   "comment\ttest/hydra-review-stalled-pr-bucket.test.mts\t// The relabel itself fails loud: a non-2xx HTTP code exits non-zero (QA round 1).": 1,
   "comment\ttest/lifecycle-state-label-guard.test.mts\t// QA round 4 (operator ruling): the shell-parsing pipeline is hand-copied from": 1,
   "comment\ttest/lifecycle-state-label-guard.test.mts\t// QA round 4: nested parentheses, repo spellings, last --repo wins.": 1,
-  "comment\ttest/lifecycle-transitions.test.mts\t// A shadow-mode write is journaled kind refused with written:true (#5313 round 3).": 1,
   "comment\ttest/qa-fold.test.mts\t// Fail CLOSED (QA round 1 on PR #4752): malformed input is a high finding, never [].": 1,
   "comment\ttest/qa-prior-round.test.mts\t* ADR-0038 D2 — mechanical move): the prior-round phase — verdict history and re-review context cases.": 1,
   "comment\ttest/target-design-concept.test.mts\t// CSB #119's 2026-09-28 fix-forward status report carries the header but": 1,
