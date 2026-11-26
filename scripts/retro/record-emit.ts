@@ -59,11 +59,16 @@ const failed = (code: string, extra: Record<string, unknown> = {}): RecordEmitOu
   result: { ok: false, ...extra, code },
 });
 
-function parseFlags(argv: readonly string[]): Record<string, string> {
+/** Returns null when a flag has no value (absent or another `--flag` follows). */
+function parseFlags(argv: readonly string[]): Record<string, string> | null {
   const flags: Record<string, string> = {};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a.startsWith("--")) flags[a.slice(2)] = argv[++i] ?? "";
+    if (!a.startsWith("--")) continue;
+    const value = argv[i + 1];
+    if (value === undefined || value.startsWith("--")) return null;
+    flags[a.slice(2)] = value;
+    i++;
   }
   return flags;
 }
@@ -175,6 +180,7 @@ async function runLedger(flags: Record<string, string>, ports: RecordEmitPorts):
 export async function runRecordEmit(argv: readonly string[], ports: RecordEmitPorts): Promise<RecordEmitOutcome> {
   const [verb, ...rest] = argv;
   const flags = parseFlags(rest);
+  if (flags === null) return usage("every --flag requires a value");
   try {
     if (verb === "issue") return await runIssue(flags, ports);
     if (verb === "pr") return await runPr(flags, ports);

@@ -66,6 +66,26 @@ describe("retro record-emit", () => {
     assert.equal(recorded.length, 0);
   });
 
+  test("a flag whose value is missing or another --flag is a usage error and creates nothing", async () => {
+    for (const argv of [
+      ["issue", "--title", "--body-file", "f", "--cue", "c", "--run-id", "r"],
+      ["issue", "--title", "t", "--body-file", "f", "--cue", "c", "--run-id"],
+    ]) {
+      const { ports, calls } = fakePorts();
+      const out = await runRecordEmit(argv, ports);
+      assert.equal(out.code, 2);
+      assert.equal(out.result.code, "usage");
+      assert.deepEqual(calls, []);
+    }
+  });
+
+  test("a well-formed flag list still runs (sibling shape keeps its verdict)", async () => {
+    const { ports, calls } = fakePorts();
+    const out = await runRecordEmit(ISSUE_ARGV, ports);
+    assert.equal(out.code, 0);
+    assert.deepEqual(calls, ["gh", "advance", "record"]);
+  });
+
   test("illegal-transition that the identical retry resolves (backstop race) still records", async () => {
     let n = 0;
     const { ports, recorded } = fakePorts({ advance: async () => (n++ === 0 ? REFUSED("illegal-transition") : OK_ADVANCE) });
