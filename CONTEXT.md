@@ -190,8 +190,8 @@ _Avoid_: "retry limit" or "round cap" for the general concept (each is one arm),
 The move of a work item into the operator-only `parked` state when a **Cap Arm** is over its limit. The lifecycle writer seam (`src/lifecycle/seam.ts`, `parkForCap`) parks in the same call that hit the cap: it closes the dispatch claim, writes `parked` with `reason=cap:<arm>`, posts one unified escalation comment, and leaves any open PR open. Every autopilot arm then skips the item until the operator un-parks it with a `Hydra-Cap-Reset:` marker. A Park is an off-list escalation, so it never writes `ready-for-human`, which keeps its [[ADR-0005]] meaning. Defined by [[ADR-0047]] Decisions 2 and 6.
 _Avoid_: "escalate to ready-for-human" for an off-list cap exhaustion (the deep-QA arm's escalation is the one on-list exit), "block" (`blocked` is a dependency wait, not a cap)
 
-**Live Cap** — **RETIRED distinction** (#5768):
-Former name for a **Cap Arm** that parked while the lifecycle seam was still being rolled out. The rollout is over and every **Cap Arm** **Parks**, so "live" distinguishes nothing: write **Cap Arm**. A comment that still says "the seam's `<arm>` Live Cap" means that Cap Arm. The rollout is recorded as history in [[ADR-0047]] Decision 7.
+**Live Cap**:
+Retired (#5768). Former name for a **Cap Arm** that parked while the lifecycle seam was still being rolled out. The rollout is over and every **Cap Arm** **Parks**, so "live" distinguishes nothing: write **Cap Arm**. A comment that still says "the seam's `<arm>` Live Cap" means that Cap Arm. The rollout is recorded as history in [[ADR-0047]] Decision 7.
 _Avoid_: a caller-side park (a script that writes `parked` itself; only the seam parks), "enforced cap" (every cap is enforced)
 
 **Roadmap Milestone** — **RETIRED** (#4479):
