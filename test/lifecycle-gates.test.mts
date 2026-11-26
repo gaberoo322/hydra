@@ -2,7 +2,7 @@
  * Lifecycle gate predicates (pure) and the writer-seam spine under shadow /
  * enforce with injected deps — no gh, no Redis (ADR-0047, issue #5310).
  */
-import { test, describe } from "node:test";
+import { test, describe, mock } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import * as gatesModule from "../src/lifecycle/gates.ts";
@@ -44,6 +44,7 @@ import {
 } from "../src/lifecycle/index.ts";
 import { isUnsanctionedHoldExit } from "../src/lifecycle/hold-exit.ts";
 import type { LifecycleJournalEntry } from "../src/redis/lifecycle-journal.ts";
+import { logger } from "../src/logger.ts";
 
 function gi(over: Partial<GateInput> = {}): GateInput {
   return { issue: 10, from: "in-progress", to: "needs-qa", flags: [], evidence: {}, ...over };
@@ -208,23 +209,62 @@ describe("gate predicates (INV-7, INV-8)", () => {
 });
 
 describe("mode resolution (INV-12)", () => {
-  test("is total: only the literal 'enforce' enforces", () => {
-    assert.deepEqual(resolveLifecycleMode(undefined), { mode: "shadow", reason: "config-missing" });
-    assert.deepEqual(resolveLifecycleMode(null), { mode: "shadow", reason: "value-malformed" });
-    assert.deepEqual(resolveLifecycleMode([]), { mode: "shadow", reason: "value-malformed" });
-    assert.deepEqual(resolveLifecycleMode({}), { mode: "shadow", reason: "key-missing" });
-    assert.deepEqual(resolveLifecycleMode({ "lifecycle-seam": "ENFORCE" }), { mode: "shadow", reason: "value-malformed" });
-    assert.deepEqual(resolveLifecycleMode({ "lifecycle-seam": "shadow" }), { mode: "shadow", reason: null });
+  test("is total and fails closed: every input enforces, and only the literal 'enforce' carries no reason", () => {
+    assert.deepEqual(resolveLifecycleMode(undefined), { mode: "enforce", reason: "config-missing" });
+    assert.deepEqual(resolveLifecycleMode(null), { mode: "enforce", reason: "value-malformed" });
+    assert.deepEqual(resolveLifecycleMode([]), { mode: "enforce", reason: "value-malformed" });
+    assert.deepEqual(resolveLifecycleMode({}), { mode: "enforce", reason: "key-missing" });
+    assert.deepEqual(resolveLifecycleMode({ "lifecycle-seam": "ENFORCE" }), { mode: "enforce", reason: "value-malformed" });
+    assert.deepEqual(resolveLifecycleMode({ "lifecycle-seam": 1 }), { mode: "enforce", reason: "value-malformed" });
+    assert.deepEqual(resolveLifecycleMode({ "lifecycle-seam": "shadow" }), { mode: "enforce", reason: "shadow-retired" });
     assert.deepEqual(resolveLifecycleMode({ "lifecycle-seam": "enforce" }), { mode: "enforce", reason: null });
   });
 
-  test("loader maps missing file and bad JSON to shadow, and the committed file says enforce", async () => {
-    const enoent = async () => { throw Object.assign(new Error("nope"), { code: "ENOENT" }); };
-    assert.deepEqual(await loadLifecycleMode("/x", { readFile: enoent }), { mode: "shadow", reason: "config-missing" });
-    assert.deepEqual(await loadLifecycleMode("/x", { readFile: async () => "{oops" }), { mode: "shadow", reason: "value-malformed" });
-    const real = await loadLifecycleMode(process.cwd());
-    assert.deepEqual(real, { mode: "enforce", reason: null });
+  test("loader maps a missing file, an unreadable file and bad JSON to enforce, and the committed file says enforce", async () => {
+    const errSpy = mock.method(logger, "error", () => {});
+    try {
+      const enoent = async () => { throw Object.assign(new Error("nope"), { code: "ENOENT" }); };
+      const eacces = async () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); };
+      assert.deepEqual(await loadLifecycleMode("/x", { readFile: enoent }), { mode: "enforce", reason: "config-missing" });
+      assert.deepEqual(await loadLifecycleMode("/x", { readFile: eacces }), { mode: "enforce", reason: "config-unreadable" });
+      assert.deepEqual(await loadLifecycleMode("/x", { readFile: async () => "{oops" }), { mode: "enforce", reason: "value-malformed" });
+      assert.equal(errSpy.mock.callCount(), 3);
+      const real = await loadLifecycleMode(process.cwd());
+      assert.deepEqual(real, { mode: "enforce", reason: null });
+      assert.equal(errSpy.mock.callCount(), 3, "an explicit enforce is silent");
+    } finally {
+      errSpy.mock.restore();
+    }
   });
+
+  const FALLBACKS: Array<{ name: string; reason: string; readFile: (path: string) => Promise<string> }> = [
+    { name: "no config", reason: "config-missing", readFile: async () => { throw Object.assign(new Error("nope"), { code: "ENOENT" }); } },
+    { name: "an unreadable config", reason: "config-unreadable", readFile: async () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); } },
+    { name: "a malformed config", reason: "value-malformed", readFile: async () => "{oops" },
+    { name: "a config without the key", reason: "key-missing", readFile: async () => "{}" },
+    { name: "an unknown value", reason: "value-malformed", readFile: async () => JSON.stringify({ "lifecycle-seam": "audit" }) },
+    { name: "the retired literal 'shadow'", reason: "shadow-retired", readFile: async () => JSON.stringify({ "lifecycle-seam": "shadow" }) },
+  ];
+  for (const f of FALLBACKS) {
+    test(`${f.name}: the loader logs the reason loudly and the seam refuses on gate fail with no write`, async () => {
+      const errSpy = mock.method(logger, "error", () => {});
+      try {
+        const h = harness(["needs-triage"], "shadow");
+        h.deps.mode = async () => (await loadLifecycleMode("/x", { readFile: f.readFile })).mode;
+        const res = await advance({ issue: 10, to: "in-progress" }, h.deps);
+        assert.deepEqual(res, { ok: false, issue: 10, code: "illegal-transition", mode: "enforce", written: false });
+        assert.equal(h.edits.length, 0);
+        assert.equal(h.journal[0].result, "refused:illegal-transition");
+        assert.equal(h.journal[0].written, false);
+        assert.ok(errSpy.mock.callCount() >= 1, "the fallback is logged");
+        for (const call of errSpy.mock.calls) {
+          assert.equal((call.arguments[0] as { reason?: string }).reason, f.reason);
+        }
+      } finally {
+        errSpy.mock.restore();
+      }
+    });
+  }
 });
 
 // ---------------------------------------------------------------------------

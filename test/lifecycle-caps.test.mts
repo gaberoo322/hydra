@@ -4,7 +4,7 @@
  * advance in-progress -> ready-for-agent, parkForCap, postCapReset). Offline:
  * every gh / Redis / clock effect is an in-memory SeamDeps fake.
  */
-import { test, describe } from "node:test";
+import { test, describe, mock } from "node:test";
 import assert from "node:assert/strict";
 
 import {
@@ -24,7 +24,8 @@ import {
   type CapJournalEntry,
   type TimedBody,
 } from "../src/lifecycle/caps.ts";
-import { advance, openClaim, releaseClaim, type SeamDeps, type LifecycleMode } from "../src/lifecycle/index.ts";
+import { advance, loadLifecycleMode, openClaim, releaseClaim, type SeamDeps, type LifecycleMode } from "../src/lifecycle/index.ts";
+import { logger } from "../src/logger.ts";
 import { postCapReset } from "../src/lifecycle/park.ts";
 import { TRANSITIONS } from "../src/lifecycle/transitions.ts";
 import type { LifecycleJournalEntry } from "../src/redis/lifecycle-journal.ts";
@@ -830,4 +831,40 @@ describe("resetsCapsOnExit (#5661 INV-1)", () => {
       assert.equal(resetsCapsOnExit(s), false, s);
     }
   });
+});
+
+// ---------------------------------------------------------------------------
+// Fail-closed mode loader (ADR-0047 D7, issue #5769): a rollout config that does
+// not say 'enforce' still parks on cap. `total-claims` is not a live-in-shadow
+// arm, so a shadow resolution would open the claim instead of parking.
+// ---------------------------------------------------------------------------
+
+describe("fail-closed mode loader parks on cap (#5769)", () => {
+  const FALLBACKS: Array<{ name: string; readFile: (path: string) => Promise<string> }> = [
+    { name: "no config", readFile: async () => { throw Object.assign(new Error("nope"), { code: "ENOENT" }); } },
+    { name: "an unreadable config", readFile: async () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); } },
+    { name: "a malformed config", readFile: async () => "{oops" },
+    { name: "a config without the key", readFile: async () => "{}" },
+    { name: "an unknown value", readFile: async () => JSON.stringify({ "lifecycle-seam": "audit" }) },
+    { name: "the retired literal 'shadow'", readFile: async () => JSON.stringify({ "lifecycle-seam": "shadow" }) },
+  ];
+  for (const f of FALLBACKS) {
+    test(`${f.name}: over cap, no claim opens and the issue parks in the same call`, async () => {
+      const errSpy = mock.method(logger, "error", () => {});
+      try {
+        const w = world("shadow", ["ready-for-agent"]);
+        w.deps.mode = async () => (await loadLifecycleMode("/x", { readFile: f.readFile })).mode;
+        seedClaims(w, 10);
+        const res = await openClaim(claimInput(), w.deps);
+        assert.deepEqual(res, { ok: false, code: "parked:total-claims", written: true });
+        assert.equal(w.claim, null);
+        assert.deepEqual(w.edits, [{ issue: 42, remove: ["ready-for-agent"], add: ["parked"] }]);
+        const park = w.journal.find((e) => e.kind === "transition" && e.to === "parked")!;
+        assert.equal(park.result, "parked:total-claims");
+        assert.ok(errSpy.mock.callCount() >= 1, "the fallback is logged");
+      } finally {
+        errSpy.mock.restore();
+      }
+    });
+  }
 });

@@ -62,26 +62,44 @@ import type { TimedBody, TimelineLabelEvent } from "./caps.ts";
 
 const LIFECYCLE_ROLLOUT_CONFIG_PATH = "config/orchestrator/lifecycle-rollout.json";
 export type LifecycleMode = "shadow" | "enforce";
-type ModeReason = "config-missing" | "key-missing" | "value-malformed";
+type ModeReason =
+  | "config-missing"
+  | "config-unreadable"
+  | "key-missing"
+  | "value-malformed"
+  | "shadow-retired";
 
 export interface ResolvedMode {
   mode: LifecycleMode;
-  /** Why the mode fell back to shadow; null when the file said so explicitly. */
+  /** Why the loader fell back to enforce; null when the file says `enforce` explicitly. */
   reason: ModeReason | null;
 }
 
-/** Pure and total over unknown input: anything but the literal `'enforce'` is shadow. */
+/**
+ * Pure and total over unknown input, and fail-closed (ADR-0047 Decision 7):
+ * every input resolves to enforce. Shadow is retired, so the literal `'shadow'`
+ * enforces too; only the literal `'enforce'` carries no fallback reason.
+ */
 export function resolveLifecycleMode(raw: unknown): ResolvedMode {
-  if (raw === undefined) return { mode: "shadow", reason: "config-missing" };
+  if (raw === undefined) return { mode: "enforce", reason: "config-missing" };
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
-    return { mode: "shadow", reason: "value-malformed" };
+    return { mode: "enforce", reason: "value-malformed" };
   }
   const obj = raw as Record<string, unknown>;
-  if (!("lifecycle-seam" in obj)) return { mode: "shadow", reason: "key-missing" };
+  if (!("lifecycle-seam" in obj)) return { mode: "enforce", reason: "key-missing" };
   const v = obj["lifecycle-seam"];
   if (v === "enforce") return { mode: "enforce", reason: null };
-  if (v === "shadow") return { mode: "shadow", reason: null };
-  return { mode: "shadow", reason: "value-malformed" };
+  if (v === "shadow") return { mode: "enforce", reason: "shadow-retired" };
+  return { mode: "enforce", reason: "value-malformed" };
+}
+
+/** Enforce-by-fallback is never silent: every reason is logged at error level. */
+function fallbackToEnforce(reason: ModeReason, path: string, err?: unknown): ResolvedMode {
+  logger.error(
+    { reason, path, ...(err === undefined ? {} : { err }) },
+    "[lifecycle] rollout config did not say 'enforce'; failing closed to enforce",
+  );
+  return { mode: "enforce", reason };
 }
 
 export async function loadLifecycleMode(
@@ -89,22 +107,22 @@ export async function loadLifecycleMode(
   deps: { readFile?: (path: string) => Promise<string> } = {},
 ): Promise<ResolvedMode> {
   const read = deps.readFile ?? ((p: string) => fsReadFile(p, "utf8"));
+  const path = join(repoRoot, LIFECYCLE_ROLLOUT_CONFIG_PATH);
   let text: string;
   try {
-    text = await read(join(repoRoot, LIFECYCLE_ROLLOUT_CONFIG_PATH));
+    text = await read(path);
   } catch (err) {
     const code = (err as { code?: unknown } | null)?.code;
-    if (code !== "ENOENT") {
-      logger.warn({ err }, "[lifecycle] rollout config unreadable; defaulting to shadow");
-    }
-    return resolveLifecycleMode(undefined);
+    return fallbackToEnforce(code === "ENOENT" ? "config-missing" : "config-unreadable", path, err);
   }
+  let parsed: unknown;
   try {
-    return resolveLifecycleMode(JSON.parse(text));
+    parsed = JSON.parse(text);
   } catch (err) {
-    logger.warn({ err }, "[lifecycle] rollout config malformed; defaulting to shadow");
-    return { mode: "shadow", reason: "value-malformed" };
+    return fallbackToEnforce("value-malformed", path, err);
   }
+  const resolved = resolveLifecycleMode(parsed);
+  return resolved.reason === null ? resolved : fallbackToEnforce(resolved.reason, path);
 }
 
 // ---------------------------------------------------------------------------
