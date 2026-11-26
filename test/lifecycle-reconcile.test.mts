@@ -24,7 +24,7 @@ import {
   type ReconcileReport,
 } from "../src/lifecycle/reconcile.ts";
 import { externalMoves, lastKnownState, replayStateSnapshots } from "../src/lifecycle/timeline.ts";
-import { classifyQaPassedExit, type QaLivePr } from "../src/lifecycle/gates.ts";
+import { classifyQaPassedExit, gatePrOpen, type QaLivePr } from "../src/lifecycle/gates.ts";
 import { foldQaLiveChecks } from "../src/lifecycle/seam-deps.ts";
 import { findTransition } from "../src/lifecycle/transitions.ts";
 import type { LifecycleJournalEntry } from "../src/redis/lifecycle-journal.ts";
@@ -55,7 +55,7 @@ function live(over: Partial<QaLivePr> = {}): QaLivePr {
 const PASS_TRAILER = (pr: number, sha = HEAD.slice(0, 12)) =>
   `QA-Verdict: PASS pr=${pr} round=1 sha=${sha} blockers=0 max_severity=none`;
 
-function world(mode: "shadow" | "enforce" = "enforce") {
+function world() {
   const w = {
     issues: new Map<number, Issue>(),
     closedRows: [] as number[],
@@ -90,7 +90,6 @@ function world(mode: "shadow" | "enforce" = "enforce") {
   });
   const seam: SeamDeps = {
     repo: "o/r",
-    mode: async () => mode,
     view: async (n) => {
       const i = w.issues.get(n);
       return i ? { ok: true, row: row(n, i) } : { ok: false, code: "gh-failed" };
@@ -354,7 +353,7 @@ describe("qa-passed exits (INV-3, INV-4, INV-13)", () => {
   });
 
   test("the qa-exit gate verifies the requested target against the live PR", async () => {
-    const { w, add } = world("enforce");
+    const { w, add } = world();
     add(40, ["qa-passed"]);
     w.lives.set(400, live({ number: 400, mergeStateStatus: "DIRTY" }));
     const res = await advance({ issue: 40, to: "needs-qa", evidence: { pr: "400" }, actor: "reconcile" }, w.deps.seam);
@@ -371,6 +370,9 @@ describe("qa-passed exits (INV-3, INV-4, INV-13)", () => {
     assert.equal(resolveQaPr([], 50, prs), 7);
     assert.equal(resolveQaPr([], 50, [...prs, { number: 9, body: "Fixes #50" }]), null);
     assert.equal(resolveQaPr([], 51, prs), null);
+    // #5766: a companion PR that says it does NOT close the issue is no candidate,
+    // so the one real closing PR still resolves instead of going ambiguous.
+    assert.equal(resolveQaPr([], 50, [...prs, { number: 9, body: "Does not close #50 — #7 does." }]), 7);
     assert.equal(resolveQaPr([], 50, null), null);
 
     const { w, add } = world();
@@ -569,21 +571,18 @@ describe("external close and reopen (INV-9)", () => {
 });
 
 describe("report, dry-run and never-throw (INV-10, INV-11)", () => {
-  test("the report is persisted with the enforce-readiness fields", async () => {
+  test("the report is persisted with the seam-activity fields and no rollout-mode fields", async () => {
     const { w, add, journal } = world();
     add(100, ["ready-for-agent"]);
     journal(100).push(
       je({ to: "ready-for-agent", ts: NOW - 1000 }),
-      je({ kind: "refused", to: "in-progress", result: "shadow-would-refuse:design-concept-missing", ts: NOW - 2000 }),
-      je({ kind: "refused", to: "parked", result: "shadow-would-park:total-claims", written: false, ts: NOW - 3000 }),
-      je({ kind: "refused", to: "parked", result: "shadow-would-refuse:old", ts: NOW - 30 * 24 * 3_600_000 }),
+      je({ kind: "refused", to: "in-progress", result: "refused:design-concept-missing", written: false, ts: NOW - 2000 }),
+      je({ to: "in-progress", ts: NOW - 30 * 24 * 3_600_000 }),
     );
     const report = await runReconcile(w.deps);
     assert.equal(w.reports.length, 1);
     assert.equal(report.seamTransitions, 1);
-    assert.deepEqual(report.wouldRefuseByReason, { "design-concept-missing": 1 });
-    assert.deepEqual(report.wouldParkByArm, { "total-claims": 1 });
-    assert.equal(report.mode, "enforce");
+    for (const k of ["mode", "wouldRefuseByReason", "wouldParkByArm"]) assert.ok(!(k in report), k);
     assert.equal(report.scanned.open, 1);
     assert.deepEqual(report.errors, []);
     for (const k of ["invalid", "zeroStateRelabeled", "zeroStateExempt", "externalEntries", "capResetsPosted", "qaExits"] as const) {
@@ -844,9 +843,59 @@ describe("PR-covered ready-for-agent promotion (#5489)", () => {
   });
 
   test("closingPrs is the one candidate predicate: drafts dropped, order kept", () => {
-    const prs: OpenPrRef[] = [{ number: 1, body: "Closes #9" }, { number: 2, body: "Closes #9", isDraft: true }, { number: 3, body: "Fixes #9" }];
-    assert.deepEqual(closingPrs(prs, 9).map((p) => p.number), [1, 3]);
+    // #5766: the candidate filter asks the PR refs module — a negated ref (#4) is
+    // not a candidate, the colon form (#5) is.
+    const prs: OpenPrRef[] = [
+      { number: 1, body: "Closes #9" },
+      { number: 2, body: "Closes #9", isDraft: true },
+      { number: 3, body: "Fixes #9" },
+      { number: 4, body: "This does not close #9" },
+      { number: 5, body: "Closes: #9" },
+    ];
+    assert.deepEqual(closingPrs(prs, 9).map((p) => p.number), [1, 3, 5]);
     assert.equal(singleClosingPr(prs.slice(0, 2), 9), 1);
+  });
+
+  // #5766 (epic #5762) acceptance: reconcile's candidate filter and the pr-open
+  // gate give the SAME answer for every row of the shared truth table, so a PR
+  // reconcile promotes on can never be one the gate then refuses (or vice versa).
+  test("closingPrs, singleClosingPr and resolveQaPr agree with the pr-open gate on every truth-table row", () => {
+    const rows = (
+      JSON.parse(readFileSync(new URL("./fixtures/pr-refs-truth-table.json", import.meta.url), "utf-8")) as {
+        rows: Array<{ name: string; body: string; closing: number[]; referenced: number[]; doesNotClose?: number[] }>;
+      }
+    ).rows;
+    assert.ok(rows.length > 0, "truth table must not be empty");
+    // Probes: the row's three columns UNION every number written after a hash in
+    // the body, so a row whose columns are all empty ("Closes:#4", "Closing #5")
+    // is still asked about the number it names.
+    let probes = 0;
+    const zeroProbeRows: string[] = [];
+    for (const row of rows) {
+      const inBody = [...row.body.matchAll(/#(\d+)/g)].map((m) => Number(m[1]));
+      const probeSet = new Set([...row.closing, ...row.referenced, ...(row.doesNotClose ?? []), ...inBody]);
+      if (probeSet.size === 0) {
+        zeroProbeRows.push(row.name);
+        assert.equal(/#\d/.test(row.body), false, `a row with a hash-number must be probed — ${row.name}`);
+      }
+      for (const n of probeSet) {
+        probes++;
+        const gate = gatePrOpen(
+          { issue: n, from: "in-progress", to: "needs-qa", flags: [], evidence: { pr: "55" } },
+          { pr: { ok: true, value: { number: 55, state: "OPEN", body: row.body } } },
+        );
+        assert.ok(gate.code === "ok" || gate.code === "pr-does-not-close-issue", `gate code ${gate.code} — ${row.name}`);
+        const prs: OpenPrRef[] = [{ number: 55, body: row.body }];
+        const label = `#${n} — ${row.name}`;
+        assert.equal(closingPrs(prs, n).length === 1, gate.ok, `closingPrs vs gate ${label}`);
+        assert.equal(singleClosingPr(prs, n) === 55, gate.ok, `singleClosingPr vs gate ${label}`);
+        assert.equal(resolveQaPr([], n, prs) === 55, gate.ok, `resolveQaPr vs gate ${label}`);
+        assert.equal(gate.ok, row.closing.includes(n), `gate vs table ${label}`);
+      }
+    }
+    // Only a body that names no hash-number at all may go unprobed.
+    assert.deepEqual(zeroProbeRows, ["empty body"]);
+    assert.ok(probes >= rows.length - zeroProbeRows.length, `every other row is probed at least once (${probes} probes)`);
   });
 
   test("promotions are bounded per pass", async () => {

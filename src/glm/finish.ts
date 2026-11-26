@@ -382,7 +382,7 @@ export interface FinishDeps {
   /**
    * The lifecycle seam's `advance` with a `--from` compare-and-set (#5318
    * INV-12). Default: `advance()` over `defaultSeamDeps`. A release counts
-   * toward the non-live stale-requeue arm (shadow: would-park journal only).
+   * toward the stale-requeue arm.
    */
   advanceState: (
     issue: number,

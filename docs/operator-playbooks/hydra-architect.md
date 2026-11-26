@@ -25,8 +25,7 @@ the tree. Two things are NOT safe to run against `~/hydra` directly: the
 directly; the resulting uncommitted report write blocked two consecutive
 `deploy` jobs and left prod six commits behind with only a WARN-level alarm.
 
-Before running **Architecture Shape** (or any earlier phase, if you prefer to
-set this up up front), create and enter a throwaway worktree:
+Before **Architecture Shape**, create and enter a throwaway worktree:
 
 ```bash
 WT="/home/gabe/hydra/.claude/worktrees/architect-$(date +%s)"
@@ -35,11 +34,8 @@ cd "$WT"
 git rev-parse --git-dir   # must print .../.git/worktrees/... -- abort if it doesn't
 ```
 
-From here on, `$WT` is your cwd for the rest of this run. **Architecture
-Shape**'s `npm test` and **Phase 5**'s report write both resolve against
-`$WT`, never `~/hydra/...`. Everything else (the absolute `~/hydra/...` reads
-listed above) is untouched — reading the live checkout is fine, only writing
-to it and running the test suite there are the problem.
+From here on, `$WT` is your cwd. **Architecture Shape**'s `npm test` and
+**Phase 5**'s report write both resolve against `$WT`, never `~/hydra/...`.
 
 ## What Hydra Is
 
@@ -121,12 +117,9 @@ For each: **What / Why / Evidence / Risk / Dependency**.
 
 ## Phase 5: Write Report
 
-Write `config/direction/architecture-review.md` **resolved against `$WT`**
-(your worktree cwd from Worktree Setup above) — never the absolute
-`~/hydra/config/direction/architecture-review.md` path. That absolute path IS
-the live deploy checkout; an uncommitted write there is exactly the #4174
-bug (it blocked `scripts/deploy.sh`'s dirty-tree guard for two consecutive
-deploys):
+Write `config/direction/architecture-review.md` **resolved against `$WT`**,
+never the absolute `~/hydra/config/direction/architecture-review.md` path (the
+#4174 dirty-tree bug):
 
 ```yaml
 ---
@@ -159,8 +152,7 @@ config/direction/architecture-review.md
 EOF
 ```
 
-Once the PR is open, clean up the worktree so it doesn't leak (`hydra-branch-prune`
-will also reap it eventually, but tidy up now if convenient):
+Once the PR is open, clean up the worktree:
 
 ```bash
 cd ~/hydra

@@ -1,0 +1,1 @@
+- refactor: the lifecycle seam has one behaviour. The `mode` dependency is gone from `SeamDeps`, along with the shadow branches in the seam, caps, claim and reconcile, the `liveInShadow` cap column, and the `mode` / `wouldRefuse` / `wouldPark` result fields; the rollout-config loader is deleted, so nothing reads `config/orchestrator/lifecycle-rollout.json` any more (#5770)

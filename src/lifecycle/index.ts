@@ -66,9 +66,6 @@ export {
 export { advance, journalEntry, type AdvanceResult } from "./seam.ts";
 export {
   defaultSeamDeps,
-  loadLifecycleMode,
-  resolveLifecycleMode,
-  type LifecycleMode,
   type SeamDeps,
 } from "./seam-deps.ts";
 export {

@@ -670,7 +670,7 @@ async function runRouteImpl(
       if (adv.ok === true) {
         label = adv.to;
       } else {
-        // The seam parks the 3rd reviewed FAIL in enforce AND shadow (qa-fail-rounds is a live arm), posting
+        // The seam parks the 3rd reviewed FAIL (the qa-fail-rounds arm), posting
         // the unified park comment itself; any other refusal ends the route.
         if (adv.code === "escalated:deep-qa-fails") escalated = true;
         else if (adv.code !== "parked:qa-fail-rounds") throw new Error(`lifecycle advance bounce refused (${adv.code || "unknown"}) - not editing labels by hand`);

@@ -58,7 +58,7 @@
   "pins\ttest/qa-merge-guard.test.mts\tcode": 2,
   "pins\ttest/qa-plumbing-scripts.test.mts\tprompt": 2,
   "pins\ttest/qa-reviewer-commit-a.test.mts\tcode": 2,
-  "pins\ttest/qa-reviewer-commit-a.test.mts\tprompt": 5,
+  "pins\ttest/qa-reviewer-commit-a.test.mts\tprompt": 3,
   "pins\ttest/qa-reviewer-commit-b.test.mts\tcode": 2,
   "pins\ttest/qa-reviewer-commit-b.test.mts\tprompt": 2,
   "pins\ttest/redis-db-helper.test.mts\tcode": 8,

@@ -24,7 +24,7 @@ import {
   type CapJournalEntry,
   type TimedBody,
 } from "../src/lifecycle/caps.ts";
-import { advance, openClaim, releaseClaim, type SeamDeps, type LifecycleMode } from "../src/lifecycle/index.ts";
+import { advance, openClaim, releaseClaim, type SeamDeps } from "../src/lifecycle/index.ts";
 import { postCapReset } from "../src/lifecycle/park.ts";
 import { TRANSITIONS } from "../src/lifecycle/transitions.ts";
 import type { LifecycleJournalEntry } from "../src/redis/lifecycle-journal.ts";
@@ -221,12 +221,12 @@ describe("timestamped qa-fail-rounds count (#5437)", () => {
   });
 
   test("seam: an issue-side reset newer than 3 FAIL rounds lets the QA claim proceed; a 4th round parks", async () => {
-    const w = world("enforce", ["needs-qa"]);
+    const w = world(["needs-qa"]);
     w.prBodies = rounds3;
     w.commentBodies = [`Hydra-Cap-Reset: by=op ts=${new Date(at(4)).toISOString()}`];
     const ok = await openClaim(claimInput({ class: "qa_orch", pr: 7 }), w.deps);
     assert.equal(ok.ok, true);
-    const w2 = world("enforce", ["needs-qa"]);
+    const w2 = world(["needs-qa"]);
     w2.prBodies = [...rounds3, timed(4, 5), timed(5, 6), timed(6, 7)];
     w2.commentBodies = w.commentBodies;
     const parked = await openClaim(claimInput({ class: "qa_orch", pr: 7 }), w2.deps);
@@ -367,14 +367,13 @@ interface World {
   prBodies: Array<string | TimedBody>;
 }
 
-function world(mode: LifecycleMode, labels: string[], env: Record<string, string> = {}): World {
+function world(labels: string[], env: Record<string, string> = {}): World {
   const w: World = {
     journal: [], edits: [], comments: [], labels: [...labels], claim: null, fetchFail: new Set(),
     commentBodies: [], timelineEvents: [], prBodies: [], deps: undefined as unknown as SeamDeps,
   };
   w.deps = {
     repo: "o/r",
-    mode: async () => mode,
     view: async (n) =>
       w.fetchFail.has("view")
         ? { ok: false, code: "gh-failed" }
@@ -433,7 +432,7 @@ const claimInput = (over: Record<string, unknown> = {}) => ({ issue: 42, dispatc
 
 describe("openClaim wiring (INV-6, INV-7, INV-10, INV-12, INV-13)", () => {
   test("under cap: claim opens, entry carries {dispatch,class,run,state[,pr][,purpose]}", async () => {
-    const w = world("enforce", ["ready-for-agent"]);
+    const w = world(["ready-for-agent"]);
     const res = await openClaim(claimInput({ pr: 5, purpose: "resume" }), w.deps);
     assert.equal(res.ok, true);
     const e = w.journal.find((x) => x.kind === "claim-opened")!;
@@ -441,7 +440,7 @@ describe("openClaim wiring (INV-6, INV-7, INV-10, INV-12, INV-13)", () => {
   });
 
   test("enforce over cap: no claim, parks in the same call, returns parked:<arm>", async () => {
-    const w = world("enforce", ["ready-for-agent"]);
+    const w = world(["ready-for-agent"]);
     seedClaims(w, 10);
     const res = await openClaim(claimInput(), w.deps);
     assert.deepEqual(res, { ok: false, code: "parked:total-claims", written: true });
@@ -454,7 +453,7 @@ describe("openClaim wiring (INV-6, INV-7, INV-10, INV-12, INV-13)", () => {
   });
 
   test("a park posts exactly ONE unified comment on the issue, never the PR", async () => {
-    const w = world("enforce", ["needs-qa"]);
+    const w = world(["needs-qa"]);
     seedClaims(w, 10);
     await openClaim(claimInput({ class: "qa_orch", pr: 77 }), w.deps);
     assert.equal(w.comments.length, 1);
@@ -464,26 +463,8 @@ describe("openClaim wiring (INV-6, INV-7, INV-10, INV-12, INV-13)", () => {
     assert.ok(w.comments.every((c) => c.number !== 77));
   });
 
-  test("shadow over cap: relabels nothing, claim opens, one extra shadow-would-park entry", async () => {
-    const w = world("shadow", ["ready-for-agent"]);
-    seedClaims(w, 10);
-    const res = await openClaim(claimInput(), w.deps);
-    assert.equal(res.ok, true);
-    assert.equal((res as any).wouldPark, "total-claims");
-    assert.equal(w.edits.length, 0);
-    assert.equal(w.comments.length, 0);
-    assert.ok(w.claim);
-    const extra = w.journal.at(-1)!;
-    assert.equal(extra.kind, "refused");
-    assert.equal(extra.to, "parked");
-    assert.equal(extra.result, "shadow-would-park:total-claims");
-    assert.equal(extra.written, false);
-    assert.equal(extra.evidence.arm, "total-claims");
-    assert.equal(w.journal.filter((e) => e.kind === "claim-opened").length, 11);
-  });
-
   test("a held claim returns claim-held with no counting and no park", async () => {
-    const w = world("enforce", ["ready-for-agent"]);
+    const w = world(["ready-for-agent"]);
     seedClaims(w, 10);
     w.claim = { dispatchId: "other", class: "dev_orch", run: "r", artifactHash: null, openedAt: 1 };
     const res = await openClaim(claimInput(), w.deps);
@@ -494,7 +475,7 @@ describe("openClaim wiring (INV-6, INV-7, INV-10, INV-12, INV-13)", () => {
   });
 
   test("a park from a state with no parked row writes no label, journals refused:park-illegal-from, still refuses", async () => {
-    const w = world("enforce", ["qa-passed"]);
+    const w = world(["qa-passed"]);
     seedClaims(w, 10);
     const res = await openClaim(claimInput(), w.deps);
     assert.deepEqual(res, { ok: false, code: "parked:total-claims", written: false });
@@ -504,7 +485,7 @@ describe("openClaim wiring (INV-6, INV-7, INV-10, INV-12, INV-13)", () => {
 
   test("a fetch failure skips the cap check: claim proceeds, entry carries cap-check=skipped:fetch-failed", async () => {
     for (const failing of ["comments", "prBodies", "view"]) {
-      const w = world("enforce", ["ready-for-agent"]);
+      const w = world(["ready-for-agent"]);
       seedClaims(w, 10);
       w.fetchFail.add(failing);
       const res = await openClaim(claimInput({ pr: 5 }), w.deps);
@@ -516,7 +497,7 @@ describe("openClaim wiring (INV-6, INV-7, INV-10, INV-12, INV-13)", () => {
   });
 
   test("journal read AND timeline both failing skips the check", async () => {
-    const w = world("enforce", ["ready-for-agent"]);
+    const w = world(["ready-for-agent"]);
     w.fetchFail.add("journal");
     w.fetchFail.add("timeline");
     const res = await openClaim(claimInput(), w.deps);
@@ -525,7 +506,7 @@ describe("openClaim wiring (INV-6, INV-7, INV-10, INV-12, INV-13)", () => {
   });
 
   test("journal miss falls back to the timeline, parks tagged timeline-derived", async () => {
-    const w = world("enforce", ["ready-for-agent"]);
+    const w = world(["ready-for-agent"]);
     w.timelineEvents = Array.from({ length: 10 }, (_, i) => ({ event: "labeled" as const, label: "in-progress", tsMs: 1000 + i }));
     const res = await openClaim(claimInput(), w.deps);
     assert.deepEqual(res, { ok: false, code: "parked:total-claims", written: true });
@@ -536,7 +517,7 @@ describe("openClaim wiring (INV-6, INV-7, INV-10, INV-12, INV-13)", () => {
   });
 
   test("a journal miss with timeline events seeds the first entry so no fresh budget follows Redis loss", async () => {
-    const w = world("enforce", ["ready-for-agent"]);
+    const w = world(["ready-for-agent"]);
     w.timelineEvents = Array.from({ length: 9 }, (_, i) => ({ event: "labeled" as const, label: "in-progress", tsMs: 1000 + i }));
     const first = await openClaim(claimInput(), w.deps);
     assert.equal(first.ok, true);
@@ -548,7 +529,7 @@ describe("openClaim wiring (INV-6, INV-7, INV-10, INV-12, INV-13)", () => {
   });
 
   test("total-claims parks an alternating-arm loop while every per-arm count stays under its limit (AC1)", async () => {
-    const w = world("enforce", ["ready-for-agent"]);
+    const w = world(["ready-for-agent"]);
     const shapes = [{}, { class: "qa_orch", pr: 5 }, { pr: 5, purpose: "resume" }];
     for (let i = 0; i < 10; i++) {
       const r = await openClaim(claimInput({ dispatchId: `d${i}`, ...shapes[i % 3] }), w.deps);
@@ -560,7 +541,7 @@ describe("openClaim wiring (INV-6, INV-7, INV-10, INV-12, INV-13)", () => {
   });
 
   test("Hydra-Cap-Reset on the issue restarts every count", async () => {
-    const w = world("enforce", ["ready-for-agent"]);
+    const w = world(["ready-for-agent"]);
     seedClaims(w, 10);
     w.commentBodies = [`Hydra-Cap-Reset: by=op ts=${new Date(NOW - 1000).toISOString()}`];
     const res = await openClaim(claimInput(), w.deps);
@@ -568,7 +549,7 @@ describe("openClaim wiring (INV-6, INV-7, INV-10, INV-12, INV-13)", () => {
   });
 
   test("qa-fail-rounds parks a QA claim on a PR with 3 reviewed FAIL rounds", async () => {
-    const w = world("enforce", ["needs-qa"]);
+    const w = world(["needs-qa"]);
     w.prBodies = [failBody(5, 1), failBody(5, 2), failBody(5, 3)];
     const res = await openClaim(claimInput({ class: "qa_orch", pr: 5 }), w.deps);
     assert.deepEqual(res, { ok: false, code: "parked:qa-fail-rounds", written: true });
@@ -578,7 +559,7 @@ describe("openClaim wiring (INV-6, INV-7, INV-10, INV-12, INV-13)", () => {
   });
 
   test("a failed park label write journals write-failed and enforce still refuses", async () => {
-    const w = world("enforce", ["ready-for-agent"]);
+    const w = world(["ready-for-agent"]);
     seedClaims(w, 10);
     w.deps.edit = async () => ({ ok: false, code: "gh-failed", stderr: "no such label" });
     const res = await openClaim(claimInput(), w.deps);
@@ -590,7 +571,7 @@ describe("openClaim wiring (INV-6, INV-7, INV-10, INV-12, INV-13)", () => {
 
 describe("releaseClaim outcome (INV-13)", () => {
   test("claim-closed carries {dispatch, class, outcome}; outcome is optional", async () => {
-    const w = world("shadow", ["ready-for-agent"]);
+    const w = world(["ready-for-agent"]);
     await openClaim(claimInput(), w.deps);
     await releaseClaim(42, "dNew", w.deps, "cli", "no-pr");
     assert.deepEqual(w.journal.at(-1)!.evidence, { dispatch: "dNew", class: "dev_orch", outcome: "no-pr" });
@@ -611,7 +592,7 @@ describe("advance in-progress -> ready-for-agent is the stale re-queue (INV-3, I
   };
 
   test("enforce over cap: ready-for-agent is NOT written, the seam parks instead", async () => {
-    const w = world("enforce", ["in-progress"]);
+    const w = world(["in-progress"]);
     requeueEntries(w, 2);
     const res = await advance({ issue: 42, to: "ready-for-agent" }, w.deps);
     assert.deepEqual({ ok: res.ok, code: (res as any).code, written: (res as any).written }, { ok: false, code: "parked:stale-requeue", written: true });
@@ -619,27 +600,17 @@ describe("advance in-progress -> ready-for-agent is the stale re-queue (INV-3, I
     assert.ok(!w.labels.includes("ready-for-agent"));
   });
 
-  test("shadow over cap: the requeue still writes, wouldPark is reported, a shadow entry is journaled", async () => {
-    const w = world("shadow", ["in-progress"]);
-    requeueEntries(w, 2);
-    const res = await advance({ issue: 42, to: "ready-for-agent" }, w.deps);
-    assert.equal(res.ok, true);
-    assert.equal((res as any).wouldPark, "stale-requeue");
-    assert.deepEqual(w.edits, [{ issue: 42, remove: ["in-progress"], add: ["ready-for-agent"] }]);
-    assert.equal(w.journal.at(-1)!.result, "shadow-would-park:stale-requeue");
-  });
-
   test("under cap: advance is unchanged and no cap entry appears", async () => {
-    const w = world("shadow", ["in-progress"]);
+    const w = world(["in-progress"]);
     requeueEntries(w, 1);
     const res = await advance({ issue: 42, to: "ready-for-agent" }, w.deps);
     assert.equal(res.ok, true);
-    assert.equal((res as any).wouldPark, undefined);
-    assert.ok(!w.journal.some((e) => e.result.startsWith("shadow-would-park")));
+    assert.deepEqual(w.edits, [{ issue: 42, remove: ["in-progress"], add: ["ready-for-agent"] }]);
+    assert.ok(!w.journal.some((e) => e.to === "parked" || (e.reason ?? "").startsWith("cap:")));
   });
 
   test("other transitions do no cap work", async () => {
-    const w = world("enforce", ["needs-triage"]);
+    const w = world(["needs-triage"]);
     w.fetchFail.add("comments");
     await advance({ issue: 42, to: "needs-info", reason: "missing-repro", rationale: "x" }, w.deps);
     assert.ok(!w.journal.some((e) => "cap-check" in e.evidence));
@@ -648,7 +619,7 @@ describe("advance in-progress -> ready-for-agent is the stale re-queue (INV-3, I
 
 describe("postCapReset (INV-14)", () => {
   test("posts the marker on the issue ONLY, even when the latest cap park names pr=", async () => {
-    const w = world("enforce", ["ready-for-agent"]);
+    const w = world(["ready-for-agent"]);
     w.journal.push({
       v: 1, ts: NOW - 10, kind: "transition", from: "needs-qa", to: "parked", source: "cli", actor: "t",
       evidence: { pr: "77" }, reason: "cap:qa-fail-rounds", rationale: null, result: "parked:qa-fail-rounds", written: true,
@@ -662,7 +633,7 @@ describe("postCapReset (INV-14)", () => {
   });
 
   test("an invalid ts is rejected without posting", async () => {
-    const w = world("enforce", ["ready-for-agent"]);
+    const w = world(["ready-for-agent"]);
     const res = await postCapReset(42, { by: "op", ts: "nope" }, w.deps);
     assert.deepEqual(res, { ok: false, code: "invalid-reset-input" });
     assert.equal(w.comments.length, 0);
@@ -674,21 +645,6 @@ describe("postCapReset (INV-14)", () => {
 // ---------------------------------------------------------------------------
 
 describe("caps as data (#5421)", () => {
-  test("every CAP_TABLE row declares liveInShadow, pinned per arm", () => {
-    const live = Object.fromEntries(CAP_TABLE.map((r) => [r.arm, r.liveInShadow]));
-    assert.deepEqual(live, {
-      "qa-fail-rounds": true,
-      "dev-nopr-resume": true,
-      "qa-stall": true,
-      "red-ci-forward-fix": true,
-      "stale-requeue": false,
-      "needs-dev-resume-claims": false,
-      "total-claims": false,
-      "deep-qa-fails": true,
-    });
-    for (const r of CAP_TABLE) assert.equal(typeof r.liveInShadow, "boolean", r.arm);
-  });
-
   test("the edge-to-cap mapping is a field on the Transition rows", () => {
     const capped = TRANSITIONS.filter((t) => t.cap !== undefined).map((t) => `${t.from}->${t.to}:${t.cap}`);
     assert.deepEqual(capped.sort(), [
@@ -719,44 +675,25 @@ describe("caps as data (#5421)", () => {
   const goRequeue = (w: World) => advance({ issue: 42, to: "ready-for-agent" }, w.deps);
   const goClaim = (w: World) => openClaim(claimInput(), w.deps);
   const rows = [
-    { name: "requeue edge (stale-requeue, non-live)", labels: ["in-progress"], seed: (w: World) => requeueSeed(w, 2), go: goRequeue, arm: "stale-requeue", live: false },
-    { name: "claim attempt (total-claims, non-live)", labels: ["ready-for-agent"], seed: (w: World) => seedClaims(w, 10), go: goClaim, arm: "total-claims", live: false },
-    { name: "claim attempt (dev-nopr-resume, live)", labels: ["ready-for-agent"], seed: (w: World) => noPrSeed(w, 3), go: goClaim, arm: "dev-nopr-resume", live: true },
+    { name: "requeue edge (stale-requeue)", labels: ["in-progress"], seed: (w: World) => requeueSeed(w, 2), go: goRequeue, arm: "stale-requeue" },
+    { name: "claim attempt (total-claims)", labels: ["ready-for-agent"], seed: (w: World) => seedClaims(w, 10), go: goClaim, arm: "total-claims" },
+    { name: "claim attempt (dev-nopr-resume)", labels: ["ready-for-agent"], seed: (w: World) => noPrSeed(w, 3), go: goClaim, arm: "dev-nopr-resume" },
   ];
 
   for (const r of rows) {
-    test(`${r.name}: enforce parks`, async () => {
-      const w = world("enforce", [...r.labels]);
+    test(`${r.name}: over cap parks`, async () => {
+      const w = world([...r.labels]);
       r.seed(w);
       const res = (await r.go(w)) as any;
       assert.equal(res.ok, false);
       assert.equal(res.code, `parked:${r.arm}`);
       assert.equal(w.edits.at(-1)!.add[0], "parked");
     });
-    test(`${r.name}: shadow ${r.live ? "parks on the live arm (journal mode=shadow live=1)" : "writes and journals would-park"}`, async () => {
-      const w = world("shadow", [...r.labels]);
-      r.seed(w);
-      const res = (await r.go(w)) as any;
-      if (r.live) {
-        assert.equal(res.ok, false);
-        assert.equal(res.code, `parked:${r.arm}`);
-        assert.equal(w.edits.at(-1)!.add[0], "parked");
-        const park = w.journal.find((e) => e.result === `parked:${r.arm}`)!;
-        assert.equal(park.evidence.mode, "shadow");
-        assert.equal(park.evidence.live, "1");
-        assert.equal(w.comments.filter((c) => c.body.startsWith("## Hydra cap park")).length, 1);
-      } else {
-        assert.equal(res.ok, true);
-        assert.equal(res.wouldPark, r.arm);
-        assert.ok(w.journal.some((e) => e.result === `shadow-would-park:${r.arm}`));
-        assert.ok(!w.edits.some((e) => e.add.includes("parked")));
-      }
-    });
   }
 
   test("an illegal transition refuses before any cap count is read", async () => {
     // ready-for-agent -> needs-dev-resume has NO row, yet its destination is a qa-fail capped one.
-    const w = world("enforce", ["ready-for-agent"]);
+    const w = world(["ready-for-agent"]);
     w.prBodies = [failBody(5, 1), failBody(5, 2), failBody(5, 3)];
     let capReads = 0;
     const orig = w.deps.fetch.issueComments;
@@ -772,7 +709,7 @@ describe("caps as data (#5421)", () => {
   });
 
   test("sibling shape: the same destination from the legal capped edge still parks", async () => {
-    const w = world("enforce", ["needs-qa"]);
+    const w = world(["needs-qa"]);
     w.prBodies = [failBody(5, 1), failBody(5, 2), failBody(5, 3)];
     const res = (await advance({ issue: 42, to: "needs-dev-resume", evidence: { pr: "5" } }, w.deps)) as any;
     assert.equal(res.ok, false);
@@ -791,21 +728,19 @@ describe("qa-fail edge with unreadable PR bodies", () => {
     },
   });
 
-  for (const mode of ["enforce", "shadow"] as const) {
-    test(`${mode}: a T4 FAIL bounce (deep-QA marker on the live record) with unreadable PR bodies fails closed: refused fetch-failed, nothing written`, async () => {
-      const w = world(mode, ["needs-qa"]);
-      w.deps.fetch.qaLive = liveWith(["Verifier-Core deep-QA: FAIL"]);
-      w.deps.fetch.stateEntry = async () => ({ ok: true, value: { enteredAtMs: NOW - 60_000 } });
-      w.fetchFail.add("prBodies");
-      const res = (await advance({ issue: 42, to: "needs-dev-resume", evidence: { pr: "5" } }, w.deps)) as any;
-      assert.equal(res.ok, false);
-      assert.equal(res.code, "fetch-failed");
-      assert.deepEqual(w.edits, []);
-    });
-  }
+  test("a T4 FAIL bounce (deep-QA marker on the live record) with unreadable PR bodies fails closed: refused fetch-failed, nothing written", async () => {
+    const w = world(["needs-qa"]);
+    w.deps.fetch.qaLive = liveWith(["Verifier-Core deep-QA: FAIL"]);
+    w.deps.fetch.stateEntry = async () => ({ ok: true, value: { enteredAtMs: NOW - 60_000 } });
+    w.fetchFail.add("prBodies");
+    const res = (await advance({ issue: 42, to: "needs-dev-resume", evidence: { pr: "5" } }, w.deps)) as any;
+    assert.equal(res.ok, false);
+    assert.equal(res.code, "fetch-failed");
+    assert.deepEqual(w.edits, []);
+  });
 
   test("sibling shape: a non-T4 FAIL bounce with unreadable PR bodies still bounces", async () => {
-    const w = world("enforce", ["needs-qa"]);
+    const w = world(["needs-qa"]);
     w.deps.fetch.qaLive = liveWith([]);
     w.deps.fetch.stateEntry = async () => ({ ok: true, value: { enteredAtMs: NOW - 60_000 } });
     w.fetchFail.add("prBodies");
@@ -814,7 +749,7 @@ describe("qa-fail edge with unreadable PR bodies", () => {
   });
 
   test("sibling shape: with the bodies readable the second deep-QA FAIL marker still escalates", async () => {
-    const w = world("enforce", ["needs-qa"]);
+    const w = world(["needs-qa"]);
     const real = (sha: string) => `Verifier-Core deep-QA: FAIL\n\nQA-Verdict: FAIL pr=5 round=1 sha=${sha} blockers=1 max_severity=high`;
     w.prBodies = [real("aaaaaaaaaaaa"), real("bbbbbbbbbbbb")];
     const res = (await advance({ issue: 42, to: "needs-dev-resume", evidence: { pr: "5" } }, w.deps)) as any;

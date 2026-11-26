@@ -1,0 +1,1 @@
+- feat: one closing-ref truth table drives the PR refs module and its Python twin; per-body closing/referenced predicates exported (#5763)
