@@ -93,15 +93,9 @@ export function resolveLifecycleMode(raw: unknown): ResolvedMode {
   return { mode: "enforce", reason: "value-malformed" };
 }
 
-/** Enforce-by-fallback is never silent: every reason is logged at error level. */
-function fallbackToEnforce(reason: ModeReason, path: string, err?: unknown): ResolvedMode {
-  logger.error(
-    { reason, path, ...(err === undefined ? {} : { err }) },
-    "[lifecycle] rollout config did not say 'enforce'; failing closed to enforce",
-  );
-  return { mode: "enforce", reason };
-}
+const FAIL_CLOSED_MSG = "[lifecycle] rollout config did not say 'enforce'; failing closed to enforce";
 
+/** Enforce-by-fallback is never silent: every reason is logged at error level. */
 export async function loadLifecycleMode(
   repoRoot: string,
   deps: { readFile?: (path: string) => Promise<string> } = {},
@@ -113,16 +107,20 @@ export async function loadLifecycleMode(
     text = await read(path);
   } catch (err) {
     const code = (err as { code?: unknown } | null)?.code;
-    return fallbackToEnforce(code === "ENOENT" ? "config-missing" : "config-unreadable", path, err);
+    const reason: ModeReason = code === "ENOENT" ? "config-missing" : "config-unreadable";
+    logger.error({ err, reason, path }, FAIL_CLOSED_MSG);
+    return { mode: "enforce", reason };
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch (err) {
-    return fallbackToEnforce("value-malformed", path, err);
+    logger.error({ err, reason: "value-malformed", path }, FAIL_CLOSED_MSG);
+    return { mode: "enforce", reason: "value-malformed" };
   }
   const resolved = resolveLifecycleMode(parsed);
-  return resolved.reason === null ? resolved : fallbackToEnforce(resolved.reason, path);
+  if (resolved.reason !== null) logger.error({ reason: resolved.reason, path }, FAIL_CLOSED_MSG);
+  return resolved;
 }
 
 // ---------------------------------------------------------------------------
