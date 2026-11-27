@@ -14,7 +14,7 @@ import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { RATCHETS, listBaselineFixtures, rowBaseline, rowId } from "../scripts/ci/ratchets.ts";
+import { RATCHETS, listBaselineFixtures, rowBaseline, rowId, rowStaleReason } from "../scripts/ci/ratchets.ts";
 
 const ROOT = join(import.meta.dirname, "..");
 // The describe below derives one subtest per required row (INV-2: no hand-written id list);
@@ -47,14 +47,20 @@ describe("ratchet registry", () => {
 
   test("a ratchet row declares stale: fail only with a written staleReason", () => {
     for (const row of RATCHETS) {
-      if (row.kind !== "ratchet") continue;
-      const p = row.ratchet.policy;
-      if (p.stale !== "fail") continue;
+      if (row.kind !== "ratchet" || row.ratchet.policy.stale !== "fail") continue;
+      const reason = rowStaleReason(row);
       assert.ok(
-        typeof p.staleReason === "string" && p.staleReason.trim().length > 0,
-        `${p.id}: stale: "fail" needs a non-empty staleReason (the default is the ceiling: a below-ceiling measurement passes with a hint)`,
+        typeof reason === "string" && reason.trim().length > 0,
+        `${rowId(row)}: stale: "fail" needs a non-empty staleReason (the default is the ceiling: a below-ceiling measurement passes with a hint)`,
       );
     }
+  });
+
+  test("rowStaleReason is undefined for a default-policy ratchet and for non-ratchet rows", () => {
+    const ratchet = RATCHETS.find((r) => r.kind === "ratchet" && r.ratchet.policy.stale !== "fail");
+    assert.ok(ratchet, "expected at least one default-policy ratchet row");
+    assert.equal(rowStaleReason(ratchet), undefined);
+    for (const row of RATCHETS) if (row.kind !== "ratchet") assert.equal(rowStaleReason(row), undefined);
   });
 
   test("row ids and baseline paths are unique", () => {
