@@ -590,7 +590,10 @@ describe("non-blocking rollout switch + conclusive kill rate (issue #4504)", () 
     assert.doesNotMatch(step.slice(0, envAt), /^\s*if:/m);
     // Nor may the step or the job header make the gate non-blocking or skippable.
     assert.doesNotMatch(step.slice(0, runAt), /continue-on-error/);
-    assert.doesNotMatch(job.slice(0, stepAt), /continue-on-error|^\s{4}if:/m);
+    const header = job.slice(0, stepAt);
+    assert.doesNotMatch(header, /continue-on-error/);
+    // The one job-level `if:` is the pull_request trigger guard; any other condition could skip the gate.
+    assert.deepEqual(header.match(/^ {4}if:.*$/gm), ["    if: github.event_name == 'pull_request'"]);
     const live = step.slice(envAt, runAt).split("\n").filter((l) => !l.trim().startsWith("#"));
     assert.ok(live.some((l) => /^\s*MUTATION_GATE_BLOCKING: \$\{\{ vars\.MUTATION_GATE_BLOCKING \|\| '1' \}\}\s*$/.test(l)));
     assert.ok(live.some((l) => /^\s*MUTATION_KILL_RATE_FLOOR_T3: \$\{\{ vars\.MUTATION_KILL_RATE_FLOOR_T3 \|\| '50' \}\}\s*$/.test(l)));
