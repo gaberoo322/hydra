@@ -19,7 +19,7 @@ import { RATCHETS, listBaselineFixtures, rowBaseline, rowId } from "../scripts/c
 const ROOT = join(import.meta.dirname, "..");
 // The describe below derives one subtest per required row (INV-2: no hand-written id list);
 // suite-count only sees top-level units, so the registry-derived count is floored here instead.
-const REQUIRED_RATCHET_FLOOR = 12;
+const REQUIRED_RATCHET_FLOOR = 13;
 
 describe("required ratchets on the live tree", { concurrency: true }, () => {
   for (const row of RATCHETS) {

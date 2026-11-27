@@ -153,3 +153,16 @@ footer is emitted last, because consumers (`scripts/reflection-deposit.sh`) read
 the suite total. Children run in their own process groups so a catchable signal (SIGTERM/SIGINT) or
 one child's death reaps the sibling's tree; a `SIGKILL`/OOM of the launcher itself still orphans
 both trees, exactly as it already orphaned the single child before this amendment.
+
+## Amendment — #5777: one committed total floor replaces per-file expected counts
+
+Decision 2's machine check for mechanical merges was "the per-file suite-count baseline sum is
+unchanged", which makes every test-adding PR edit a shared file. It now reads: **the scanned
+top-level total stays at or above one committed floor**,
+`test/fixtures/suite-total-baseline.json` (single row `test/*.test.mts`, polarity `floor`).
+Deleting tests drops the total below the floor and fails the required `test` job (the `suite-total`
+Ratchet, run by `test/ratchets-live.test.mts`), naming the floor file. A PR that adds tests passes
+without editing the floor; lowering it needs a `Baseline-raise:` disclosure. The total is the static
+source scan (the same arithmetic as the per-file baseline generator), never the runtime capture,
+which `--test-force-exit` truncates. Per-file expected counts are to be derived at run time (#5778);
+this slice leaves the per-file baseline working. Operator decision of 2026-11-25 (epic #5776).

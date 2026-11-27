@@ -35,6 +35,7 @@ import type { Ratchet, RatchetEnforcement, RatchetPolarity } from "./ratchet.ts"
 import { redisSeamRatchet } from "./redis-seam-check.ts";
 import { schemaSeamRatchet } from "./schema-seam-check.ts";
 import { skillSizeRatchet } from "./skill-size-ratchet.ts";
+import { suiteTotalRatchet } from "./suite-total-ratchet.ts";
 import { targetCouplingRatchet } from "./target-coupling-check.ts";
 import { telegramSeamRatchet } from "./telegram-seam-check.ts";
 import { testSourceReadRatchet } from "./test-source-read-scan.ts";
@@ -76,6 +77,7 @@ export const RATCHETS: readonly RatchetRow[] = [
   { kind: "ratchet", ratchet: referenceRatchet },
   { kind: "ratchet", ratchet: schemaSeamRatchet },
   { kind: "ratchet", ratchet: skillSizeRatchet },
+  { kind: "ratchet", ratchet: suiteTotalRatchet },
   { kind: "ratchet", ratchet: targetCouplingRatchet },
   { kind: "ratchet", ratchet: telegramSeamRatchet },
   { kind: "ratchet", ratchet: testSourceReadRatchet },
