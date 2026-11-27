@@ -136,6 +136,7 @@ export const MECHANICAL_COMPANIONS: readonly string[] = [
   "test/fixtures/fail-loud-baseline.json",
   "test/fixtures/lifecycle-seam-baseline.json",
   "test/fixtures/suite-count-baseline.json",
+  "test/fixtures/suite-total-baseline.json",
   "test/fixtures/test-pools.json",
   "test/fixtures/test-source-read-baseline.json",
   "test/fixtures/test-subject-baseline.json",
