@@ -339,7 +339,6 @@
         }
       ],
       "composedFrom": [
-        "docs/operator-playbooks/_fragments/issue-first-state.md",
         "docs/operator-playbooks/_fragments/slot-lifecycle-hook.md"
       ],
       "route": "/docs/skill/hydra-retro",

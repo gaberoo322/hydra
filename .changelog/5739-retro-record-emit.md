@@ -1,0 +1,1 @@
+- refactor: hydra-retro emit sequence (issue create, first state, seen-list record) is one tested script (#5739)
