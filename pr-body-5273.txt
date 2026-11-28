@@ -1,0 +1,39 @@
+Tier: 4 (Verifier Core path(s) modified: .github/workflows/ci.yml)
+
+Merge danger: two-way — `git revert` plus redeploy restores the gate to advisory; no persistent state or external contract changes.
+
+Turns `MUTATION_GATE_BLOCKING` on (ci.yml fallback `1`, repo variable `0` pauses it) and lowers the T3/T4 kill-rate floor to 50, per the operator decision of 2026-11-20 on #5273.
+
+## Files in scope
+
+- `.github/workflows/ci.yml`
+- `scripts/ci/mutation-check.ts`
+- `test/mutation-check.test.mts`
+- `docs/generated/env-vars.json`
+- `docs/quality-gates.md`
+- `docs/adr/0046-two-pass-code-factory-implement-works-reviewer-makes-good.md`
+- `test/fixtures/test-source-read-baseline.json`
+- `test/fixtures/adr-area-baseline.json`
+
+## Design-concept reconciliation
+
+Artifact: `5fa1578a528d`
+
+- INV-1: "INV-1 Blocking is wired in ci.yml, not only in a repo variable" — verified by: `file-contains: .github/workflows/ci.yml :: MUTATION_GATE_BLOCKING: ${{ vars.MUTATION_GATE_BLOCKING || '1' }}`
+- INV-2: "INV-2 The T3/T4 kill-rate floor is 50 and is ONE number in two places kept equal" — verified by: `file-contains: scripts/ci/mutation-check.ts :: const DEFAULT_T3_KILL_FLOOR = 50;`
+- INV-3: "INV-3 A timed-out (`timedOut: true`) verdict and a no-signal verdict (null killRate) stay NON-blocking" — verified by: `manual: branch order classifyNoSignal -> classifyTimedOut -> resolveKillRateVerdict untouched; src/mutation.ts and src/mutation-gate-inputs.ts not changed`
+- INV-4: "INV-4 Only `status: "fail"` exits 2; `pass`, `warn`, `neutral`, `skipped` all exit 0." — verified by: `test: test/mutation-check.test.mts :: "resolveKillRateVerdict: blocking at the T3 floor of 50 is inclusive (issue #5273)"`
+- INV-5: "INV-5 The blocking switch stays tier-independent (isGateBlocking takes no tier)" — verified by: `manual: isGateBlocking signature unchanged`
+- INV-6: "INV-6 Regression pins live in test/mutation-check.test.mts (no new test file" — verified by: `test: test/mutation-check.test.mts :: "ci.yml mutation gate step turns blocking on at T3 floor 50 (issue #5273)"`
+- INV-7: "INV-7 Required-check contexts are unchanged: no job rename, no new job" — verified by: `manual: no job renamed or added in ci.yml; docs/generated/env-vars.json untouched, inventories drift guard green`
+- INV-8: "INV-8 Docs follow the code in the same PR" — verified by: `file-contains: docs/quality-gates.md :: **Blocking (issue #5273).**`
+- INV-9: "INV-9 T4 path: the PR touches ci.yml, so it needs the SHA-bound Deep-QA PASS marker" — verified by: `manual: T4 PR awaits the Deep-QA PASS marker; mutation-test reports skipped on this PR (no src/ diff)`
+
+Glossary impact: none. ADR impact: ADR-0046 Decision 4 amendment.
+
+Baseline-raise: test/fixtures/test-source-read-baseline.json reader	test/mutation-check.test.mts	drift-guard — the design concept (INV-6) requires the ci.yml env-block guard inside the existing mutation-check test file
+Baseline-raise: test/fixtures/adr-area-baseline.json process / policy (no code area) — +384 bytes from the ADR-0046 amendment INV-8 requires
+
+Closes #5273
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
