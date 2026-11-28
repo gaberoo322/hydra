@@ -330,9 +330,14 @@ describe("github/pr-refs (issue #4683)", () => {
     );
   });
 
-  test("design-concept-reconcile-check.ts's extractAnchorRefFromPrBody pattern stays byte-identical", () => {
-    const composed = new RegExp(String.raw`(?:${CLOSING_VERB_ALTERNATION})\s+#(\d+)`, "i");
-    assert.equal(composed.source, String.raw`(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)`);
+  test("design-concept-reconcile-check.ts owns no closing-ref matcher of its own — it answers through closingIssuesInBody", () => {
+    const src = readFileSync(
+      join(import.meta.dirname, "..", "scripts/ci/design-concept-reconcile-check.ts"),
+      "utf-8",
+    );
+    assert.doesNotMatch(src, /CLOSING_VERB_ALTERNATION/);
+    assert.doesNotMatch(src, /close\[sd\]\?/);
+    assert.match(src, /closingIssuesInBody\(body/);
   });
 
   // -------------------------------------------------------------------------

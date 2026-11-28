@@ -21,6 +21,7 @@ import { join, resolve } from "node:path";
 
 import { runQaVerdictPhase, type QaVerdictFetchers } from "../src/qa/phases.ts";
 import { guardedSeamMove, phaseRunner, type CmdResult, type PlumbingPorts, type SeamMoveInput, type SeamMoveResult } from "../scripts/qa/_lib.ts";
+import { extractAnchorRefFromPrBody } from "../scripts/ci/design-concept-reconcile-check.ts";
 import { parentIssueOf, runPreflight, type PreflightOptions } from "../scripts/qa/preflight.ts";
 import { bodyClosesIssue, closingIssuesInBody, referencedIssuesInBody } from "../src/github/pr-refs.ts";
 import { NO_STANDARDS_SENTINEL, runPacket } from "../scripts/qa/packet.ts";
@@ -469,6 +470,23 @@ describe("preflight (steps 1-6.7 in one read-only call)", () => {
     assert.equal(parentIssueOf("Closes#5"), null);
     assert.equal(parentIssueOf("refs#5"), null);
     assert.equal(parentIssueOf(""), null);
+  });
+
+  test("CI anchor and preflight parent agree on every body closing at most one issue; a multi-close body is the one pinned disagreement", () => {
+    const rows = (
+      JSON.parse(readFileSync(join(ROOT, "test", "fixtures", "pr-refs-truth-table.json"), "utf8")) as {
+        rows: Array<{ name: string; body: string; closing: number[] }>;
+      }
+    ).rows;
+    for (const row of rows.filter((r) => r.closing.length <= 1)) {
+      const ci = extractAnchorRefFromPrBody(row.body);
+      if (ci !== null) assert.equal(parentIssueOf(row.body), ci, `row ${JSON.stringify(row.name)}`);
+    }
+    // Multi-close: CI binds the first closing ref; preflight binds the issue under QA when the body closes it.
+    const body = "Closes #10\n\nCloses #20";
+    assert.equal(extractAnchorRefFromPrBody(body), 10);
+    assert.equal(bodyClosesIssue(body, 20) ? 20 : parentIssueOf(body), 20);
+    assert.equal(parentIssueOf(body), 10);
   });
 
   test("preflight: a failed gh list is a pre-stage exit, never read as 'nothing found' (no false no-pr / no-issue)", async () => {
