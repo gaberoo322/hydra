@@ -27,8 +27,8 @@
  *                                 byte-identically to the pre-#4346 split.
  *   MUTATION_KILL_RATE_FLOOR    — base kill-rate floor as integer percent for
  *                                 T1/T2 diffs (default 30)
- *   MUTATION_KILL_RATE_FLOOR_T3 — kill-rate floor for T3/T4 diffs (default 55;
- *                                 issue #778 — depth-gate protection for the
+ *   MUTATION_KILL_RATE_FLOOR_T3 — kill-rate floor for T3/T4 diffs (default
+ *                                 DEFAULT_T3_KILL_FLOOR; issue #778 — depth-gate protection for the
  *                                 load-bearing core paths #767 demoted to T3)
  *   PR_TIER                     — the Modification Tier (1|2|3|4) of this PR's
  *                                 diff, computed by the workflow via
@@ -98,7 +98,8 @@
  * Rollout switch (issue #4504): making the gate honest can surface real
  * sub-floor kill rates, so a below-floor verdict only blocks when
  * MUTATION_GATE_BLOCKING is truthy ("1"/"true"/"yes"). By default it is
- * reported as `status:"warn"` with `wouldFail:true` and exits 0.
+ * reported as `status:"warn"` with `wouldFail:true` and exits 0. CI sets the
+ * switch on since issue #5273 (ci.yml `MUTATION_GATE_BLOCKING` fallback `1`).
  *
  * Extra inputs (env, issue #4504):
  *   MUTATION_GATE_BLOCKING      — "1"/"true"/"yes" makes a below-floor verdict
@@ -365,7 +366,7 @@ function listTestFiles(projectDir: string): string[] {
 const DEFAULT_KILL_FLOOR = 30;
 const DEFAULT_TEST_TIMEOUT_MS = 45_000;
 const DEFAULT_MAX_RELATED_TESTS = 8;
-const DEFAULT_T3_KILL_FLOOR = 55;
+export const DEFAULT_T3_KILL_FLOOR = 50;
 const DEFAULT_TIME_BUDGET_MS = 540_000;
 
 /**

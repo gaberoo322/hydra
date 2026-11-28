@@ -31,7 +31,7 @@
   "docs/adr/0042-src-cost-is-layered-by-purity-with-a-test-enforced-import-rule.md\tsymbol-cite": 1,
   "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md\tsymbol-cite": 1,
   "docs/adr/0045-operator-channel.md\tinvariant-cite": 1,
-  "docs/adr/0046-two-pass-code-factory-implement-works-reviewer-makes-good.md\tsymbol-cite": 2,
+  "docs/adr/0046-two-pass-code-factory-implement-works-reviewer-makes-good.md\tsymbol-cite": 1,
   "docs/adr/0047-work-item-lifecycle-is-data.md\tinvariant-cite": 4,
   "docs/adr/0047-work-item-lifecycle-is-data.md\tsymbol-cite": 2
 }
