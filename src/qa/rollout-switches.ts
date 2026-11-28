@@ -16,7 +16,7 @@ export const QA_ROLLOUT_CONFIG_PATH = "config/orchestrator/qa-rollout.json";
 /** Re-declared (src/ cannot import scripts/); the test pins it equal to BASELINE_FIXTURE_PATH. */
 export const COHORT_BASELINE_PATH = "test/fixtures/qa-cohort-baseline.json";
 
-export const TWO_WAY_PAIR_VALUES = ["off", "shadow", "on"] as const;
+const TWO_WAY_PAIR_VALUES = ["off", "shadow", "on"] as const;
 export const REVIEWER_COMMITS_VALUES = ["off", "A", "A+B"] as const;
 
 export type TwoWayPairValue = (typeof TWO_WAY_PAIR_VALUES)[number];
@@ -74,7 +74,7 @@ export function resolveRolloutSwitches(raw: unknown, trip: TripState): RolloutSw
   return { configured, effective, trip: { state: trip }, reasons };
 }
 
-export function tripFromBaseline(text: string): TripState {
+function tripFromBaseline(text: string): TripState {
   try {
     const doc = JSON.parse(text) as { metrics?: { tripped?: unknown } };
     const t = doc?.metrics?.tripped;

@@ -22,7 +22,7 @@ import { logger } from "../logger.ts";
 /** The catalog is inlined into every Standards review, so size is a per-PR token cost. */
 export const CODING_STANDARDS_WORD_CEILING = 2000;
 
-export const CODING_STANDARDS_FILENAME = "CODING_STANDARDS.md";
+const CODING_STANDARDS_FILENAME = "CODING_STANDARDS.md";
 
 /**
  * The one home of the STD rule-ID grammar: two or more segments, so a bare
@@ -58,7 +58,7 @@ export interface ParsedStandards {
   rules: StandardsRule[];
 }
 
-export type IntegrityCode =
+type IntegrityCode =
   | "ceiling-exceeded"
   | "duplicate-rule-id"
   | "invalid-rule-id"
