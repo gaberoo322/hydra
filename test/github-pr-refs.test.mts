@@ -330,16 +330,6 @@ describe("github/pr-refs (issue #4683)", () => {
     );
   });
 
-  test("design-concept-reconcile-check.ts owns no closing-ref matcher of its own — it answers through closingIssuesInBody", () => {
-    const src = readFileSync(
-      join(import.meta.dirname, "..", "scripts/ci/design-concept-reconcile-check.ts"),
-      "utf-8",
-    );
-    assert.doesNotMatch(src, /CLOSING_VERB_ALTERNATION/);
-    assert.doesNotMatch(src, /close\[sd\]\?/);
-    assert.match(src, /closingIssuesInBody\(body/);
-  });
-
   // -------------------------------------------------------------------------
   // The module's only import (INV-9) — see test/design-concept-reconcile-check.test.mts
   // -------------------------------------------------------------------------

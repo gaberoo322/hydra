@@ -21,7 +21,7 @@
   "pins\ttest/dashboard-today-polling.test.mts\tcode": 6,
   "pins\ttest/decide-guards.test.mts\tprompt": 2,
   "pins\ttest/derive-version-bump.test.mts\tcode": 1,
-  "pins\ttest/design-concept-reconcile-check.test.mts\tcode": 5,
+  "pins\ttest/design-concept-reconcile-check.test.mts\tcode": 13,
   "pins\ttest/docs-areas.test.mts\tcode": 3,
   "pins\ttest/docs-prose-drift.test.mts\tcode": 4,
   "pins\ttest/git-remote-fence.test.mts\tcode": 1,
