@@ -599,7 +599,7 @@ describe("non-blocking rollout switch + conclusive kill rate (issue #4504)", () 
     assert.ok(live.some((l) => /^\s*MUTATION_KILL_RATE_FLOOR_T3: \$\{\{ vars\.MUTATION_KILL_RATE_FLOOR_T3 \|\| '50' \}\}\s*$/.test(l)));
   });
 
-  test("DEFAULT_T3_KILL_FLOOR is 50 and equals the ci.yml fallback (issue #5273 INV-2)", () => {
+  test("ci.yml T3 floor fallback equals DEFAULT_T3_KILL_FLOOR", () => {
     const yml = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
     const m = /MUTATION_KILL_RATE_FLOOR_T3: \$\{\{ vars\.MUTATION_KILL_RATE_FLOOR_T3 \|\| '(\d+)' \}\}/.exec(yml);
     assert.ok(m, "ci.yml T3 floor fallback missing");

@@ -27,8 +27,8 @@
  *                                 byte-identically to the pre-#4346 split.
  *   MUTATION_KILL_RATE_FLOOR    — base kill-rate floor as integer percent for
  *                                 T1/T2 diffs (default 30)
- *   MUTATION_KILL_RATE_FLOOR_T3 — kill-rate floor for T3/T4 diffs (default 50;
- *                                 issue #778 — depth-gate protection for the
+ *   MUTATION_KILL_RATE_FLOOR_T3 — kill-rate floor for T3/T4 diffs (default
+ *                                 DEFAULT_T3_KILL_FLOOR; issue #778 — depth-gate protection for the
  *                                 load-bearing core paths #767 demoted to T3)
  *   PR_TIER                     — the Modification Tier (1|2|3|4) of this PR's
  *                                 diff, computed by the workflow via
