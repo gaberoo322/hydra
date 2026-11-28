@@ -28,8 +28,8 @@
  *
  * # Purity contract
  *
- * This file has **no I/O imports** — the sole import is the pure pr-refs verb
- * list (`CLOSING_VERB_ALTERNATION` from `../../src/github/pr-refs.ts`, issue
+ * This file has **no I/O imports** — the sole import is the pure pr-refs closing-issues
+ * reader (`closingIssuesInBody` from `../../src/github/pr-refs.ts`, issue
  * #4683). No `node:fs`, no `fetch`, no `process.env`, no module-scope side
  * effects. Every decision is a pure function over injected
  * inputs: the PR body string, the artifact's `invariants` + `artifactHash`, and
@@ -97,7 +97,7 @@
  * declared assertions that evaluate FALSE. Design preference is out of reach.
  */
 
-import { CLOSING_VERB_ALTERNATION } from "../../src/github/pr-refs.ts";
+import { closingIssuesInBody } from "../../src/github/pr-refs.ts";
 
 /** Canonical PR-body heading the gate looks for. */
 export const RECONCILIATION_HEADING = "## Design-concept reconciliation";
@@ -191,16 +191,34 @@ export type ReconcileInput = {
 // ---------------------------------------------------------------------------
 
 /**
- * Extract the first `Closes|Fixes|Resolves #N` issue number from a PR body.
- * Mirrors the parser `design-concept-comment.yml` and `scope-check`'s ci.yml
- * wiring already use, so all three resolve the same anchor.
+ * The design-concept anchor a PR body binds to: the first issue the body CLOSES,
+ * in body order, or `null` when it closes none (a Refs-only companion, a body
+ * whose only closing verb is negated, an empty body) — `null` keeps the
+ * fail-open "not a dev PR" skip, so CI never falls back to a merely referenced
+ * issue. The answer is the PR refs module's (`closingIssuesInBody`), negation
+ * guard and colon form included.
+ *
+ * # The multi-close rule (shared with QA preflight)
+ *
+ * The anchor of a PR body is the first issue the body closes, in body order.
+ * Authoring norm: a dev PR closes exactly one issue and writes its `Closes #N`
+ * line before any prose that could read as a closing verb, a colon and a
+ * hash-number; further issues are `Part of #N` or `Refs #N`. CI and
+ * `scripts/qa/preflight.ts` bind the same anchor for every body that closes at
+ * most one issue. Preflight keeps one refinement: when the body closes the issue
+ * under QA, that issue wins; so they differ only for a body closing two or more
+ * issues with QA run for a non-first one (outside the norm, pinned in
+ * test/qa-plumbing-scripts.test.mts).
+ *
+ * # Audit: remaining private closing-ref matchers
+ *
+ * - .github/workflows/ci.yml:351 (Verifier Core, separate slice)
+ * - .github/workflows/design-concept-comment.yml (two grep sites)
+ * - scripts/ci/epic-close.ts parseEpicReferences (colon form, no negation guard)
+ * - scripts/qa/reviewer-commit.ts body-invalid guard (`/Closes #[0-9]+/`)
  */
 export function extractAnchorRefFromPrBody(body: string): number | null {
-  const re = new RegExp(String.raw`(?:${CLOSING_VERB_ALTERNATION})\s+#(\d+)`, "i");
-  const m = re.exec(body ?? "");
-  if (!m) return null;
-  const n = parseInt(m[1], 10);
-  return Number.isFinite(n) ? n : null;
+  return closingIssuesInBody(body ?? "")[0] ?? null;
 }
 
 /** True iff `line` opens a markdown ATX heading (`#` … `######`). */

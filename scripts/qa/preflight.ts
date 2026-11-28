@@ -194,6 +194,8 @@ export async function runPreflight(opts: PreflightOptions, ports: PlumbingPorts)
   // 4. Resolve the spec source — the design-concept artifact.
   // The issue under QA wins when this PR really closes it: closing-first alone would let a prose hit on the
   // module's colon form ("primary fix: #N", earlier in the body) outrank the genuine closing line (#5767).
+  // This is the one refinement of the CI anchor rule (extractAnchorRefFromPrBody in
+  // scripts/ci/design-concept-reconcile-check.ts: first closed issue wins); the two differ only for a multi-close body.
   const parent = bodyClosesIssue(body, issue) ? issue : parentIssueOf(body);
   let resolve: Record<string, unknown> | null = null;
   if (parent !== null) {

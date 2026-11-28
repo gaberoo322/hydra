@@ -1,0 +1,1 @@
+- fix: bind the CI design-concept anchor through the shared PR refs module (negation guard, colon form) (#5811)
