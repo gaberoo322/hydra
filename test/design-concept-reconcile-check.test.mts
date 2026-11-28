@@ -624,6 +624,37 @@ describe("design-concept reconcile check (pure)", () => {
     assert.doesNotMatch(src, /^import .*process\.env/m);
   });
 
+  test("extractAnchorRefFromPrBody stays the one home of the CI anchor rule — its consumers import it, never the PR refs module", () => {
+    for (const path of ["scripts/ci/design-concept-reconcile-run.ts", "scripts/pr-body-edit.ts"]) {
+      const src = readFileSync(join(import.meta.dirname, "..", path), "utf-8");
+      assert.match(src, /extractAnchorRefFromPrBody/, `${path} must keep importing extractAnchorRefFromPrBody`);
+      assert.doesNotMatch(src, /closingIssuesInBody|src\/github\/pr-refs/, `${path} must not call the PR refs module itself`);
+    }
+  });
+
+  test("the extractAnchorRefFromPrBody doc comment carries the multi-close rule and an audit of the remaining private matchers", () => {
+    const src = readFileSync(
+      join(import.meta.dirname, "..", "scripts/ci/design-concept-reconcile-check.ts"),
+      "utf-8",
+    );
+    for (const needle of [
+      "The multi-close rule",
+      ".github/workflows/ci.yml:351",
+      "design-concept-comment.yml",
+      "parseEpicReferences",
+      "reviewer-commit.ts",
+    ]) {
+      assert.ok(src.includes(needle), `doc comment must name ${needle}`);
+    }
+    assert.doesNotMatch(src, /Mirrors the parser/);
+  });
+
+  test("preflight keeps the issue-under-QA refinement and names the CI rule it refines", () => {
+    const src = readFileSync(join(import.meta.dirname, "..", "scripts/qa/preflight.ts"), "utf-8");
+    assert.match(src, /bodyClosesIssue\(body, issue\) \? issue : parentIssueOf\(body\)/);
+    assert.match(src, /extractAnchorRefFromPrBody/);
+  });
+
   test("evaluateAssertion re-executes each kind against the injected reader", () => {
     const read = fakeReader({ "a.ts": "alpha doThing( beta doThing(", "empty.ts": "" });
     const ev = (s: string) => evaluateAssertion(parseAssertion(s), read);
