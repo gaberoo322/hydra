@@ -24,7 +24,7 @@
   "config/direction/, config/orchestrator/": 4406,
   "docs/adr/ itself": 5783,
   "process / policy (no code area)": 45702,
-  "test/, scripts/test/ (the suite itself)": 8970,
+  "test/, scripts/test/ (the suite itself)": 9986,
   "src/glm/, scripts/glm/": 43911,
   "scripts/sync-skills.sh, src/skills/ (skill generation)": 7008,
   "src/notification/, src/operator-channel/": 8166

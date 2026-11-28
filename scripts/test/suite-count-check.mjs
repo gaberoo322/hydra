@@ -503,17 +503,29 @@ const STATIC_COUNT_OVERRIDES = {
   "test/hydra-dev-reflection-deposit.test.mts": 4,
 };
 
-function generateBaseline() {
-  const files = readdirSync(TEST_DIR)
+function generateBaseline(testDir = TEST_DIR) {
+  const files = readdirSync(testDir)
     .filter((f) => f.endsWith(".test.mts"))
     .sort();
   const baseline = {};
   for (const f of files) {
     const rel = `test/${f}`;
-    const source = readFileSync(join(TEST_DIR, f), "utf8");
+    const source = readFileSync(join(testDir, f), "utf8");
     baseline[rel] = STATIC_COUNT_OVERRIDES[rel] ?? countTopLevelEntries(source);
   }
   return baseline;
+}
+
+/**
+ * The scanned top-level total of a checkout (#5777): the sum of the static
+ * per-file counts `generateBaseline()` computes, with STATIC_COUNT_OVERRIDES
+ * applied. Deterministic and immune to --test-force-exit truncation, so it is
+ * the measure behind the committed total floor
+ * (test/fixtures/suite-total-baseline.json, scripts/ci/suite-total-ratchet.ts).
+ */
+export function countSuiteTotal(repoRoot = REPO_ROOT) {
+  const counts = generateBaseline(resolve(repoRoot, "test"));
+  return Object.values(counts).reduce((a, b) => a + b, 0);
 }
 
 /**

@@ -189,6 +189,7 @@
     "test/schemas-dispatches.test.mts": "uses /dev/shm (shared between concurrent pools)",
     "test/skill-prune-contract-token-parity.test.mts": "runs `git worktree` operations against a shared repo (index.lock contention)",
     "test/stryker-scan.test.mts": "uses a fixed /tmp path (clobbers under concurrency)",
+    "test/suite-total-ratchet.test.mts": "uses a fixed /tmp path (clobbers under concurrency)",
     "test/sync-skills.test.mts": "uses a fixed /tmp path (clobbers under concurrency)",
     "test/sync-target-gate.test.mts": "runs `git worktree` operations against a shared repo (index.lock contention)",
     "test/target-config.test.mts": "binds or dials a fixed port",
