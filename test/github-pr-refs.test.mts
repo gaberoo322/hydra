@@ -135,14 +135,14 @@ describe("github/pr-refs (issue #4683)", () => {
   });
 
   test("the two scripts/ci consumers contain no inline closing-verb regex literal", () => {
-    for (const path of ["scripts/ci/epic-close.ts", "scripts/ci/design-concept-reconcile-check.ts"]) {
+    const composes: Record<string, RegExp> = {
+      "scripts/ci/epic-close.ts": /CLOSING_VERB_ALTERNATION/,
+      "scripts/ci/design-concept-reconcile-check.ts": /closingIssuesInBody/,
+    };
+    for (const [path, needle] of Object.entries(composes)) {
       const src = readFileSync(join(import.meta.dirname, "..", path), "utf-8");
       assert.doesNotMatch(src, /close\[sd\]/, `${path} must not contain the verb-list literal inline`);
-      assert.match(
-        src,
-        /CLOSING_VERB_ALTERNATION/,
-        `${path} must import/compose CLOSING_VERB_ALTERNATION`,
-      );
+      assert.match(src, needle, `${path} must import/compose the PR refs module`);
     }
   });
 
