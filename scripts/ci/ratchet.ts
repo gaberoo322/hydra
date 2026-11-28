@@ -35,7 +35,6 @@ import { REPO_ROOT, isCliEntrypoint } from "./seam-check-lib.ts";
 
 export type RatchetShape = "set" | "counted";
 export type RatchetPolarity = "ceiling" | "floor";
-export type RatchetStale = "fail" | "hint";
 export type RatchetEnforcement = "required" | "advisory";
 
 /** What `measure` returns: finding keys (duplicates count) or an explicit `{key: n}` map. */
@@ -48,13 +47,12 @@ export interface RatchetScope {
   keep(key: string): boolean;
 }
 
-export interface RatchetPolicy {
+export interface RatchetPolicyBase {
   id: string;
   /** Repo-relative path of the baseline file (an absolute path is used as-is). */
   baseline: string;
   shape: RatchetShape;
   polarity: RatchetPolarity;
-  stale: RatchetStale;
   enforcement: RatchetEnforcement;
   /** Measure the tree. May throw: `verdict` returns the cause as `{ok:false}`. */
   measure(root: string): Promise<RatchetRows>;
@@ -66,6 +64,18 @@ export interface RatchetPolicy {
   /** Extra CLI flags the ratchet handles itself; `scope` turns them into a narrowed run. */
   extra?: { flags: readonly string[]; scope(argv: readonly string[]): RatchetScope | undefined };
 }
+
+/**
+ * What a stale row (the tree needs less than the baseline allows) does. The default is `hint`: the
+ * verdict passes and the advice names the lowerable rows. `fail` is an explicit opt-in for a
+ * ratchet whose baseline must equal the tree, and it is only declarable with a written
+ * `staleReason` (the discriminated union makes a bare `fail` a type error).
+ */
+export type RatchetStalePolicy =
+  | { stale?: "hint"; staleReason?: undefined }
+  | { stale: "fail"; staleReason: string };
+
+export type RatchetPolicy = RatchetPolicyBase & RatchetStalePolicy;
 
 export interface RatchetVerdict {
   ok: boolean;
@@ -334,7 +344,7 @@ function renderAdvice(
         : "set these rows to the measured count (drop a row at zero)";
     lines.push(
       `[${policy.id}] ${d.stale.length} stale row(s) in ${policy.baseline}` +
-        (policy.stale === "fail" && !ok ? " (fails the verdict)" : " (hint)") +
+        (policy.stale === "fail" && !ok ? ` (fails the verdict: ${policy.staleReason})` : " (hint)") +
         `:`,
     );
     for (const k of d.stale) lines.push(`  - ${rowText(k)}`);

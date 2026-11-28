@@ -119,7 +119,6 @@ export const querySeamRatchet = defineRatchet({
   baseline: "scripts/ci/query-seam-baseline.json",
   shape: "set",
   polarity: "ceiling",
-  stale: "fail",
   enforcement: "advisory",
   measure: (root) =>
     seamMeasure(root, {

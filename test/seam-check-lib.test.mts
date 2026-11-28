@@ -82,7 +82,7 @@ describe("seam-check-lib: the nine Seam checks run on the Ratchet module (issue 
   const camel = (n: string): string => n.replace(/-(\w)/g, (_m, c: string) => c.toUpperCase());
 
   for (const [name, enforcement] of EXPECTED) {
-    test(`${name}-seam-check exports a set/ceiling/stale-fail ratchet (${enforcement})`, async () => {
+    test(`${name}-seam-check exports a set/ceiling default-stale ratchet (${enforcement})`, async () => {
       const mod = await import(`../scripts/ci/${name}-seam-check.ts`);
       const ratchet = mod[`${camel(name)}SeamRatchet`];
       assert.ok(ratchet, `${name}-seam-check must export ${camel(name)}SeamRatchet`);
@@ -91,7 +91,7 @@ describe("seam-check-lib: the nine Seam checks run on the Ratchet module (issue 
       assert.equal(p.baseline, `scripts/ci/${name}-seam-baseline.json`);
       assert.equal(p.shape, "set");
       assert.equal(p.polarity, "ceiling");
-      assert.equal(p.stale, "fail");
+      assert.notEqual(p.stale, "fail");
       assert.equal(p.enforcement, enforcement);
       assert.ok(Array.isArray(p.help) && p.help.length > 0, "fix wording rides on policy.help");
     });

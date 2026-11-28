@@ -143,6 +143,14 @@ export function rowEnforcement(row: RatchetRow): RatchetEnforcement | undefined 
   return row.kind === "external" ? row.enforcement : undefined;
 }
 
+/**
+ * The row's written reason for `stale: "fail"`, or undefined when the row does not opt in (the
+ * default `hint` policy, an external, or a fixture).
+ */
+export function rowStaleReason(row: RatchetRow): string | undefined {
+  return row.kind === "ratchet" ? row.ratchet.policy.staleReason : undefined;
+}
+
 /** The only lookup: the row that owns `baselinePath`, or undefined for a path no row claims. */
 export function registryRowFor(baselinePath: string): RatchetRow | undefined {
   return RATCHETS.find((row) => rowBaseline(row) === baselinePath);

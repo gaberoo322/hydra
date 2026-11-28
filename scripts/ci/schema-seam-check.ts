@@ -105,7 +105,6 @@ export const schemaSeamRatchet = defineRatchet({
   baseline: "scripts/ci/schema-seam-baseline.json",
   shape: "set",
   polarity: "ceiling",
-  stale: "fail",
   enforcement: "advisory",
   measure: (root) =>
     seamMeasure(root, {

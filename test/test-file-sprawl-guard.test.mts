@@ -237,15 +237,15 @@ describe("test-file sprawl ratchet — growth detection (#4134)", () => {
     assert.equal((await verdictFor(3, { [SUBJECT]: 3 })).ok, true);
   });
 
-  test("consolidating 3->2 leaves a stale row that fails until tightened", async () => {
+  test("consolidating 3->2 leaves a stale row that passes with a hint", async () => {
     const v = await verdictFor(2, { [SUBJECT]: 3 });
-    assert.equal(v.ok, false);
+    assert.equal(v.ok, true, v.advice);
     assert.deepEqual(v.stale, [SUBJECT]);
   });
 
-  test("consolidating 2->1 drops the key, which is stale too", async () => {
+  test("consolidating 2->1 drops the key, which is stale and only hints", async () => {
     const v = await verdictFor(1, { [SUBJECT]: 2 });
-    assert.equal(v.ok, false);
+    assert.equal(v.ok, true, v.advice);
     assert.deepEqual(v.stale, [SUBJECT]);
   });
 });

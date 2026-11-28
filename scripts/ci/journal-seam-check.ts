@@ -124,7 +124,6 @@ export const journalSeamRatchet = defineRatchet({
   baseline: "scripts/ci/journal-seam-baseline.json",
   shape: "set",
   polarity: "ceiling",
-  stale: "fail",
   enforcement: "advisory",
   measure: (root) =>
     seamMeasure(root, {

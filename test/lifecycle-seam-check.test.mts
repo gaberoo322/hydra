@@ -78,10 +78,10 @@ describe("lifecycle-seam-check: ratchet verdicts on a throwaway tree", () => {
     });
   });
 
-  test("a row above the measured count, or a vanished file, is stale and fails", async () => {
+  test("a row above the measured count, or a vanished file, is stale and only hints", async () => {
     await withTree({ [FILE]: 3, "docs/gone.md": 1 }, async (root) => {
       const v = await lifecycleSeamRatchet.verdict(root);
-      assert.equal(v.ok, false);
+      assert.equal(v.ok, true, v.advice);
       assert.deepEqual(v.added, []);
       assert.deepEqual(v.stale, ["docs/gone.md", FILE]);
     });

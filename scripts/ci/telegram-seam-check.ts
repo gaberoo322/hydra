@@ -135,7 +135,6 @@ export const telegramSeamRatchet = defineRatchet({
   baseline: "scripts/ci/telegram-seam-baseline.json",
   shape: "set",
   polarity: "ceiling",
-  stale: "fail",
   enforcement: "advisory",
   measure: (root) =>
     seamMeasure(root, {

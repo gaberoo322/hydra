@@ -103,7 +103,6 @@ export const anthropicSeamRatchet = defineRatchet({
   baseline: "scripts/ci/anthropic-seam-baseline.json",
   shape: "set",
   polarity: "ceiling",
-  stale: "fail",
   enforcement: "advisory",
   measure: (root) =>
     seamMeasure(root, {

@@ -289,7 +289,6 @@ export const duplicateRatchet = defineRatchet({
   baseline: "scripts/ci/playbook-duplicate-baseline.json",
   shape: "counted",
   polarity: "ceiling",
-  stale: "fail",
   enforcement: "required",
   // One bare row per playbook (cross-file spans) and one `<file>\tintra` row (self-repeated spans).
   measure: async (root) => measureTexts(readTexts(root)),

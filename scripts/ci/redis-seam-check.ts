@@ -114,7 +114,6 @@ export const redisSeamRatchet = defineRatchet({
   baseline: "scripts/ci/redis-seam-baseline.json",
   shape: "set",
   polarity: "ceiling",
-  stale: "fail",
   enforcement: "required",
   measure: (root) =>
     seamMeasure(root, {

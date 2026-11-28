@@ -17,7 +17,7 @@ const { defineRatchet, loosening } = await import("../scripts/ci/ratchet.ts");
 const BASELINE = "baseline.json";
 type Shape = "set" | "counted";
 type Polarity = "ceiling" | "floor";
-type Stale = "fail" | "hint";
+type Stale = "fail" | "hint" | "default";
 
 function setup(baseline: unknown | undefined): string {
   const root = mkdtempSync(join(tmpdir(), "ratchet-test-"));
@@ -26,15 +26,11 @@ function setup(baseline: unknown | undefined): string {
 }
 
 function make(shape: Shape, polarity: Polarity, stale: Stale, rows: string[] | (() => Promise<string[]>)) {
-  return defineRatchet({
-    id: "t",
-    baseline: BASELINE,
-    shape,
-    polarity,
-    stale,
-    enforcement: "advisory",
-    measure: typeof rows === "function" ? rows : async () => rows,
-  });
+  const measure = typeof rows === "function" ? rows : async () => rows;
+  const common = { id: "t", baseline: BASELINE, shape, polarity, enforcement: "advisory" as const, measure };
+  if (stale === "fail") return defineRatchet({ ...common, stale: "fail", staleReason: "test: baseline must equal the tree" });
+  if (stale === "hint") return defineRatchet({ ...common, stale: "hint" });
+  return defineRatchet(common);
 }
 
 describe("ratchet: verdict over shape x polarity x stale", () => {
@@ -51,6 +47,11 @@ describe("ratchet: verdict over shape x polarity x stale", () => {
   }> = [
     { name: "set ceiling: new row is added", shape: "set", polarity: "ceiling", stale: "fail", baseline: ["a"], measured: ["a", "b"], ok: false, added: ["b"], staleRows: [] },
     { name: "set ceiling: stale fail", shape: "set", polarity: "ceiling", stale: "fail", baseline: ["a", "b"], measured: ["a"], ok: false, added: [], staleRows: ["b"] },
+    { name: "set ceiling: default policy, a stale row passes with a hint", shape: "set", polarity: "ceiling", stale: "default", baseline: ["a", "b"], measured: ["a"], ok: true, added: [], staleRows: ["b"] },
+    { name: "counted ceiling: default policy, a count that fell passes", shape: "counted", polarity: "ceiling", stale: "default", baseline: { a: 2 }, measured: ["a"], ok: true, added: [], staleRows: ["a"] },
+    { name: "counted ceiling: default policy, a vanished key passes", shape: "counted", polarity: "ceiling", stale: "default", baseline: { a: 1, b: 1 }, measured: ["a"], ok: true, added: [], staleRows: ["b"] },
+    { name: "counted ceiling: default policy, a count that rose still fails", shape: "counted", polarity: "ceiling", stale: "default", baseline: { a: 1 }, measured: ["a", "a"], ok: false, added: ["a"], staleRows: [] },
+    { name: "counted ceiling: default policy, a new key still fails", shape: "counted", polarity: "ceiling", stale: "default", baseline: { a: 1 }, measured: ["a", "b"], ok: false, added: ["b"], staleRows: [] },
     { name: "set ceiling: stale hint passes", shape: "set", polarity: "ceiling", stale: "hint", baseline: ["a", "b"], measured: ["a"], ok: true, added: [], staleRows: ["b"] },
     { name: "set ceiling: a duplicate finding is one row", shape: "set", polarity: "ceiling", stale: "fail", baseline: ["a"], measured: ["a", "a"], ok: true, added: [], staleRows: [] },
     { name: "set floor: a vanished row is added", shape: "set", polarity: "floor", stale: "hint", baseline: ["a", "b"], measured: ["a"], ok: false, added: ["b"], staleRows: [] },
@@ -101,6 +102,9 @@ describe("ratchet: verdict over shape x polarity x stale", () => {
       assert.equal(lenient.ok, true);
       assert.deepEqual(lenient.stale, ["gone"]);
       assert.match(lenient.advice, /hint/);
+      assert.match(lenient.advice, /baseline\.json/);
+      assert.match(lenient.advice, /gone/);
+      assert.match(strict.advice, /test: baseline must equal the tree/);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

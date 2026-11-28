@@ -545,7 +545,6 @@ export const targetCouplingRatchet = defineRatchet({
   baseline: "scripts/ci/target-coupling-baseline.json",
   shape: "set",
   polarity: "ceiling",
-  stale: "fail",
   enforcement: "advisory",
   async measure(root) {
     return (await findViolations(resolve(root))).map(violationKey);

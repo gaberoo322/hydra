@@ -216,6 +216,10 @@ run on at least 10 PRs. If the broader Stryker catalog surfaces no survivors the
 homegrown gate misses, the correct recommendation is **drop**, and that is a
 success outcome for the experiment, not a failure.
 
+### Ratchet stale rows (`scripts/ci/ratchet.ts`)
+
+A ceiling Ratchet passes when a measurement falls below its baseline (or a row vanishes): the verdict stays `ok` and the advice prints a `(hint)` block naming the baseline file and each lowerable row, so an improvement PR need not edit the baseline. A count that rose or a new row still fails. `stale: "fail"` is an explicit opt-in, declarable only with a non-empty `staleReason` (enforced by the `RatchetPolicy` type and by `test/ratchets-live.test.mts`); no registry row opts in today.
+
 ### zizmor finding ratchet (advisory — `advisory-checks.yml`, issue #5640)
 
 **What it does.** `scripts/ci/zizmor-ratchet.ts` reads the scan step's json-v1

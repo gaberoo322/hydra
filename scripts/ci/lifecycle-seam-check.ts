@@ -737,7 +737,6 @@ export const lifecycleSeamRatchet = defineRatchet({
   baseline: LIFECYCLE_SEAM_BASELINE_REL,
   shape: "counted",
   polarity: "ceiling",
-  stale: "fail",
   enforcement: "required",
   help: [
     "Each counted site is a direct lifecycle state-label write. Route the transition through the lifecycle seam:",

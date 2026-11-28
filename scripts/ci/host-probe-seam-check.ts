@@ -137,7 +137,6 @@ export const hostProbeSeamRatchet = defineRatchet({
   baseline: "scripts/ci/host-probe-seam-baseline.json",
   shape: "set",
   polarity: "ceiling",
-  stale: "fail",
   enforcement: "advisory",
   measure: (root) =>
     seamMeasure(root, {

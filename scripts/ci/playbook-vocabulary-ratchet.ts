@@ -340,7 +340,6 @@ export const vocabularyRatchet = defineRatchet({
   baseline: "scripts/ci/playbook-vocabulary-baseline.json",
   shape: "counted",
   polarity: "ceiling",
-  stale: "fail",
   enforcement: "required",
   measure: async (root) => measureRows(root),
   help: [
@@ -389,7 +388,6 @@ export const adrVocabularyRatchet = defineRatchet({
   baseline: "scripts/ci/adr-vocabulary-baseline.json",
   shape: "counted",
   polarity: "ceiling",
-  stale: "fail",
   enforcement: "required",
   measure: async (root) => measureAdrRows(root),
   help: [

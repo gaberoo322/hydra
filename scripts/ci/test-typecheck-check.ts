@@ -123,7 +123,6 @@ export const typecheckRatchet = defineRatchet({
   baseline: "scripts/ci/test-typecheck-baseline.json",
   shape: "counted",
   polarity: "ceiling",
-  stale: "fail",
   enforcement: "required",
   async measure(root) {
     const output = await runTsc(resolve(root));
