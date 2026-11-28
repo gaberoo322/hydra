@@ -15,7 +15,6 @@
 
 import type { ReviewFindingArm } from "./review-findings-extract.ts";
 import { RETENTION_DAYS } from "./review-findings-extract.ts";
-import { REVIEW_CUE } from "../retro-inputs.ts";
 import type { RetroSeenEntry } from "../redis/retro-seen.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -23,15 +22,13 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 /** A slug whose newest emit is below `fence` re-trips only after this many days. */
 export const REVIEW_RETRIP_MIN_DAYS = 7;
 /** At most this many check-rung issues per review pass. */
-export const REVIEW_ISSUE_CAP = 2;
-/** At most this many PRs per review pass (standard and fence share the slot). */
-export const REVIEW_PR_CAP = 1;
+const REVIEW_ISSUE_CAP = 2;
 
-export const REVIEW_LADDER = ["check", "standard", "fence"] as const;
+const REVIEW_LADDER = ["check", "standard", "fence"] as const;
 export type ReviewRung = (typeof REVIEW_LADDER)[number];
 
 /** The only paths a review-mode PR may touch. */
-export const REVIEW_PR_ALLOWED_PATHS: readonly string[] = ["CODING_STANDARDS.md", "CLAUDE.md"];
+const REVIEW_PR_ALLOWED_PATHS: readonly string[] = ["CODING_STANDARDS.md", "CLAUDE.md"];
 
 /** lowercase, non-[a-z0-9] runs -> `-`, trimmed of leading/trailing `-`. */
 export function slugify(raw: string): string {
@@ -69,10 +66,6 @@ export function cohortTripSlug(baselineGeneratedAt: string): string {
 
 export function reviewCue(rung: ReviewRung | "mechanical", slug: string): string {
   return `review:${rung}:${slug}`;
-}
-
-export function isReviewCue(cue: string): boolean {
-  return REVIEW_CUE.test(cue);
 }
 
 /** The highest ladder-rung seen entry for `slug`, or null. */
@@ -128,14 +121,14 @@ export function deriveReviewRetroDue(
   return { due: candidates.length > 0, candidates };
 }
 
-export interface PlannedReviewEmit {
+interface PlannedReviewEmit {
   cue: string;
   slug: string;
   rung: ReviewRung;
   arm: ReviewFindingArm;
 }
 
-export type ReviewSkipReason =
+type ReviewSkipReason =
   | "ladder-exhausted"
   | "prior-emit-open"
   | "review-issue-cap-reached"

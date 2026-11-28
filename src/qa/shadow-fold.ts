@@ -27,14 +27,11 @@ type Door = OneWayDoorResult["door"];
 type Verdict = FindingsFoldResult["reviewVerdict"];
 
 // NAMED FOLLOW-UP: wire shadowFold + renderQaShadowLine into the fold phase and ask pair reviewers for a door call (P2 #5264, INV-9).
-/** Machine-checkable (code-level) form of the follow-up marker above. */
-export const SHADOW_FOLD_WIRING_FOLLOW_UP =
-  "NAMED FOLLOW-UP: wire shadowFold + renderQaShadowLine into the fold phase (P2 #5264, INV-9)";
-export const QA_SHADOW_PREFIX = "QA-Shadow:";
-export const QA_SHADOW_UNKNOWN_SHA = "unknown";
+const QA_SHADOW_PREFIX = "QA-Shadow:";
+const QA_SHADOW_UNKNOWN_SHA = "unknown";
 
 /** Reviewers added by the one-way top-up (the pair stays as `primary`). */
-export const TOP_UP_REVIEWERS: readonly string[] = ["reviewer-B-standards", "reviewer-B-spec"];
+const TOP_UP_REVIEWERS: readonly string[] = ["reviewer-B-standards", "reviewer-B-spec"];
 
 export interface ShadowFoldInput {
   tier: number | null;
@@ -49,14 +46,14 @@ export interface ShadowFoldInput {
   reviewerDoors?: Record<string, Door | null | undefined> | null;
 }
 
-export interface PairMissRow {
+interface PairMissRow {
   severity: FoldedFinding["severity"];
   axis: FoldedFinding["axis"];
   location: string;
   reviewers: string[];
 }
 
-export type Counterfactual =
+type Counterfactual =
   | { applicable: false; reason: string }
   | {
       applicable: true;
@@ -77,14 +74,14 @@ export type Counterfactual =
       verdictFlipped: boolean;
     };
 
-export interface TopUp {
+interface TopUp {
   required: boolean;
   mode?: "adversarial";
   addReviewers?: string[];
   reason: string;
 }
 
-export interface DetectorGap {
+interface DetectorGap {
   reviewer: string;
   reviewerDoor: Door;
   detectorDoor: "two-way" | null;

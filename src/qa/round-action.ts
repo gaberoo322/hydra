@@ -156,7 +156,7 @@ export function decideRound(input: DecideRoundInput): DecideRoundResult {
 // src/qa/phases.ts and the playbook's step 9.4.
 // ---------------------------------------------------------------------------
 
-export type ReviewerCommitReason =
+type ReviewerCommitReason =
   | "stage-off"
   | "tier-fence"
   | "verifier-core"
