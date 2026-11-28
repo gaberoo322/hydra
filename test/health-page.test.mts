@@ -106,7 +106,10 @@ describe("GET /health — trust fields (issue #4008)", () => {
   });
 
   beforeEach(async () => {
-    const keys = await redis.keys("hydra:*");
+    // Spare the lifecycle journal lists: test/lifecycle-journal.test.mts appends
+    // 505 entries to one key and a wipe landing mid-loop leaves 200 (#5817). This
+    // file never writes a journal, so there is nothing of its own to clear there.
+    const keys = (await redis.keys("hydra:*")).filter((k: string) => !k.startsWith("hydra:lifecycle:journal:"));
     if (keys.length > 0) await redis.del(...keys);
   });
 
